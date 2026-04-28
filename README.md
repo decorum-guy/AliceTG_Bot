@@ -253,22 +253,19 @@ http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer
 
 ## Current Home Assistant Automation
 
-Use this section as the source of truth. Remove the old Telegram automation blocks before adding these.
+Use this section as the source of truth. Replace the coffee-related Home Assistant YAML with the complete blocks below. Keep secrets in `secrets.yaml`; do not paste secret values into git.
 
-Existing IDs to replace or remove:
+The active automation IDs are:
 
-- Replace `ask_sonya_about_coffee` fully with the complete `automations.yaml` content below.
-- Replace `tg_sonya_wants_coffee_answer` with the complete `automations.yaml` content below.
-- Delete old `tg_sonya_coffee_type_answer`.
-- Delete old `tg_sonya_direct_coffee_type_answer`.
-- Replace `tg_sonya_direct_coffee_request` with the block below.
-
-The split flow now uses these IDs:
-
+- `ask_sonya_about_coffee`
+- `tg_sonya_wants_coffee_answer`
 - `tg_sonya_temperature_answer`
 - `tg_sonya_syrup_answer`
+- `tg_sonya_direct_coffee_request`
 - `tg_sonya_direct_temperature_answer`
 - `tg_sonya_direct_syrup_answer`
+
+Old pre-split coffee automations should be removed before pasting this file so there are no duplicate handlers.
 
 Add helpers to `configuration.yaml`:
 
@@ -354,7 +351,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
       target:
         entity_id: media_player.stantsiia_mini_spalnia
       data:
-        media_content_id: "Соня, тебя спрашивают, хочешь ли ты кофе?"
+        media_content_id: "Соня, тебя спрашивают: будешь кофе?"
         media_content_type: "dialog:домашний помощник:ask_sonya_wants_coffee"
     - wait_for_trigger:
         - platform: event
@@ -502,6 +499,13 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set dialog = session.dialog | default('') %}
         {{ dialog == 'tg_ask_sonya_wants_coffee' }}
   action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_coffee_temperature
+          - input_boolean.tg_awaiting_sonya_coffee_syrup
+          - input_boolean.sonya_direct_awaiting_coffee_temperature
+          - input_boolean.sonya_direct_awaiting_coffee_syrup
     - variables:
         answer: "{{ trigger.event.data.text | default('') }}"
         intent: "{{ trigger.event.data.intent | default('') }}"
@@ -525,9 +529,12 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
-        {{ not is_service_phrase and (dialog == 'tg_ask_sonya_coffee_temperature'
-           or (is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
-               and ('холод' in text or 'горяч' in text))) }}
+        {% set direct_active = is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on') or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') %}
+        {{ not is_service_phrase
+           and not direct_active
+           and (dialog == 'tg_ask_sonya_coffee_temperature'
+                or (is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
+                    and ('холод' in text or 'горяч' in text))) }}
   action:
     - action: input_boolean.turn_off
       target:
@@ -555,9 +562,12 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set direct_active = is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on') or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') %}
         {% set is_valid_syrup = 'сироп' in text or 'без' in text or text in ['да', 'нет', 'хочу', 'не хочу'] %}
-        {{ not is_service_phrase and (dialog == 'tg_ask_sonya_coffee_syrup'
-           or (is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on') and is_valid_syrup)) }}
+        {{ not is_service_phrase
+           and not direct_active
+           and (dialog == 'tg_ask_sonya_coffee_syrup'
+                or (is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on') and is_valid_syrup)) }}
   action:
     - action: input_boolean.turn_off
       target:
@@ -585,7 +595,14 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set any_active = is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
+           or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') %}
+        {% set intermediate = text in ['горячий', 'холодный', 'горячий кофе', 'холодный кофе', 'с сиропом', 'без сиропа', 'без', 'да', 'нет'] %}
         {{ not is_service_phrase
+           and not any_active
+           and not intermediate
            and 'кофе' in text
            and 'спроси сон' not in text
            and 'узнай' not in text
@@ -600,6 +617,13 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
              'sonya_direct_coffee_syrup'
            ] }}
   action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_coffee_temperature
+          - input_boolean.tg_awaiting_sonya_coffee_syrup
+          - input_boolean.sonya_direct_awaiting_coffee_temperature
+          - input_boolean.sonya_direct_awaiting_coffee_syrup
     - action: input_boolean.turn_on
       target:
         entity_id: input_boolean.sonya_direct_awaiting_coffee_temperature
@@ -623,9 +647,12 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
-        {{ not is_service_phrase and (dialog == 'sonya_direct_coffee_temperature'
-           or (is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
-               and ('холод' in text or 'горяч' in text))) }}
+        {% set tg_active = is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on') %}
+        {{ not is_service_phrase
+           and not tg_active
+           and (dialog == 'sonya_direct_coffee_temperature'
+                or (is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
+                    and ('холод' in text or 'горяч' in text))) }}
   action:
     - action: input_boolean.turn_off
       target:
@@ -653,9 +680,12 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set tg_active = is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on') %}
         {% set is_valid_syrup = 'сироп' in text or 'без' in text or text in ['да', 'нет', 'хочу', 'не хочу'] %}
-        {{ not is_service_phrase and (dialog == 'sonya_direct_coffee_syrup'
-           or (is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') and is_valid_syrup)) }}
+        {{ not is_service_phrase
+           and not tg_active
+           and (dialog == 'sonya_direct_coffee_syrup'
+                or (is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') and is_valid_syrup)) }}
   action:
     - action: input_boolean.turn_off
       target:

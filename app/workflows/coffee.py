@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import time
 from dataclasses import dataclass
 
 from aiogram.types import InlineKeyboardMarkup
@@ -29,6 +30,12 @@ TG_AWAITING_TEMPERATURE = "input_boolean.tg_awaiting_sonya_coffee_temperature"
 TG_AWAITING_SYRUP = "input_boolean.tg_awaiting_sonya_coffee_syrup"
 DIRECT_AWAITING_TEMPERATURE = "input_boolean.sonya_direct_awaiting_coffee_temperature"
 DIRECT_AWAITING_SYRUP = "input_boolean.sonya_direct_awaiting_coffee_syrup"
+ALL_COFFEE_WAIT_FLAGS = (
+    TG_AWAITING_TEMPERATURE,
+    TG_AWAITING_SYRUP,
+    DIRECT_AWAITING_TEMPERATURE,
+    DIRECT_AWAITING_SYRUP,
+)
 
 
 @dataclass(frozen=True)
@@ -81,11 +88,14 @@ class CoffeeWorkflow:
         self._tg_draft = CoffeeDraft()
         self._direct_draft = CoffeeDraft()
         self._sonya_orders: dict[int, CoffeeDraft] = {}
+        self._recent_event_keys: dict[str, float] = {}
+        self._dedupe_ttl_seconds = 5.0
 
     async def start_telegram_question(self, chat_id: int, message_id: int | None) -> int | None:
+        await self._clear_all_wait_flags()
         await self._ha.play_media(
             self._settings.bedroom_player_entity,
-            "Соня, тебя спрашивают, хочешь ли ты кофе?",
+            "Соня, тебя спрашивают: будешь кофе?",
             TG_WANTS_DIALOG,
         )
         edited_id = await self._telegram_messages.safe_edit(
@@ -98,12 +108,16 @@ class CoffeeWorkflow:
         return edited_id
 
     async def handle_wants_answer(self, answer: SonyaAnswer) -> None:
+        if self._is_duplicate_event("wants", answer):
+            return
+
         text = answer.answer.strip()
         normalized = text.lower()
         intent = answer.intent.strip()
         LOGGER.info("Sonya wants-coffee answer received: dialog=%s intent=%s answer=%r", answer.dialog, intent, text)
 
         if intent == "YANDEX.REJECT" or any(word in normalized for word in NEGATIVE_WORDS):
+            await self._clear_all_wait_flags()
             await self._edit_active_or_send("Соня отказалась от кофе. Не включаю кофемашину.", delete_only())
             await self._show_admin_menu()
             return
@@ -121,6 +135,7 @@ class CoffeeWorkflow:
         coffee_type = normalize_coffee_answer(shown)
         context = CoffeeMessageContext(coffee_type=coffee_type)
         self._latest_context = context
+        await self._clear_all_wait_flags()
         await self._edit_active_or_send(
             f"Соня ответила: {_h(shown)}. Включить кофемашину?",
             confirmation(),
@@ -128,6 +143,9 @@ class CoffeeWorkflow:
         )
 
     async def handle_temperature_answer(self, answer: SonyaAnswer, *, direct: bool) -> None:
+        if self._is_duplicate_event("temperature", answer):
+            return
+
         draft = self._direct_draft if direct else self._tg_draft
         draft.temperature = normalize_temperature(answer.answer)
         LOGGER.info("Sonya temperature received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
@@ -142,6 +160,9 @@ class CoffeeWorkflow:
         await self._ask_syrup(direct=direct)
 
     async def handle_syrup_answer(self, answer: SonyaAnswer, *, direct: bool) -> None:
+        if self._is_duplicate_event("syrup", answer):
+            return
+
         draft = self._direct_draft if direct else self._tg_draft
         draft.syrup = normalize_syrup(answer.answer)
         context = context_from_draft(draft)
@@ -151,6 +172,7 @@ class CoffeeWorkflow:
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
 
+        await self._clear_all_wait_flags()
         await self._edit_active_or_send(
             order_confirmation_text(context),
             confirmation(),
@@ -158,8 +180,12 @@ class CoffeeWorkflow:
         )
 
     async def notify_auto_enabled(self, answer: SonyaAnswer) -> None:
+        if self._is_duplicate_event("auto_enabled", answer):
+            return
+
         context = context_from_text(answer.answer)
         self._latest_context = context
+        await self._clear_all_wait_flags()
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
             auto_enabled_text(context),
@@ -168,6 +194,7 @@ class CoffeeWorkflow:
 
     async def confirm_turn_on(self, chat_id: int, message_id: int | None) -> int | None:
         context = self._context_for_message(message_id)
+        await self._clear_all_wait_flags()
         await self._ha.switch_turn_on(self._settings.coffee_switch_entity)
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
@@ -182,6 +209,7 @@ class CoffeeWorkflow:
 
     async def confirm_decline(self, chat_id: int, message_id: int | None) -> int | None:
         context = self._context_for_message(message_id)
+        await self._clear_all_wait_flags()
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
@@ -194,6 +222,7 @@ class CoffeeWorkflow:
 
     async def schedule_reminder(self, chat_id: int, minutes: int, message_id: int | None = None) -> None:
         context = self._context_for_message(message_id)
+        await self._clear_all_wait_flags()
         reminder = Reminder(
             chat_id=chat_id,
             minutes=minutes,
@@ -233,7 +262,7 @@ class CoffeeWorkflow:
         return context.coffee_type
 
     async def _ask_temperature(self, *, direct: bool) -> None:
-        await self._ha.input_boolean_turn_on(DIRECT_AWAITING_TEMPERATURE if direct else TG_AWAITING_TEMPERATURE)
+        await self._set_only_wait_flag(DIRECT_AWAITING_TEMPERATURE if direct else TG_AWAITING_TEMPERATURE)
         await self._ha.play_media(
             self._settings.bedroom_player_entity,
             "Какой кофе ты хочешь: горячий или холодный?",
@@ -241,7 +270,7 @@ class CoffeeWorkflow:
         )
 
     async def _ask_syrup(self, *, direct: bool) -> None:
-        await self._ha.input_boolean_turn_on(DIRECT_AWAITING_SYRUP if direct else TG_AWAITING_SYRUP)
+        await self._set_only_wait_flag(DIRECT_AWAITING_SYRUP if direct else TG_AWAITING_SYRUP)
         await self._ha.play_media(
             self._settings.bedroom_player_entity,
             "С сиропом или без?",
@@ -288,6 +317,42 @@ class CoffeeWorkflow:
         if message_id is not None and message_id in self._context_by_message_id:
             return self._context_by_message_id[message_id]
         return self._latest_context or CoffeeMessageContext(coffee_type="кофе")
+
+    async def _set_only_wait_flag(self, entity_id: str) -> None:
+        await self._clear_all_wait_flags()
+        try:
+            await self._ha.input_boolean_turn_on(entity_id)
+        except HomeAssistantError:
+            LOGGER.exception("Cannot enable coffee wait flag: %s", entity_id)
+
+    async def _clear_all_wait_flags(self) -> None:
+        for entity_id in ALL_COFFEE_WAIT_FLAGS:
+            try:
+                await self._ha.input_boolean_turn_off(entity_id)
+            except HomeAssistantError:
+                LOGGER.exception("Cannot clear coffee wait flag: %s", entity_id)
+
+    def _is_duplicate_event(self, step: str, answer: SonyaAnswer) -> bool:
+        now = time.monotonic()
+        self._recent_event_keys = {
+            key: seen_at
+            for key, seen_at in self._recent_event_keys.items()
+            if now - seen_at <= self._dedupe_ttl_seconds
+        }
+        normalized_answer = " ".join(answer.answer.strip().lower().split())
+        normalized_intent = answer.intent.strip()
+        key = f"{step}:{normalized_answer}:{normalized_intent}"
+        if key in self._recent_event_keys:
+            LOGGER.info(
+                "Duplicate coffee event ignored: step=%s dialog=%s intent=%s answer=%r",
+                step,
+                answer.dialog,
+                answer.intent,
+                answer.answer,
+            )
+            return True
+        self._recent_event_keys[key] = now
+        return False
 
     async def _say_bedroom(self, text: str) -> None:
         try:
