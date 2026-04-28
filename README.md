@@ -5,7 +5,9 @@ Telegram assistant for Home Assistant. The bot is named **Алиса** and speak
 ## Features
 
 - aiogram 3 Telegram webhook bot.
-- aiohttp server on port `8088`.
+- aiogram 3 Telegram bot in polling mode by default.
+- Optional webhook mode.
+- aiohttp server on port `8088` for health and internal endpoints.
 - Telegram webhook endpoint: `/webhook` behind Caddy path `/tg/webhook`.
 - Internal Home Assistant endpoint: `/internal/coffee/sonya-answer` behind Caddy path `/tg/internal/coffee/sonya-answer`.
 - Home Assistant REST API client.
@@ -21,7 +23,7 @@ No Redis, Postgres, Node-RED, Grafana, InfluxDB, or MariaDB are used.
 
 ## Telegram Proxy
 
-For Russia, outgoing requests from the bot to Telegram Bot API are usually blocked without a proxy.
+For Russia, use `TELEGRAM_MODE=polling` and a proxy. Outgoing requests from the bot to Telegram Bot API are usually blocked without a proxy.
 
 Set:
 
@@ -38,6 +40,33 @@ http://login:pass@host:port
 The proxy is used only for Telegram API requests through aiogram `AiohttpSession`. Home Assistant API requests do not use this proxy. The proxy value is not logged because it contains credentials.
 
 If `TELEGRAM_PROXY` is empty, the bot works without proxy.
+
+## Telegram Mode
+
+Default mode is polling:
+
+```env
+TELEGRAM_MODE=polling
+TELEGRAM_DROP_PENDING_UPDATES=true
+TELEGRAM_POLLING_TIMEOUT=30
+TELEGRAM_POLLING_MAX_ERRORS=10
+```
+
+Polling uses the same `TELEGRAM_PROXY` for Telegram API requests. The aiohttp server still starts in polling mode, so `/health` and `/internal/*` endpoints remain available.
+
+If polling gets repeated network errors or reconnect failures, the bot logs the exception. When consecutive polling errors reach `TELEGRAM_POLLING_MAX_ERRORS`, the process exits with code `1`. Docker `restart: unless-stopped` then restarts the container.
+
+Webhook mode is optional:
+
+```env
+TELEGRAM_MODE=webhook
+```
+
+In webhook mode, configure Telegram webhook to:
+
+```text
+https://ha.myhomeassistantisverybest.art/tg/webhook
+```
 
 ## Styled Buttons
 
@@ -59,6 +88,10 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=
 TELEGRAM_ALLOWED_USER_IDS=
 TELEGRAM_ADMIN_CHAT_ID=
+TELEGRAM_MODE=polling
+TELEGRAM_DROP_PENDING_UPDATES=true
+TELEGRAM_POLLING_TIMEOUT=30
+TELEGRAM_POLLING_MAX_ERRORS=10
 
 # HTTP proxy for Telegram API requests only.
 TELEGRAM_PROXY=login:pass@host:port
@@ -158,7 +191,9 @@ ha.myhomeassistantisverybest.art {
 
 ## Set Telegram Webhook
 
-Run from the server after `.env` is filled:
+Webhook is optional. For Russia, polling is usually simpler and more reliable because the bot makes outgoing requests through `TELEGRAM_PROXY`.
+
+If you switch to `TELEGRAM_MODE=webhook`, run from the server after `.env` is filled:
 
 ```bash
 set -a

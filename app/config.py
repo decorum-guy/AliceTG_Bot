@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 COFFEE_SENSORS: dict[str, str] = {
@@ -29,12 +30,23 @@ def _telegram_proxy_url(value: str) -> str | None:
     return f"http://{value}"
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
     telegram_webhook_secret: str
     telegram_allowed_user_ids: set[int]
     telegram_admin_chat_id: int
+    telegram_mode: Literal["polling", "webhook"]
+    telegram_drop_pending_updates: bool
+    telegram_polling_timeout: int
+    telegram_polling_max_errors: int
     telegram_proxy: str | None
     ha_url: str
     ha_long_lived_token: str
@@ -53,11 +65,19 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        telegram_mode = os.getenv("TELEGRAM_MODE", "polling").strip().lower()
+        if telegram_mode not in {"polling", "webhook"}:
+            raise RuntimeError("TELEGRAM_MODE must be polling or webhook")
+
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
             telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
             telegram_allowed_user_ids=_split_ids(_required("TELEGRAM_ALLOWED_USER_IDS")),
             telegram_admin_chat_id=int(_required("TELEGRAM_ADMIN_CHAT_ID")),
+            telegram_mode=telegram_mode,  # type: ignore[arg-type]
+            telegram_drop_pending_updates=_bool_env("TELEGRAM_DROP_PENDING_UPDATES", True),
+            telegram_polling_timeout=int(os.getenv("TELEGRAM_POLLING_TIMEOUT", "30")),
+            telegram_polling_max_errors=int(os.getenv("TELEGRAM_POLLING_MAX_ERRORS", "10")),
             telegram_proxy=os.getenv("TELEGRAM_PROXY", ""),
             ha_url=os.getenv("HA_URL", "http://homeassistant:8123").rstrip("/"),
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
