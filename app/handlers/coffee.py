@@ -155,17 +155,6 @@ async def coffee_later(
     await callback.answer("Я напомню позже")
 
 
-@router.callback_query(F.data == "sonya_order:tea")
-async def sonya_order_tea(callback: CallbackQuery, settings: Settings) -> None:
-    if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
-        return
-
-    if callback.message:
-        await callback.message.edit_text("Чай я добавлю чуть позже.", reply_markup=sonya_order_menu())
-    await callback.answer()
-
-
 @router.callback_query(F.data == "sonya_order:coffee")
 async def sonya_order_coffee(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_sonya_user(callback.from_user.id):

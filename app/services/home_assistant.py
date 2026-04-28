@@ -50,6 +50,16 @@ class HomeAssistantClient:
     async def switch_turn_off(self, entity_id: str) -> None:
         await self.call_service("switch", "turn_off", {"entity_id": entity_id})
 
+    async def water_heater_set_temperature(self, entity_id: str, temperature: int) -> None:
+        await self.call_service("water_heater", "set_temperature", {"entity_id": entity_id, "temperature": temperature})
+
+    async def water_heater_set_operation_mode(self, entity_id: str, operation_mode: str) -> None:
+        await self.call_service(
+            "water_heater",
+            "set_operation_mode",
+            {"entity_id": entity_id, "operation_mode": operation_mode},
+        )
+
     async def input_boolean_turn_on(self, entity_id: str) -> None:
         await self.call_service("input_boolean", "turn_on", {"entity_id": entity_id})
 

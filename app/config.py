@@ -57,6 +57,10 @@ class Settings:
     listen_host: str = "0.0.0.0"
     listen_port: int = 8088
     coffee_switch_entity: str = "switch.kofemashina"
+    kettle_entity: str = "water_heater.chainik"
+    kettle_keep_warm_switch_entity: str = "switch.chainik_podderzhanie_tepla"
+    kettle_light_switch_entity: str = "switch.chainik_podsvetka"
+    kettle_mute_switch_entity: str = "switch.chainik_bez_zvuka"
     bedroom_player_entity: str = "media_player.stantsiia_mini_spalnia"
     living_room_player_entity: str = "media_player.stantsiia_mini_zal"
     coffee_sensors: dict[str, str] = field(default_factory=lambda: COFFEE_SENSORS.copy())

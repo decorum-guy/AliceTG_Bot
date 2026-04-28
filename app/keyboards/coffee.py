@@ -11,7 +11,7 @@ def coffee_status(is_on: bool) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text=label, callback_data=action, style=action_style)],
             [inline_button(text="🔄 Обновить", callback_data="coffee:status", style=BUTTON_PRIMARY)],
-            [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
+            [inline_button(text="⬅️ Назад", callback_data="devices:menu", style=BUTTON_PRIMARY)],
         ]
     )
 
@@ -20,6 +20,7 @@ def sonya_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [inline_button(text="Хочет ли кофе?", callback_data="sonya:ask_coffee")],
+            [inline_button(text="Хочет ли чай?", callback_data="sonya:ask_tea")],
             [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
         ]
     )

@@ -3,7 +3,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from app.config import Settings
-from app.keyboards.main import main_menu, sonya_order_menu
+from app.keyboards.main import main_menu, smart_devices_menu, sonya_order_menu
 
 router = Router()
 
@@ -42,6 +42,17 @@ async def menu_main(callback: CallbackQuery, settings: Settings) -> None:
 
     if callback.message:
         await callback.message.edit_text("Я Алиса. Чем займёмся дома?", reply_markup=main_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "devices:menu")
+async def devices_menu(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text("Умные устройства", reply_markup=smart_devices_menu())
     await callback.answer()
 
 

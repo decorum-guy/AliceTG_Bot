@@ -6,8 +6,18 @@ from app.keyboards.styles import BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SUCCESS, 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [inline_button(text="☕ Кофемашина", callback_data="coffee:status")],
+            [inline_button(text="🏠 Умные устройства", callback_data="devices:menu")],
             [inline_button(text="🗣 Спросить Соню", callback_data="sonya:menu")],
+        ]
+    )
+
+
+def smart_devices_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text="☕ Кофемашина", callback_data="coffee:status")],
+            [inline_button(text="🍵 Чайник", callback_data="kettle:status")],
+            [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
         ]
     )
 
