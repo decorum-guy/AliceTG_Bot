@@ -15,8 +15,8 @@ def main_menu() -> InlineKeyboardMarkup:
 def sonya_order_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [inline_button(text="☕ Заказать кофе", callback_data="sonya_order:coffee")],
-            [inline_button(text="🫖 Заказать чай", callback_data="sonya_order:tea")],
+            [inline_button(text="☕️ Кофе", callback_data="sonya_order:coffee")],
+            [inline_button(text="🍵 Чай", callback_data="sonya_order:tea")],
         ]
     )
 

@@ -270,6 +270,9 @@ Old pre-split coffee automations should be removed before pasting this file so t
 Runtime behavior:
 
 - Telegram-initiated coffee flow may edit the active Telegram message after each step.
+- Sonya Telegram order uses `source=sonya_telegram_order`, so the bedroom does not say `Твой кофе скоро будет готов` after Artem presses `Да`.
+- Sonya sees only her short order menu: `☕️ Кофе` and `🍵 Чай`.
+- Voice-based coffee flows say a short bedroom acknowledgement after syrup, for example `Хорошо, горячий кофе без сиропа, поняла.` Confirmation speech is delayed briefly so it does not overlap.
 - Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
 - Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, auto-enables the coffee machine after a positive answer, and sends Telegram only an info notification with `Удалить уведомление`.
 - If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all coffee wait flags through Home Assistant.
@@ -511,6 +514,12 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                             syrup_answer: "{{ wait.trigger.event.data.text | default('') | lower }}"
                             coffee_syrup: >-
                               {% if 'не хочу' in syrup_answer or 'нет' in syrup_answer or 'без' in syrup_answer %}без сиропа{% elif syrup_answer in ['да', 'хочу'] or 'сироп' in syrup_answer %}с сиропом{% else %}{{ syrup_answer }}{% endif %}
+                    - action: media_player.play_media
+                      target:
+                        entity_id: media_player.stantsiia_mini_spalnia
+                      data:
+                        media_content_id: "Хорошо, {{ coffee_temperature }} {{ coffee_syrup }}, поняла."
+                        media_content_type: "text"
                     - action: input_boolean.turn_off
                       target:
                         entity_id:

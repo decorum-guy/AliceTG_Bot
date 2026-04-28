@@ -70,6 +70,10 @@ class CoffeeMessageContext:
     temperature: str | None = None
     syrup: str | None = None
     is_reminder: bool = False
+    source: str = "voice"
+    speak_to_bedroom_on_confirm: bool = True
+    speak_to_bedroom_on_decline: bool = True
+    bedroom_ack_enabled: bool = False
 
 
 class CoffeeWorkflow:
@@ -173,10 +177,10 @@ class CoffeeWorkflow:
 
         draft = self._direct_draft if direct else self._tg_draft
         draft.syrup = normalize_syrup(answer.answer)
-        context = context_from_draft(draft)
+        flow_type = "direct" if direct else "telegram"
+        context = context_from_draft(draft, source=flow_type, bedroom_ack_enabled=True)
         self._latest_context = context
         LOGGER.info("Sonya syrup received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
-        flow_type = "direct" if direct else "telegram"
         self._log_step(flow_type, "syrup", draft.syrup or answer.answer, "received answer")
 
         if direct:
@@ -188,6 +192,7 @@ class CoffeeWorkflow:
             confirmation(),
             context=context,
         )
+        await self._say_bedroom_ack(context)
 
     async def notify_auto_enabled(self, answer: SonyaAnswer) -> None:
         if self._is_duplicate_event("auto_enabled", answer):
@@ -224,7 +229,7 @@ class CoffeeWorkflow:
 
     async def confirm_turn_on(self, chat_id: int, message_id: int | None) -> int | None:
         context = self._context_for_message(message_id)
-        self._log_step("telegram", "confirm", context.coffee_type, "turn on")
+        self._log_step("telegram", "confirm", context.coffee_type, f"turn on source={context.source}")
         await self._clear_all_wait_flags()
         await self._ha.switch_turn_on(self._settings.coffee_switch_entity)
         edited_id = await self._telegram_messages.safe_edit(
@@ -233,14 +238,14 @@ class CoffeeWorkflow:
             f"Я включила кофемашину. Соня просила: {_h(context.coffee_type)}.",
             delete_only(),
         )
-        if not context.is_reminder:
-            await self._say_bedroom("Твой кофе скоро будет готов.")
+        if context.speak_to_bedroom_on_confirm:
+            self._schedule_bedroom_speech("Твой кофе скоро будет готов.", delay_seconds=2.0)
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
     async def confirm_decline(self, chat_id: int, message_id: int | None) -> int | None:
         context = self._context_for_message(message_id)
-        self._log_step("telegram", "confirm", context.coffee_type, "decline")
+        self._log_step("telegram", "confirm", context.coffee_type, f"decline source={context.source}")
         await self._clear_all_wait_flags()
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
@@ -248,7 +253,8 @@ class CoffeeWorkflow:
             f"Я не включаю кофемашину. Соня просила: {_h(context.coffee_type)}.",
             delete_only(),
         )
-        await self._say_bedroom("Артём пока не включает кофемашину.")
+        if context.speak_to_bedroom_on_decline:
+            self._schedule_bedroom_speech("Артём пока не включает кофемашину.", delay_seconds=2.0)
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
@@ -282,7 +288,13 @@ class CoffeeWorkflow:
 
     async def submit_sonya_order(self, user_id: int) -> str:
         draft = self._sonya_orders.get(user_id, CoffeeDraft())
-        context = context_from_draft(draft)
+        context = context_from_draft(
+            draft,
+            source="sonya_telegram_order",
+            speak_to_bedroom_on_confirm=False,
+            speak_to_bedroom_on_decline=False,
+        )
+        self._latest_context = context
         message_id = await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
             order_confirmation_text(context),
@@ -317,6 +329,9 @@ class CoffeeWorkflow:
                 temperature=reminder.coffee_temperature,
                 syrup=reminder.coffee_syrup,
                 is_reminder=True,
+                source="reminder",
+                speak_to_bedroom_on_confirm=False,
+                speak_to_bedroom_on_decline=False,
             )
             message_id = await self._telegram_messages.safe_send(
                 reminder.chat_id,
@@ -423,6 +438,22 @@ class CoffeeWorkflow:
         except HomeAssistantError:
             LOGGER.exception("Cannot speak through bedroom media player")
 
+    def _schedule_bedroom_speech(self, text: str, *, delay_seconds: float) -> None:
+        async def delayed_speech() -> None:
+            await asyncio.sleep(delay_seconds)
+            await self._say_bedroom(text)
+
+        task = asyncio.create_task(delayed_speech())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _say_bedroom_ack(self, context: CoffeeMessageContext) -> None:
+        if not context.bedroom_ack_enabled:
+            return
+
+        syrup = context.syrup or "без сиропа"
+        await self._say_bedroom(f"Хорошо, {context.temperature or context.coffee_type} {syrup}, поняла.")
+
     async def _show_admin_menu(self) -> None:
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
@@ -450,11 +481,22 @@ def normalize_coffee_answer(answer: str) -> str:
     return normalized
 
 
-def context_from_draft(draft: CoffeeDraft) -> CoffeeMessageContext:
+def context_from_draft(
+    draft: CoffeeDraft,
+    *,
+    source: str = "voice",
+    speak_to_bedroom_on_confirm: bool = True,
+    speak_to_bedroom_on_decline: bool = True,
+    bedroom_ack_enabled: bool = False,
+) -> CoffeeMessageContext:
     return CoffeeMessageContext(
         coffee_type=normalize_coffee_answer(draft.order_text()),
         temperature=draft.temperature,
         syrup=draft.syrup,
+        source=source,
+        speak_to_bedroom_on_confirm=speak_to_bedroom_on_confirm,
+        speak_to_bedroom_on_decline=speak_to_bedroom_on_decline,
+        bedroom_ack_enabled=bedroom_ack_enabled,
     )
 
 
