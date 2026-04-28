@@ -7,8 +7,8 @@ from typing import Literal
 
 COFFEE_SENSORS: dict[str, str] = {
     "voltage": "sensor.kofemashina_tekushchee_napriazhenie",
-    "power": "",
-    "current": "",
+    "power": "sensor.kofemashina_potrebliaemaia_moshchnost",
+    "current": "sensor.kofemashina_potreblenie_toka",
 }
 
 
