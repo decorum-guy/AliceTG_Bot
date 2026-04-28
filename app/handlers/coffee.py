@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from app.config import Settings
-from app.keyboards.coffee import coffee_status, delete_only, later_options, sonya_menu
+from app.keyboards.coffee import coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
@@ -32,7 +33,7 @@ async def show_coffee_status(
     text, is_on = await _coffee_status_text(settings, ha)
     if callback.message:
         await telegram_messages.safe_edit(callback.message.chat.id, callback.message.message_id, text, coffee_status(is_on))
-    await callback.answer()
+    await callback.answer("Обновила")
 
 
 @router.callback_query(F.data.in_({"coffee:turn_on", "coffee:turn_off"}))
@@ -65,8 +66,45 @@ async def toggle_coffee(
             text,
             coffee_status(is_on),
         )
-        asyncio.create_task(_refresh_later(callback.message.chat.id, message_id or callback.message.message_id, settings, ha, telegram_messages))
+        if turn_on:
+            asyncio.create_task(
+                _refresh_later(
+                    callback.message.chat.id,
+                    message_id or callback.message.message_id,
+                    settings,
+                    ha,
+                    telegram_messages,
+                )
+            )
     await callback.answer("Готово")
+
+
+@router.callback_query(F.data == "coffee_alert:turn_off")
+async def turn_off_from_coffee_alert(
+    callback: CallbackQuery,
+    settings: Settings,
+    ha: HomeAssistantClient,
+    telegram_messages: TelegramMessages,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    try:
+        await ha.switch_turn_off(settings.coffee_switch_entity)
+    except HomeAssistantError:
+        LOGGER.exception("Cannot turn off coffee machine from alert")
+        await callback.answer("Не получилось выключить кофемашину", show_alert=True)
+        return
+
+    if callback.message:
+        await telegram_messages.safe_edit(
+            callback.message.chat.id,
+            callback.message.message_id,
+            "Кофемашина выключена.",
+            delete_only(),
+        )
+    await callback.answer("Выключила")
 
 
 @router.callback_query(F.data == "sonya:menu")
@@ -235,18 +273,19 @@ async def _coffee_status_text(settings: Settings, ha: HomeAssistantClient) -> tu
     state = (switch_state or {}).get("state", "unavailable")
     is_on = state == "on"
     lines = [f"Кофемашина: {'включена' if is_on else 'выключена' if state == 'off' else 'н/д'}"]
+    lines.append(f"Время работы: {_coffee_uptime_minutes_text(switch_state, is_on)}")
 
     labels = {
-        "voltage": "Напряжение",
         "power": "Мощность",
         "current": "Ток",
+        "voltage": "Напряжение",
     }
     for key, label in labels.items():
         entity_id = settings.coffee_sensors.get(key, "")
-        value = "н/д"
+        value = "нет данных"
         if entity_id:
             sensor_state = await ha.get_state(entity_id)
-            if sensor_state and sensor_state.get("state") not in {None, "unknown", "unavailable"}:
+            if sensor_state and sensor_state.get("state") not in {None, "unknown", "unavailable", ""}:
                 unit = sensor_state.get("attributes", {}).get("unit_of_measurement", "")
                 value = f"{sensor_state['state']} {unit}".strip()
         lines.append(f"{label}: {value}")
@@ -261,9 +300,33 @@ async def _refresh_later(
     ha: HomeAssistantClient,
     telegram_messages: TelegramMessages,
 ) -> None:
-    await asyncio.sleep(5)
+    for delay_seconds in (3, 7):
+        await asyncio.sleep(delay_seconds)
+        try:
+            text, is_on = await _coffee_status_text(settings, ha)
+            await telegram_messages.safe_edit(chat_id, message_id, text, coffee_status(is_on))
+        except Exception:
+            LOGGER.exception("Cannot refresh coffee status after delay=%s", delay_seconds)
+
+
+def _coffee_uptime_minutes_text(switch_state: dict | None, is_on: bool) -> str:
+    if not is_on or not switch_state:
+        return "—"
+
+    last_changed = switch_state.get("last_changed")
+    changed_at = _parse_ha_datetime(last_changed)
+    if changed_at is None:
+        return "—"
+
+    minutes = max(0, int((datetime.now(timezone.utc) - changed_at).total_seconds() // 60))
+    return f"{minutes} мин"
+
+
+def _parse_ha_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
     try:
-        text, is_on = await _coffee_status_text(settings, ha)
-        await telegram_messages.safe_edit(chat_id, message_id, text, coffee_status(is_on))
-    except Exception:
-        LOGGER.exception("Cannot refresh coffee status after delay")
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        LOGGER.warning("Cannot parse Home Assistant datetime: %s", value)
+        return None
