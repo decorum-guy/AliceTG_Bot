@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery
 
 from app.config import Settings
 from app.keyboards.coffee import coffee_status, delete_only, later_options, sonya_menu
+from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.workflows.coffee import CoffeeWorkflow
@@ -23,7 +24,7 @@ async def show_coffee_status(
     ha: HomeAssistantClient,
     telegram_messages: TelegramMessages,
 ) -> None:
-    if not settings.is_allowed_user(callback.from_user.id):
+    if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
 
@@ -40,7 +41,7 @@ async def toggle_coffee(
     ha: HomeAssistantClient,
     telegram_messages: TelegramMessages,
 ) -> None:
-    if not settings.is_allowed_user(callback.from_user.id):
+    if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
 
@@ -69,7 +70,7 @@ async def toggle_coffee(
 
 @router.callback_query(F.data == "sonya:menu")
 async def ask_sonya_menu(callback: CallbackQuery, settings: Settings) -> None:
-    if not settings.is_allowed_user(callback.from_user.id):
+    if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
 
@@ -84,7 +85,7 @@ async def ask_sonya_coffee(
     settings: Settings,
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
-    if not settings.is_allowed_user(callback.from_user.id):
+    if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
 
@@ -104,7 +105,7 @@ async def coffee_confirmation(
     settings: Settings,
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
-    if not settings.is_allowed_user(callback.from_user.id):
+    if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
 
@@ -142,7 +143,7 @@ async def coffee_later(
     settings: Settings,
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
-    if not settings.is_allowed_user(callback.from_user.id):
+    if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
 
@@ -151,6 +152,92 @@ async def coffee_later(
     if callback.message:
         await callback.message.edit_text(f"Я напомню через {minutes} минут.", reply_markup=delete_only())
     await callback.answer("Я напомню позже")
+
+
+@router.callback_query(F.data == "sonya_order:tea")
+async def sonya_order_tea(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_sonya_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text("Чай я добавлю чуть позже.", reply_markup=sonya_order_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sonya_order:coffee")
+async def sonya_order_coffee(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_sonya_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text("Какой кофе?", reply_markup=sonya_temperature_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sonya_order_temp:"))
+async def sonya_order_temperature(
+    callback: CallbackQuery,
+    settings: Settings,
+    coffee_workflow: CoffeeWorkflow,
+) -> None:
+    if not settings.is_sonya_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    temperature = (callback.data or "").split(":", 1)[1]
+    await coffee_workflow.set_sonya_order_temperature(callback.from_user.id, temperature)
+    if callback.message:
+        await callback.message.edit_text("С сиропом?", reply_markup=sonya_syrup_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sonya_order_syrup:"))
+async def sonya_order_syrup(
+    callback: CallbackQuery,
+    settings: Settings,
+    coffee_workflow: CoffeeWorkflow,
+) -> None:
+    if not settings.is_sonya_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    syrup = (callback.data or "").split(":", 1)[1]
+    draft = await coffee_workflow.set_sonya_order_syrup(callback.from_user.id, syrup)
+    if callback.message:
+        await callback.message.edit_text(
+            f"Проверяю заказ:\n{draft.order_text()}.\nВсё верно?",
+            reply_markup=sonya_order_confirm_menu(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sonya_order:confirm")
+async def sonya_order_confirm(
+    callback: CallbackQuery,
+    settings: Settings,
+    coffee_workflow: CoffeeWorkflow,
+) -> None:
+    if not settings.is_sonya_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    await coffee_workflow.submit_sonya_order(callback.from_user.id)
+    if callback.message:
+        await callback.message.edit_text("Передаю заказ Артёму.\nКофе скоро будет готов.", reply_markup=sonya_order_menu())
+    await callback.answer("Готово, я передала сообщение")
+
+
+@router.callback_query(F.data == "sonya_order:cancel")
+async def sonya_order_cancel(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_sonya_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text("Хорошо, отменяю заказ.", reply_markup=sonya_order_menu())
+    await callback.answer()
 
 
 async def _coffee_status_text(settings: Settings, ha: HomeAssistantClient) -> tuple[str, bool]:

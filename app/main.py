@@ -6,6 +6,7 @@ import signal
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 
@@ -34,7 +35,11 @@ async def create_app() -> web.Application:
     LOGGER.info("Telegram mode: %s", settings.telegram_mode)
 
     session = AiohttpSession(proxy=settings.telegram_proxy_url) if settings.telegram_proxy_url else AiohttpSession()
-    bot = Bot(token=settings.telegram_bot_token, session=session)
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        session=session,
+        default=DefaultBotProperties(parse_mode="HTML"),
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(start.router)
     dispatcher.include_router(coffee.router)

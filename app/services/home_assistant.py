@@ -50,6 +50,12 @@ class HomeAssistantClient:
     async def switch_turn_off(self, entity_id: str) -> None:
         await self.call_service("switch", "turn_off", {"entity_id": entity_id})
 
+    async def input_boolean_turn_on(self, entity_id: str) -> None:
+        await self.call_service("input_boolean", "turn_on", {"entity_id": entity_id})
+
+    async def input_boolean_turn_off(self, entity_id: str) -> None:
+        await self.call_service("input_boolean", "turn_off", {"entity_id": entity_id})
+
     async def play_media(self, entity_id: str, text: str, content_type: str = "text") -> None:
         await self.call_service(
             "media_player",

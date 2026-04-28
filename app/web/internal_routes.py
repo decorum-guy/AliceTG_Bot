@@ -49,14 +49,37 @@ async def sonya_wants_answer(request: web.Request) -> web.Response:
 async def sonya_type_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.handle_type_answer(await _parse_sonya_answer(request), direct=False)
+    await workflow.handle_temperature_answer(await _parse_sonya_answer(request), direct=False)
     return web.json_response({"ok": True})
 
 
 async def sonya_direct_type_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.handle_type_answer(await _parse_sonya_answer(request), direct=True)
+    await workflow.handle_temperature_answer(await _parse_sonya_answer(request), direct=True)
+    return web.json_response({"ok": True})
+
+
+async def sonya_temperature_answer(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    answer = await _parse_sonya_answer(request)
+    await workflow.handle_temperature_answer(answer, direct=answer.dialog == "sonya_direct_coffee_temperature")
+    return web.json_response({"ok": True})
+
+
+async def sonya_syrup_answer(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    answer = await _parse_sonya_answer(request)
+    await workflow.handle_syrup_answer(answer, direct=answer.dialog == "sonya_direct_coffee_syrup")
+    return web.json_response({"ok": True})
+
+
+async def sonya_auto_enabled(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    await workflow.notify_auto_enabled(await _parse_sonya_answer(request))
     return web.json_response({"ok": True})
 
 
@@ -65,3 +88,6 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)
     app.router.add_post("/internal/coffee/sonya-type-answer", sonya_type_answer)
     app.router.add_post("/internal/coffee/sonya-direct-type-answer", sonya_direct_type_answer)
+    app.router.add_post("/internal/coffee/sonya-temperature-answer", sonya_temperature_answer)
+    app.router.add_post("/internal/coffee/sonya-syrup-answer", sonya_syrup_answer)
+    app.router.add_post("/internal/coffee/sonya-auto-enabled", sonya_auto_enabled)

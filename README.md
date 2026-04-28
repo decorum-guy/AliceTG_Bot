@@ -90,6 +90,7 @@ Copy `.env.example` to `.env` on the server and fill values:
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=
 TELEGRAM_ALLOWED_USER_IDS=
+TELEGRAM_SONYA_USER_IDS=
 TELEGRAM_ADMIN_CHAT_ID=
 TELEGRAM_MODE=polling
 TELEGRAM_DROP_PENDING_UPDATES=true
@@ -112,6 +113,12 @@ INTERNAL_WEBHOOK_SECRET=
 
 ```env
 TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
+```
+
+`TELEGRAM_SONYA_USER_IDS` is optional. If it is set, those users see only the order menu:
+
+```env
+TELEGRAM_SONYA_USER_IDS=222222222
 ```
 
 ## Create Telegram Bot
@@ -244,7 +251,423 @@ http://telegram-bot:8088/internal/coffee/sonya-type-answer
 http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer
 ```
 
-## Home Assistant Automation
+## Home Assistant Automation (Deprecated)
+
+This section is kept only for historical context. Use the current section below instead.
+
+## Current Home Assistant Automation
+
+Use `rest_command` and `input_boolean` helpers. Do not duplicate IDs. In your current `automations.yaml`:
+
+- replace the existing `- id: ask_sonya_about_coffee` block fully with the block below;
+- replace old Telegram blocks `tg_sonya_wants_coffee_answer`, `tg_sonya_coffee_type_answer`, `tg_sonya_direct_coffee_request`, `tg_sonya_direct_coffee_type_answer` with the blocks below;
+- do not keep the old `tg_sonya_coffee_type_answer` and `tg_sonya_direct_coffee_type_answer` blocks, because the flow is now split into temperature and syrup.
+
+Add helpers to `configuration.yaml`:
+
+```yaml
+input_boolean:
+  tg_awaiting_sonya_coffee_temperature:
+    name: Telegram awaiting Sonya coffee temperature
+  tg_awaiting_sonya_coffee_syrup:
+    name: Telegram awaiting Sonya coffee syrup
+  sonya_direct_awaiting_coffee_temperature:
+    name: Sonya direct awaiting coffee temperature
+  sonya_direct_awaiting_coffee_syrup:
+    name: Sonya direct awaiting coffee syrup
+```
+
+Add/replace `rest_command` in `configuration.yaml`:
+
+```yaml
+rest_command:
+  tg_sonya_wants_coffee_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-wants-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_temperature_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-temperature-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_syrup_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-syrup-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_auto_enabled:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-auto-enabled"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+```
+
+Add to `secrets.yaml`:
+
+```yaml
+internal_webhook_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
+```
+
+Replace old block `- id: ask_sonya_about_coffee` fully with this:
+
+```yaml
+- id: ask_sonya_about_coffee
+  alias: "Спросить Соню про кофе"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ 'сон' in text and 'кофе' in text }}
+  action:
+    - action: media_player.play_media
+      target:
+        entity_id: media_player.stantsiia_mini_spalnia
+      data:
+        media_content_id: "Соня, хочешь кофе?"
+        media_content_type: "dialog:домашний помощник:ask_sonya_wants_coffee"
+    - wait_for_trigger:
+        - platform: event
+          event_type: yandex_intent
+          event_data:
+            session:
+              dialog: ask_sonya_wants_coffee
+      timeout: "00:00:30"
+      continue_on_timeout: true
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ wait.trigger is none }}"
+          sequence:
+            - action: media_player.play_media
+              target:
+                entity_id: media_player.stantsiia_mini_zal
+              data:
+                media_content_id: "Соня не ответила."
+                media_content_type: "text"
+      default:
+        - variables:
+            wants_answer: "{{ wait.trigger.event.data.text | default('') | lower }}"
+            wants_intent: "{{ wait.trigger.event.data.intent | default('') }}"
+        - choose:
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {% set positive_words = ['да', 'хочу', 'ага', 'можно', 'буду', 'конечно'] %}
+                    {{ wants_intent == 'YANDEX.CONFIRM' or positive_words | select('in', wants_answer) | list | count > 0 }}
+              sequence:
+                - parallel:
+                    - sequence:
+                        - action: switch.turn_on
+                          target:
+                            entity_id: switch.kofemashina
+                    - sequence:
+                        - action: media_player.play_media
+                          target:
+                            entity_id: media_player.stantsiia_mini_spalnia
+                          data:
+                            media_content_id: "Какой кофе ты хочешь: горячий или холодный? С сиропом или без?"
+                            media_content_type: "dialog:домашний помощник:ask_sonya_coffee_type"
+                - wait_for_trigger:
+                    - platform: event
+                      event_type: yandex_intent
+                      event_data:
+                        session:
+                          dialog: ask_sonya_coffee_type
+                    - platform: event
+                      event_type: yandex_intent
+                  timeout: "00:00:30"
+                  continue_on_timeout: true
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: >-
+                            {% if wait.trigger is none %}
+                              true
+                            {% else %}
+                              {% set text = wait.trigger.event.data.text | default('') | lower %}
+                              {{ not ('холод' in text or 'горяч' in text or 'сироп' in text or 'без' in text) }}
+                            {% endif %}
+                      sequence:
+                        - action: media_player.play_media
+                          target:
+                            entity_id: media_player.stantsiia_mini_zal
+                          data:
+                            media_content_id: "Соня хочет кофе, но не сказала какой."
+                            media_content_type: "text"
+                  default:
+                    - variables:
+                        coffee_type: "{{ wait.trigger.event.data.text | default('') }}"
+                        normalized_coffee_type: >-
+                          {% set answer = coffee_type | lower %}
+                          {% if 'кофе' in answer %}
+                            {{ answer }}
+                          {% elif 'холодный' in answer %}
+                            {{ answer | replace('холодный', 'холодный кофе', 1) }}
+                          {% elif 'горячий' in answer %}
+                            {{ answer | replace('горячий', 'горячий кофе', 1) }}
+                          {% else %}
+                            {{ answer }}
+                          {% endif %}
+                    - action: media_player.play_media
+                      target:
+                        entity_id: media_player.stantsiia_mini_zal
+                      data:
+                        media_content_id: "Соня сказала, что хочет {{ normalized_coffee_type }}."
+                        media_content_type: "text"
+                    - action: rest_command.tg_sonya_auto_enabled
+                      data:
+                        answer: "{{ normalized_coffee_type }}"
+                        intent: ""
+                        dialog: "ask_sonya_coffee_type"
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {% set negative_phrases = ['нет спасибо', 'не хочу', 'не надо', 'нет'] %}
+                    {{ wants_intent == 'YANDEX.REJECT' or negative_phrases | select('in', wants_answer) | list | count > 0 }}
+              sequence:
+                - action: media_player.play_media
+                  target:
+                    entity_id: media_player.stantsiia_mini_zal
+                  data:
+                    media_content_id: "Соня сказала, что кофе не хочет."
+                    media_content_type: "text"
+          default:
+            - action: media_player.play_media
+              target:
+                entity_id: media_player.stantsiia_mini_zal
+              data:
+                media_content_id: "Соня ответила: {{ wants_answer }}. Я не понял, включать кофемашину или нет."
+                media_content_type: "text"
+```
+
+Replace old Telegram automation blocks with these:
+
+```yaml
+- id: tg_sonya_wants_coffee_answer
+  alias: "Telegram bot - ответ Сони хочет ли кофе"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: tg_ask_sonya_wants_coffee
+  action:
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "tg_ask_sonya_wants_coffee"
+    - action: rest_command.tg_sonya_wants_coffee_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_temperature_answer
+  alias: "Telegram bot - ответ Сони температура кофе"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: tg_ask_sonya_coffee_temperature
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ dialog == 'tg_ask_sonya_coffee_temperature'
+           or (is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
+               and ('холод' in text or 'горяч' in text)) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.tg_awaiting_sonya_coffee_temperature
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "tg_ask_sonya_coffee_temperature"
+    - action: rest_command.tg_sonya_temperature_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_syrup_answer
+  alias: "Telegram bot - ответ Сони сироп"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: tg_ask_sonya_coffee_syrup
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ dialog == 'tg_ask_sonya_coffee_syrup'
+           or (is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on')
+               and ('сироп' in text or 'без' in text)) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.tg_awaiting_sonya_coffee_syrup
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "tg_ask_sonya_coffee_syrup"
+    - action: rest_command.tg_sonya_syrup_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_direct_coffee_request
+  alias: "Telegram bot - Соня сама просит кофе"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {{ 'кофе' in text
+           and 'спроси сон' not in text
+           and 'узнай' not in text
+           and dialog not in [
+             'tg_ask_sonya_wants_coffee',
+             'tg_ask_sonya_coffee_temperature',
+             'tg_ask_sonya_coffee_syrup',
+             'ask_sonya_wants_coffee',
+             'ask_sonya_coffee_type',
+             'sonya_direct_coffee_temperature',
+             'sonya_direct_coffee_syrup'
+           ] }}
+  action:
+    - action: input_boolean.turn_on
+      target:
+        entity_id: input_boolean.sonya_direct_awaiting_coffee_temperature
+    - action: media_player.play_media
+      target:
+        entity_id: media_player.stantsiia_mini_spalnia
+      data:
+        media_content_id: "Какой кофе ты хочешь: горячий или холодный?"
+        media_content_type: "dialog:домашний помощник:sonya_direct_coffee_temperature"
+
+- id: tg_sonya_direct_temperature_answer
+  alias: "Telegram bot - прямой ответ Сони температура кофе"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: sonya_direct_coffee_temperature
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ dialog == 'sonya_direct_coffee_temperature'
+           or (is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
+               and ('холод' in text or 'горяч' in text)) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.sonya_direct_awaiting_coffee_temperature
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "sonya_direct_coffee_temperature"
+    - action: rest_command.tg_sonya_temperature_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_direct_syrup_answer
+  alias: "Telegram bot - прямой ответ Сони сироп"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: sonya_direct_coffee_syrup
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ dialog == 'sonya_direct_coffee_syrup'
+           or (is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on')
+               and ('сироп' in text or 'без' in text)) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.sonya_direct_awaiting_coffee_syrup
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "sonya_direct_coffee_syrup"
+    - action: rest_command.tg_sonya_syrup_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+```
+
+Check and restart:
+
+```bash
+docker compose exec homeassistant python -m homeassistant --script check_config --config /config
+docker compose restart homeassistant
+docker compose up -d --build telegram-bot
+```
+
+## Old Home Assistant Automation Notes
 
 Use `rest_command`; it is the cleanest Home Assistant-native way to POST JSON to the bot without shell commands.
 

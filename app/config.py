@@ -42,6 +42,7 @@ class Settings:
     telegram_bot_token: str
     telegram_webhook_secret: str
     telegram_allowed_user_ids: set[int]
+    telegram_sonya_user_ids: set[int]
     telegram_admin_chat_id: int
     telegram_mode: Literal["polling", "webhook"]
     telegram_drop_pending_updates: bool
@@ -74,6 +75,7 @@ class Settings:
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
             telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
             telegram_allowed_user_ids=_split_ids(_required("TELEGRAM_ALLOWED_USER_IDS")),
+            telegram_sonya_user_ids=_split_ids(os.getenv("TELEGRAM_SONYA_USER_IDS", "")),
             telegram_admin_chat_id=int(_required("TELEGRAM_ADMIN_CHAT_ID")),
             telegram_mode=telegram_mode,  # type: ignore[arg-type]
             telegram_drop_pending_updates=_bool_env("TELEGRAM_DROP_PENDING_UPDATES", True),
@@ -87,7 +89,13 @@ class Settings:
         )
 
     def is_allowed_user(self, user_id: int | None) -> bool:
+        return self.is_admin_user(user_id) or self.is_sonya_user(user_id)
+
+    def is_admin_user(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.telegram_allowed_user_ids
+
+    def is_sonya_user(self, user_id: int | None) -> bool:
+        return user_id is not None and user_id in self.telegram_sonya_user_ids
 
 
 def _required(name: str) -> str:
