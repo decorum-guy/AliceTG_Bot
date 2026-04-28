@@ -42,44 +42,68 @@ async def _parse_sonya_answer(request: web.Request) -> SonyaAnswer:
 async def sonya_wants_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.handle_wants_answer(await _parse_sonya_answer(request))
+    try:
+        await workflow.handle_wants_answer(await _parse_sonya_answer(request))
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
     return web.json_response({"ok": True})
 
 
 async def sonya_type_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.handle_temperature_answer(await _parse_sonya_answer(request), direct=False)
+    try:
+        await workflow.handle_temperature_answer(await _parse_sonya_answer(request), direct=False)
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
     return web.json_response({"ok": True})
 
 
 async def sonya_direct_type_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.handle_temperature_answer(await _parse_sonya_answer(request), direct=True)
+    try:
+        await workflow.handle_temperature_answer(await _parse_sonya_answer(request), direct=True)
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
     return web.json_response({"ok": True})
 
 
 async def sonya_temperature_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    answer = await _parse_sonya_answer(request)
-    await workflow.handle_temperature_answer(answer, direct=answer.dialog == "sonya_direct_coffee_temperature")
+    try:
+        answer = await _parse_sonya_answer(request)
+        await workflow.handle_temperature_answer(answer, direct=answer.dialog == "sonya_direct_coffee_temperature")
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
     return web.json_response({"ok": True})
 
 
 async def sonya_syrup_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    answer = await _parse_sonya_answer(request)
-    await workflow.handle_syrup_answer(answer, direct=answer.dialog == "sonya_direct_coffee_syrup")
+    try:
+        answer = await _parse_sonya_answer(request)
+        await workflow.handle_syrup_answer(answer, direct=answer.dialog == "sonya_direct_coffee_syrup")
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
     return web.json_response({"ok": True})
 
 
 async def sonya_auto_enabled(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.notify_auto_enabled(await _parse_sonya_answer(request))
+    try:
+        await workflow.notify_auto_enabled(await _parse_sonya_answer(request))
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
     return web.json_response({"ok": True})
 
 

@@ -267,6 +267,12 @@ The active automation IDs are:
 
 Old pre-split coffee automations should be removed before pasting this file so there are no duplicate handlers.
 
+Runtime behavior:
+
+- Telegram-initiated coffee flow may edit the active Telegram message after each step.
+- Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
+- If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all four coffee wait flags through Home Assistant.
+
 Add helpers to `configuration.yaml`:
 
 ```yaml

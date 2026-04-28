@@ -115,6 +115,7 @@ class CoffeeWorkflow:
         normalized = text.lower()
         intent = answer.intent.strip()
         LOGGER.info("Sonya wants-coffee answer received: dialog=%s intent=%s answer=%r", answer.dialog, intent, text)
+        self._log_step("telegram", "wants", normalized, "received answer")
 
         if intent == "YANDEX.REJECT" or any(word in normalized for word in NEGATIVE_WORDS):
             await self._clear_all_wait_flags()
@@ -149,14 +150,17 @@ class CoffeeWorkflow:
         draft = self._direct_draft if direct else self._tg_draft
         draft.temperature = normalize_temperature(answer.answer)
         LOGGER.info("Sonya temperature received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
+        flow_type = "direct" if direct else "telegram"
+        self._log_step(flow_type, "temperature", draft.temperature, "received answer")
 
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
-
-        await self._edit_active_or_send(
-            order_progress_text(draft.temperature, None),
-            delete_only(),
-        )
+            self._log_step(flow_type, "temperature", draft.temperature, "skipped intermediate message")
+        else:
+            await self._edit_active_or_send(
+                order_progress_text(draft.temperature, None),
+                delete_only(),
+            )
         await self._ask_syrup(direct=direct)
 
     async def handle_syrup_answer(self, answer: SonyaAnswer, *, direct: bool) -> None:
@@ -168,6 +172,8 @@ class CoffeeWorkflow:
         context = context_from_draft(draft)
         self._latest_context = context
         LOGGER.info("Sonya syrup received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
+        flow_type = "direct" if direct else "telegram"
+        self._log_step(flow_type, "syrup", draft.syrup or answer.answer, "received answer")
 
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
@@ -194,6 +200,7 @@ class CoffeeWorkflow:
 
     async def confirm_turn_on(self, chat_id: int, message_id: int | None) -> int | None:
         context = self._context_for_message(message_id)
+        self._log_step("telegram", "confirm", context.coffee_type, "turn on")
         await self._clear_all_wait_flags()
         await self._ha.switch_turn_on(self._settings.coffee_switch_entity)
         edited_id = await self._telegram_messages.safe_edit(
@@ -209,6 +216,7 @@ class CoffeeWorkflow:
 
     async def confirm_decline(self, chat_id: int, message_id: int | None) -> int | None:
         context = self._context_for_message(message_id)
+        self._log_step("telegram", "confirm", context.coffee_type, "decline")
         await self._clear_all_wait_flags()
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
@@ -305,6 +313,14 @@ class CoffeeWorkflow:
         chat_id = self._active_chat_id or self._settings.telegram_admin_chat_id
         message_id = self._active_message_id if self._active_chat_id else None
         edited_id = await self._telegram_messages.safe_edit(chat_id, message_id, text, reply_markup)
+        action = "edited message" if message_id and edited_id == message_id else "created message"
+        LOGGER.info(
+            "Coffee workflow Telegram message: action=%s chat_id=%s message_id=%s previous_message_id=%s",
+            action,
+            chat_id,
+            edited_id,
+            message_id,
+        )
         self._set_active_message(chat_id, edited_id)
         if edited_id is not None and context:
             self._context_by_message_id[edited_id] = context
@@ -318,12 +334,21 @@ class CoffeeWorkflow:
             return self._context_by_message_id[message_id]
         return self._latest_context or CoffeeMessageContext(coffee_type="кофе")
 
+    async def reset_after_failure(self) -> None:
+        LOGGER.warning("Coffee workflow failed, resetting coffee flags", exc_info=True)
+        self._active_chat_id = None
+        self._active_message_id = None
+        self._tg_draft = CoffeeDraft()
+        self._direct_draft = CoffeeDraft()
+        await self._clear_all_wait_flags()
+
     async def _set_only_wait_flag(self, entity_id: str) -> None:
         await self._clear_all_wait_flags()
         try:
             await self._ha.input_boolean_turn_on(entity_id)
         except HomeAssistantError:
             LOGGER.exception("Cannot enable coffee wait flag: %s", entity_id)
+            raise
 
     async def _clear_all_wait_flags(self) -> None:
         for entity_id in ALL_COFFEE_WAIT_FLAGS:
@@ -353,6 +378,20 @@ class CoffeeWorkflow:
             return True
         self._recent_event_keys[key] = now
         return False
+
+    def _log_step(self, flow_type: str, step: str, normalized_answer: str, action: str) -> None:
+        LOGGER.info(
+            "Coffee workflow step: flow=%s step=%s normalized_answer=%r active_message_id=%s order_state=%s action=%s",
+            flow_type,
+            step,
+            normalized_answer,
+            self._active_message_id,
+            {
+                "telegram": self._tg_draft.order_text(),
+                "direct": self._direct_draft.order_text(),
+            },
+            action,
+        )
 
     async def _say_bedroom(self, text: str) -> None:
         try:
