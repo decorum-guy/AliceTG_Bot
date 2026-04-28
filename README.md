@@ -251,18 +251,14 @@ http://telegram-bot:8088/internal/coffee/sonya-type-answer
 http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer
 ```
 
-## Home Assistant Automation (Deprecated)
-
-This section is kept only for historical context. Use the current section below instead.
-
 ## Current Home Assistant Automation
 
-Use this section as the source of truth. Remove the deprecated old Telegram automation blocks before adding these.
+Use this section as the source of truth. Remove the old Telegram automation blocks before adding these.
 
 Existing IDs to replace or remove:
 
-- Replace `ask_sonya_about_coffee` fully with the block below.
-- Replace `tg_sonya_wants_coffee_answer` with the block below.
+- Replace `ask_sonya_about_coffee` fully with the complete `automations.yaml` content below.
+- Replace `tg_sonya_wants_coffee_answer` with the complete `automations.yaml` content below.
 - Delete old `tg_sonya_coffee_type_answer`.
 - Delete old `tg_sonya_direct_coffee_type_answer`.
 - Replace `tg_sonya_direct_coffee_request` with the block below.
@@ -339,7 +335,7 @@ Add to `secrets.yaml`:
 internal_webhook_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
 ```
 
-Replace old block `- id: ask_sonya_about_coffee` fully with this:
+Use this as the full ready-to-copy content of `config/automations.yaml`. Going forward, when this workflow changes, update this complete file block rather than separate fragments.
 
 ```yaml
 - id: ask_sonya_about_coffee
@@ -492,11 +488,7 @@ Replace old block `- id: ask_sonya_about_coffee` fully with this:
               data:
                 media_content_id: "Соня ответила: {{ wants_answer }}. Я не понял, включать кофемашину или нет."
                 media_content_type: "text"
-```
 
-Replace old Telegram automation blocks with these. Each automation has exactly one trigger; filtering is done in `condition` to avoid duplicate runs.
-
-```yaml
 - id: tg_sonya_wants_coffee_answer
   alias: "Telegram bot - ответ Сони хочет ли кофе"
   mode: queued
@@ -678,7 +670,6 @@ Replace old Telegram automation blocks with these. Each automation has exactly o
         intent: "{{ intent }}"
         dialog: "{{ dialog }}"
 ```
-
 Check and restart:
 
 ```bash
