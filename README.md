@@ -15,6 +15,7 @@ Telegram assistant for Home Assistant. The bot is named **Алиса** and speak
 - In-memory reminders for MVP.
 - Storage interface prepared for a future SQLite backend.
 - Optional HTTP proxy for all outgoing Telegram Bot API requests.
+- Styled Telegram buttons for supported clients and Bot API versions.
 
 No Redis, Postgres, Node-RED, Grafana, InfluxDB, or MariaDB are used.
 
@@ -37,6 +38,16 @@ http://login:pass@host:port
 The proxy is used only for Telegram API requests through aiogram `AiohttpSession`. Home Assistant API requests do not use this proxy. The proxy value is not logged because it contains credentials.
 
 If `TELEGRAM_PROXY` is empty, the bot works without proxy.
+
+## Styled Buttons
+
+The bot sends button styles through the Bot API field `style`:
+
+- `success` for confirmation and safe positive actions;
+- `danger` for cancel, delete, reject, turn off;
+- `primary` for navigation, refresh, postpone, and choices.
+
+Color rendering depends on the current Telegram client and Bot API support. If a client does not render colors, the same buttons still work as ordinary inline buttons because `callback_data` is unchanged.
 
 ## Environment
 
