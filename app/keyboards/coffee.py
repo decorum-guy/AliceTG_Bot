@@ -16,6 +16,14 @@ def coffee_status(is_on: bool) -> InlineKeyboardMarkup:
     )
 
 
+def coffee_turn_off_only() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text="⏹ Выключить", callback_data="coffee_alert:turn_off", style=BUTTON_DANGER)],
+        ]
+    )
+
+
 def sonya_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
