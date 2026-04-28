@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from aiohttp import web
 
 from app.config import Settings
+from app.keyboards.coffee import coffee_turn_off_only
+from app.services.home_assistant import HomeAssistantClient
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.tea import TeaAnswer, TeaWorkflow
 
@@ -138,6 +141,46 @@ async def sonya_hall_refused(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    settings: Settings = request.app["settings"]
+    ha: HomeAssistantClient = request.app["ha"]
+    bot = request.app["bot"]
+
+    switch_state = await ha.get_state(settings.coffee_switch_entity)
+    if not switch_state or switch_state.get("state") != "on":
+        LOGGER.info("Coffee warm-up alert skipped because coffee machine is not on")
+        return web.json_response({"ok": True, "sent": False})
+
+    await bot.send_message(
+        settings.telegram_admin_chat_id,
+        "Уведомление: Кофемашина разогрета.",
+        reply_markup=coffee_turn_off_only(),
+    )
+    return web.json_response({"ok": True, "sent": True})
+
+
+async def coffee_long_running_alert(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    settings: Settings = request.app["settings"]
+    ha: HomeAssistantClient = request.app["ha"]
+    bot = request.app["bot"]
+
+    switch_state = await ha.get_state(settings.coffee_switch_entity)
+    if not switch_state or switch_state.get("state") != "on":
+        LOGGER.info("Coffee long-running alert skipped because coffee machine is not on")
+        return web.json_response({"ok": True, "sent": False})
+
+    runtime_text = _coffee_runtime_text(switch_state)
+    await bot.send_message(
+        settings.telegram_admin_chat_id,
+        "Предупреждение: Внимание, кофемашина работает непрерывно уже 1 час, рекомендуется выключить.\n"
+        f"Время непрерывной работы: {runtime_text}",
+        reply_markup=coffee_turn_off_only(),
+    )
+    return web.json_response({"ok": True, "sent": True})
+
+
 async def tea_wants_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: TeaWorkflow = request.app["tea_workflow"]
@@ -240,6 +283,8 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/coffee/sonya-syrup-answer", sonya_syrup_answer)
     app.router.add_post("/internal/coffee/sonya-auto-enabled", sonya_auto_enabled)
     app.router.add_post("/internal/coffee/sonya-hall-refused", sonya_hall_refused)
+    app.router.add_post("/internal/coffee/warmed-up-alert", coffee_warmed_up_alert)
+    app.router.add_post("/internal/coffee/long-running-alert", coffee_long_running_alert)
     app.router.add_post("/internal/tea/sonya-wants-answer", tea_wants_answer)
     app.router.add_post("/internal/tea/sonya-keep-warm-answer", tea_keep_warm_answer)
     app.router.add_post("/internal/tea/sonya-keep-warm-temperature-answer", tea_keep_warm_temperature_answer)
@@ -247,3 +292,24 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/tea/hall-request", tea_hall_request)
     app.router.add_post("/internal/tea/sonya-auto-enabled", tea_auto_enabled)
     app.router.add_post("/internal/tea/sonya-hall-refused", tea_hall_refused)
+
+
+def _coffee_runtime_text(switch_state: dict) -> str:
+    started_at = _parse_ha_datetime(str(switch_state.get("last_changed", "")))
+    if started_at is None:
+        return "неизвестно"
+
+    total_minutes = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds() // 60))
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours > 0:
+        return f"{hours}ч {minutes}мин"
+    return f"{minutes}мин"
+
+
+def _parse_ha_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        LOGGER.warning("Cannot parse Home Assistant datetime: %s", value)
+        return None
