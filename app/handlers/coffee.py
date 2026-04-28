@@ -12,6 +12,7 @@ from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.workflows.coffee import CoffeeWorkflow
+from app.workflows.coffee import minute_word
 
 router = Router()
 LOGGER = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ async def coffee_later(
     minutes = int((callback.data or "").split(":", 1)[1])
     await coffee_workflow.schedule_reminder(callback.message.chat.id, minutes, callback.message.message_id)  # type: ignore[union-attr]
     if callback.message:
-        await callback.message.edit_text(f"Я напомню через {minutes} минут.", reply_markup=delete_only())
+        await callback.message.edit_text(f"Я напомню через {minutes} {minute_word(minutes)}.", reply_markup=delete_only())
     await callback.answer("Я напомню позже")
 
 

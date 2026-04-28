@@ -10,6 +10,8 @@ class Reminder:
     minutes: int
     reason: str
     coffee_type: str | None = None
+    coffee_temperature: str | None = None
+    coffee_syrup: str | None = None
 
 
 class Storage(ABC):
