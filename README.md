@@ -50,11 +50,14 @@ TELEGRAM_MODE=polling
 TELEGRAM_DROP_PENDING_UPDATES=true
 TELEGRAM_POLLING_TIMEOUT=30
 TELEGRAM_POLLING_MAX_ERRORS=10
+TELEGRAM_ENABLE_TEST_1_MIN_REMINDER=false
 ```
 
 Polling uses the same `TELEGRAM_PROXY` for Telegram API requests. The aiohttp server still starts in polling mode, so `/health` and `/internal/*` endpoints remain available.
 
 If polling gets repeated network errors or reconnect failures, the bot logs the exception. When consecutive polling errors reach `TELEGRAM_POLLING_MAX_ERRORS`, the process exits with code `1`. Docker `restart: unless-stopped` then restarts the container.
+
+For quick manual testing, set `TELEGRAM_ENABLE_TEST_1_MIN_REMINDER=true`. This adds a `+1 минута` button to the "Попозже" reminder menu. Keep it `false` in normal use.
 
 Webhook mode is optional:
 
@@ -92,6 +95,7 @@ TELEGRAM_MODE=polling
 TELEGRAM_DROP_PENDING_UPDATES=true
 TELEGRAM_POLLING_TIMEOUT=30
 TELEGRAM_POLLING_MAX_ERRORS=10
+TELEGRAM_ENABLE_TEST_1_MIN_REMINDER=false
 
 # HTTP proxy for Telegram API requests only.
 TELEGRAM_PROXY=login:pass@host:port

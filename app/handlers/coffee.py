@@ -110,7 +110,10 @@ async def coffee_confirmation(
 
     if callback.data == "coffee_confirm:later":
         if callback.message:
-            await callback.message.edit_text("Когда напомнить включить кофемашину?", reply_markup=later_options())
+            await callback.message.edit_text(
+                "Когда напомнить включить кофемашину?",
+                reply_markup=later_options(settings.telegram_enable_test_1_min_reminder),
+            )
         await callback.answer("Я напомню позже")
         return
 

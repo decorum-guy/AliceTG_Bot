@@ -38,9 +38,12 @@ def confirmation() -> InlineKeyboardMarkup:
     )
 
 
-def later_options() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def later_options(enable_test_1_min: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if enable_test_1_min:
+        rows.append([inline_button(text="+1 минута", callback_data="coffee_later:1", style=BUTTON_PRIMARY)])
+    rows.extend(
+        [
             [
                 inline_button(text="+10 минут", callback_data="coffee_later:10", style=BUTTON_PRIMARY),
                 inline_button(text="+15 минут", callback_data="coffee_later:15", style=BUTTON_PRIMARY),
@@ -52,6 +55,9 @@ def later_options() -> InlineKeyboardMarkup:
             [inline_button(text="+1 час", callback_data="coffee_later:60", style=BUTTON_PRIMARY)],
             [inline_button(text="🗑 Удалить уведомление", callback_data="message:delete", style=BUTTON_DANGER)],
         ]
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
     )
 
 

@@ -47,6 +47,7 @@ class Settings:
     telegram_drop_pending_updates: bool
     telegram_polling_timeout: int
     telegram_polling_max_errors: int
+    telegram_enable_test_1_min_reminder: bool
     telegram_proxy: str | None
     ha_url: str
     ha_long_lived_token: str
@@ -78,6 +79,7 @@ class Settings:
             telegram_drop_pending_updates=_bool_env("TELEGRAM_DROP_PENDING_UPDATES", True),
             telegram_polling_timeout=int(os.getenv("TELEGRAM_POLLING_TIMEOUT", "30")),
             telegram_polling_max_errors=int(os.getenv("TELEGRAM_POLLING_MAX_ERRORS", "10")),
+            telegram_enable_test_1_min_reminder=_bool_env("TELEGRAM_ENABLE_TEST_1_MIN_REMINDER", False),
             telegram_proxy=os.getenv("TELEGRAM_PROXY", ""),
             ha_url=os.getenv("HA_URL", "http://homeassistant:8123").rstrip("/"),
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
