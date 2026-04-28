@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from aiogram import F, Router
+from aiogram.types import CallbackQuery
+
+from app.config import Settings
+from app.keyboards.coffee import coffee_status, confirmation, delete_only, later_options, sonya_menu
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
+from app.services.telegram_messages import TelegramMessages
+from app.workflows.coffee import CoffeeWorkflow
+
+router = Router()
+LOGGER = logging.getLogger(__name__)
+
+
+@router.callback_query(F.data == "coffee:status")
+async def show_coffee_status(
+    callback: CallbackQuery,
+    settings: Settings,
+    ha: HomeAssistantClient,
+) -> None:
+    if not settings.is_allowed_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    text, is_on = await _coffee_status_text(settings, ha)
+    if callback.message:
+        await callback.message.edit_text(text, reply_markup=coffee_status(is_on))
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"coffee:turn_on", "coffee:turn_off"}))
+async def toggle_coffee(
+    callback: CallbackQuery,
+    settings: Settings,
+    ha: HomeAssistantClient,
+    telegram_messages: TelegramMessages,
+) -> None:
+    if not settings.is_allowed_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    turn_on = callback.data == "coffee:turn_on"
+    try:
+        if turn_on:
+            await ha.switch_turn_on(settings.coffee_switch_entity)
+        else:
+            await ha.switch_turn_off(settings.coffee_switch_entity)
+    except HomeAssistantError:
+        LOGGER.exception("Cannot toggle coffee machine")
+        await callback.answer("Не получилось связаться с Home Assistant", show_alert=True)
+        return
+
+    if callback.message:
+        text, is_on = await _coffee_status_text(settings, ha)
+        await telegram_messages.safe_edit(
+            callback.message.chat.id,
+            callback.message.message_id,
+            text,
+            coffee_status(is_on),
+        )
+        asyncio.create_task(_refresh_later(callback.message.chat.id, callback.message.message_id, settings, ha, telegram_messages))
+    await callback.answer("Готово")
+
+
+@router.callback_query(F.data == "sonya:menu")
+async def ask_sonya_menu(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_allowed_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text("Я уточняю у Сони.", reply_markup=sonya_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sonya:ask_coffee")
+async def ask_sonya_coffee(
+    callback: CallbackQuery,
+    settings: Settings,
+    ha: HomeAssistantClient,
+) -> None:
+    if not settings.is_allowed_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    try:
+        await ha.play_media(
+            settings.bedroom_player_entity,
+            "Соня, хочешь кофе?",
+            "dialog:домашний помощник:tg_ask_sonya_wants_coffee",
+        )
+    except HomeAssistantError:
+        LOGGER.exception("Cannot ask Sonya through Home Assistant")
+        await callback.answer("Не получилось спросить Соню", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.answer("Спрашиваю Соню про кофе...", reply_markup=delete_only())
+    await callback.answer("Я спросила Соню")
+
+
+@router.callback_query(F.data.in_({"coffee_confirm:yes", "coffee_confirm:no", "coffee_confirm:later"}))
+async def coffee_confirmation(
+    callback: CallbackQuery,
+    settings: Settings,
+    ha: HomeAssistantClient,
+) -> None:
+    if not settings.is_allowed_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.data == "coffee_confirm:later":
+        if callback.message:
+            await callback.message.edit_text("Когда напомнить включить кофемашину?", reply_markup=later_options())
+        await callback.answer("Я напомню позже")
+        return
+
+    if callback.data == "coffee_confirm:yes":
+        try:
+            await ha.switch_turn_on(settings.coffee_switch_entity)
+            await ha.play_media(settings.bedroom_player_entity, "Твой кофе скоро будет готов.")
+        except HomeAssistantError:
+            LOGGER.exception("Cannot confirm coffee machine start")
+            await callback.answer("Не получилось включить кофемашину", show_alert=True)
+            return
+        if callback.message:
+            await callback.message.edit_text("Я включила кофемашину.", reply_markup=delete_only())
+        await callback.answer("Готово")
+        return
+
+    try:
+        await ha.play_media(settings.bedroom_player_entity, "Артём пока не включает кофемашину.")
+    except HomeAssistantError:
+        LOGGER.exception("Cannot speak negative confirmation")
+    if callback.message:
+        await callback.message.edit_text("Я не включаю кофемашину.", reply_markup=delete_only())
+    await callback.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("coffee_later:"))
+async def coffee_later(
+    callback: CallbackQuery,
+    settings: Settings,
+    coffee_workflow: CoffeeWorkflow,
+) -> None:
+    if not settings.is_allowed_user(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    minutes = int((callback.data or "").split(":", 1)[1])
+    await coffee_workflow.schedule_reminder(callback.message.chat.id, minutes)  # type: ignore[union-attr]
+    if callback.message:
+        await callback.message.edit_text(f"Я напомню через {minutes} минут.", reply_markup=delete_only())
+    await callback.answer("Я напомню позже")
+
+
+async def _coffee_status_text(settings: Settings, ha: HomeAssistantClient) -> tuple[str, bool]:
+    switch_state = await ha.get_state(settings.coffee_switch_entity)
+    state = (switch_state or {}).get("state", "unavailable")
+    is_on = state == "on"
+    lines = [f"Кофемашина: {'включена' if is_on else 'выключена' if state == 'off' else 'н/д'}"]
+
+    labels = {
+        "voltage": "Напряжение",
+        "power": "Мощность",
+        "current": "Ток",
+    }
+    for key, label in labels.items():
+        entity_id = settings.coffee_sensors.get(key, "")
+        value = "н/д"
+        if entity_id:
+            sensor_state = await ha.get_state(entity_id)
+            if sensor_state and sensor_state.get("state") not in {None, "unknown", "unavailable"}:
+                unit = sensor_state.get("attributes", {}).get("unit_of_measurement", "")
+                value = f"{sensor_state['state']} {unit}".strip()
+        lines.append(f"{label}: {value}")
+
+    return "\n".join(lines), is_on
+
+
+async def _refresh_later(
+    chat_id: int,
+    message_id: int,
+    settings: Settings,
+    ha: HomeAssistantClient,
+    telegram_messages: TelegramMessages,
+) -> None:
+    await asyncio.sleep(5)
+    try:
+        text, is_on = await _coffee_status_text(settings, ha)
+        await telegram_messages.safe_edit(chat_id, message_id, text, coffee_status(is_on))
+    except Exception:
+        LOGGER.exception("Cannot refresh coffee status after delay")

@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+@dataclass
+class Reminder:
+    chat_id: int
+    minutes: int
+    reason: str
+
+
+class Storage(ABC):
+    @abstractmethod
+    async def add_reminder(self, reminder: Reminder) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def remove_reminder(self, reminder_id: int) -> None:
+        raise NotImplementedError
