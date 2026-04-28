@@ -107,6 +107,17 @@ async def sonya_auto_enabled(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def sonya_hall_refused(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    try:
+        await workflow.notify_hall_refused()
+    except Exception:
+        await workflow.reset_after_failure()
+        raise
+    return web.json_response({"ok": True})
+
+
 def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health", health)
     app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)
@@ -115,3 +126,4 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/coffee/sonya-temperature-answer", sonya_temperature_answer)
     app.router.add_post("/internal/coffee/sonya-syrup-answer", sonya_syrup_answer)
     app.router.add_post("/internal/coffee/sonya-auto-enabled", sonya_auto_enabled)
+    app.router.add_post("/internal/coffee/sonya-hall-refused", sonya_hall_refused)

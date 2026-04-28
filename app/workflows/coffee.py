@@ -30,11 +30,15 @@ TG_AWAITING_TEMPERATURE = "input_boolean.tg_awaiting_sonya_coffee_temperature"
 TG_AWAITING_SYRUP = "input_boolean.tg_awaiting_sonya_coffee_syrup"
 DIRECT_AWAITING_TEMPERATURE = "input_boolean.sonya_direct_awaiting_coffee_temperature"
 DIRECT_AWAITING_SYRUP = "input_boolean.sonya_direct_awaiting_coffee_syrup"
+HALL_AWAITING_TEMPERATURE = "input_boolean.hall_awaiting_sonya_coffee_temperature"
+HALL_AWAITING_SYRUP = "input_boolean.hall_awaiting_sonya_coffee_syrup"
 ALL_COFFEE_WAIT_FLAGS = (
     TG_AWAITING_TEMPERATURE,
     TG_AWAITING_SYRUP,
     DIRECT_AWAITING_TEMPERATURE,
     DIRECT_AWAITING_SYRUP,
+    HALL_AWAITING_TEMPERATURE,
+    HALL_AWAITING_SYRUP,
 )
 
 
@@ -191,10 +195,30 @@ class CoffeeWorkflow:
 
         context = context_from_text(answer.answer)
         self._latest_context = context
+        self._log_step(
+            "hall",
+            "final",
+            context.coffee_type,
+            "auto_enabled=True telegram info only / no confirmation buttons",
+        )
         await self._clear_all_wait_flags()
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
             auto_enabled_text(context),
+            reply_markup=delete_only(),
+        )
+
+    async def notify_hall_refused(self) -> None:
+        self._log_step(
+            "hall",
+            "wants",
+            "нет",
+            "auto_enabled=False telegram info only / no confirmation buttons",
+        )
+        await self._clear_all_wait_flags()
+        await self._telegram_messages.safe_send(
+            self._settings.telegram_admin_chat_id,
+            "Соня отказалась от кофе. Кофемашина не включена.",
             reply_markup=delete_only(),
         )
 
