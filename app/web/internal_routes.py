@@ -1,33 +1,67 @@
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
 from app.config import Settings
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
+
+LOGGER = logging.getLogger(__name__)
 
 
 async def health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def sonya_answer(request: web.Request) -> web.Response:
+def _check_internal_secret(request: web.Request) -> None:
     settings: Settings = request.app["settings"]
     if request.headers.get("X-Internal-Secret") != settings.internal_webhook_secret:
         raise web.HTTPUnauthorized(text="Invalid internal secret")
 
+
+async def _parse_sonya_answer(request: web.Request) -> SonyaAnswer:
     payload = await request.json()
-    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
-    await workflow.handle_sonya_answer(
-        SonyaAnswer(
-            request_id=payload.get("request_id"),
-            answer=str(payload.get("answer", "")),
-            intent=str(payload.get("intent", "")),
-            source=payload.get("source"),
-        )
+    answer = SonyaAnswer(
+        request_id=payload.get("request_id"),
+        answer=str(payload.get("answer", "")),
+        intent=str(payload.get("intent", "")),
+        dialog=str(payload.get("dialog", "")),
+        source=payload.get("source"),
     )
+    LOGGER.info(
+        "Internal coffee event: path=%s dialog=%s intent=%s answer=%r",
+        request.path,
+        answer.dialog,
+        answer.intent,
+        answer.answer,
+    )
+    return answer
+
+
+async def sonya_wants_answer(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    await workflow.handle_wants_answer(await _parse_sonya_answer(request))
+    return web.json_response({"ok": True})
+
+
+async def sonya_type_answer(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    await workflow.handle_type_answer(await _parse_sonya_answer(request), direct=False)
+    return web.json_response({"ok": True})
+
+
+async def sonya_direct_type_answer(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    workflow: CoffeeWorkflow = request.app["coffee_workflow"]
+    await workflow.handle_type_answer(await _parse_sonya_answer(request), direct=True)
     return web.json_response({"ok": True})
 
 
 def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health", health)
-    app.router.add_post("/internal/coffee/sonya-answer", sonya_answer)
+    app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)
+    app.router.add_post("/internal/coffee/sonya-type-answer", sonya_type_answer)
+    app.router.add_post("/internal/coffee/sonya-direct-type-answer", sonya_direct_type_answer)

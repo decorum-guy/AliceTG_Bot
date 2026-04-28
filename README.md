@@ -9,7 +9,7 @@ Telegram assistant for Home Assistant. The bot is named **Алиса** and speak
 - Optional webhook mode.
 - aiohttp server on port `8088` for health and internal endpoints.
 - Telegram webhook endpoint: `/webhook` behind Caddy path `/tg/webhook`.
-- Internal Home Assistant endpoint: `/internal/coffee/sonya-answer` behind Caddy path `/tg/internal/coffee/sonya-answer`.
+- Internal Home Assistant endpoints under `/internal/coffee/*` behind Caddy path `/tg/internal/coffee/*`.
 - Home Assistant REST API client.
 - Whitelist by Telegram `user_id`.
 - Telegram webhook `secret_token` check.
@@ -217,7 +217,7 @@ If Telegram API is blocked from the server, use the same HTTP proxy manually for
 curl -x "http://$TELEGRAM_PROXY" "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
 ```
 
-## Check Internal Endpoint
+## Check Internal Endpoints
 
 From inside the compose project on the server:
 
@@ -226,51 +226,84 @@ set -a
 . ./.env
 set +a
 
-curl -X POST "http://localhost/tg/internal/coffee/sonya-answer" \
+curl -X POST "http://localhost/tg/internal/coffee/sonya-wants-answer" \
   -H "Content-Type: application/json" \
   -H "X-Internal-Secret: $INTERNAL_WEBHOOK_SECRET" \
-  -d '{"answer":"да","intent":"YANDEX.CONFIRM","source":"manual"}'
+  -d '{"answer":"да","intent":"YANDEX.CONFIRM","dialog":"tg_ask_sonya_wants_coffee"}'
 ```
 
 If running from another container in the same Docker network, use:
 
 ```text
-http://telegram-bot:8088/internal/coffee/sonya-answer
+http://telegram-bot:8088/internal/coffee/sonya-wants-answer
+http://telegram-bot:8088/internal/coffee/sonya-type-answer
+http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer
 ```
 
 ## Home Assistant Automation
 
 Use `rest_command`; it is the cleanest Home Assistant-native way to POST JSON to the bot without shell commands.
 
+Do not delete the existing automation `ask_sonya_about_coffee`. It handles the living-room voice scenario and can continue to auto-enable the coffee machine. Add the Telegram automations below as new list items at the end of `config/automations.yaml`, each starting with a new `- id:`.
+
 Add this to `configuration.yaml`:
 
 ```yaml
 rest_command:
-  telegram_bot_sonya_answer:
-    url: "http://telegram-bot:8088/internal/coffee/sonya-answer"
+  tg_sonya_wants_coffee_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-wants-answer"
     method: POST
     content_type: "application/json"
     headers:
-      X-Internal-Secret: !secret telegram_bot_internal_secret
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
     payload: >-
       {
         "answer": {{ answer | to_json }},
         "intent": {{ intent | to_json }},
-        "source": "bedroom"
+        "dialog": {{ dialog | to_json }}
+      }
+
+  tg_sonya_coffee_type_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-type-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {
+        "answer": {{ answer | to_json }},
+        "intent": {{ intent | to_json }},
+        "dialog": {{ dialog | to_json }}
+      }
+
+  tg_sonya_direct_coffee_type_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {
+        "answer": {{ answer | to_json }},
+        "intent": {{ intent | to_json }},
+        "dialog": {{ dialog | to_json }}
       }
 ```
 
 Add this to `secrets.yaml`:
 
 ```yaml
-telegram_bot_internal_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
+internal_webhook_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
 ```
 
-Add this automation to `automations.yaml`:
+Add these automations to the end of `automations.yaml`. Keep the existing `ask_sonya_about_coffee` automation unchanged.
 
 ```yaml
-- id: tg_forward_sonya_coffee_answer
-  alias: "Telegram: передать ответ Сони про кофе"
+- id: tg_sonya_wants_coffee_answer
+  alias: "Telegram bot - ответ Сони хочет ли кофе"
   mode: queued
   trigger:
     - platform: event
@@ -282,19 +315,103 @@ Add this automation to `automations.yaml`:
     - variables:
         answer: "{{ trigger.event.data.text | default('') }}"
         intent: "{{ trigger.event.data.intent | default('') }}"
-    - action: rest_command.telegram_bot_sonya_answer
+        dialog: "tg_ask_sonya_wants_coffee"
+    - action: rest_command.tg_sonya_wants_coffee_answer
       data:
         answer: "{{ answer }}"
         intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_coffee_type_answer
+  alias: "Telegram bot - ответ Сони какой кофе"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: tg_ask_sonya_coffee_type
+  action:
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "tg_ask_sonya_coffee_type"
+    - action: rest_command.tg_sonya_coffee_type_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_direct_coffee_request
+  alias: "Telegram bot - Соня сама просит кофе"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set dialog = trigger.event.data.session.dialog | default('') %}
+        {{ 'кофе' in text
+           and 'спроси сон' not in text
+           and 'узнай' not in text
+           and dialog not in [
+             'tg_ask_sonya_wants_coffee',
+             'tg_ask_sonya_coffee_type',
+             'ask_sonya_wants_coffee',
+             'ask_sonya_coffee_type',
+             'sonya_direct_coffee_type'
+           ] }}
+  action:
+    - action: media_player.play_media
+      target:
+        entity_id: media_player.stantsiia_mini_spalnia
+      data:
+        media_content_id: "Какой кофе ты хочешь: горячий или холодный? С сиропом или без?"
+        media_content_type: "dialog:домашний помощник:sonya_direct_coffee_type"
+
+- id: tg_sonya_direct_coffee_type_answer
+  alias: "Telegram bot - ответ Сони какой кофе напрямую"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+      event_data:
+        session:
+          dialog: sonya_direct_coffee_type
+  action:
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "sonya_direct_coffee_type"
+    - action: rest_command.tg_sonya_direct_coffee_type_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
 ```
 
 If Home Assistant cannot resolve Docker DNS `telegram-bot`, use the external URL instead:
 
 ```yaml
-url: "https://ha.myhomeassistantisverybest.art/tg/internal/coffee/sonya-answer"
+url: "https://ha.myhomeassistantisverybest.art/tg/internal/coffee/sonya-wants-answer"
 ```
 
-This automation is separate from the existing voice flow. The current `ask_sonya_wants_coffee` automation can continue to auto-enable the coffee machine and reply to the living room.
+Use the corresponding external URL for each endpoint. These automations are separate from the existing voice flow. The current `ask_sonya_wants_coffee` and `ask_sonya_coffee_type` tags stay reserved for the living-room automation.
+
+Check Home Assistant config:
+
+```bash
+docker compose exec homeassistant python -m homeassistant --script check_config --config /config
+```
+
+Restart:
+
+```bash
+docker compose restart homeassistant
+docker compose up -d --build telegram-bot
+```
 
 ## Run Locally
 
@@ -323,8 +440,11 @@ python -m app.main
 From the parent Home Assistant compose project on the VPS:
 
 ```bash
+cd ~/homeassistant/TG_Alisa_Assistant_Bot
 git pull
-docker compose up -d --build
+
+cd ~/homeassistant
+docker compose up -d --build telegram-bot
 docker compose logs --tail=100 telegram-bot
 ```
 

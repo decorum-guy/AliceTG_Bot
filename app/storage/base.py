@@ -9,6 +9,7 @@ class Reminder:
     chat_id: int
     minutes: int
     reason: str
+    coffee_type: str | None = None
 
 
 class Storage(ABC):

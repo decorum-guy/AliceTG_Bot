@@ -43,7 +43,7 @@ async def create_app() -> web.Application:
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
     storage = MemoryStorage()
     telegram_messages = TelegramMessages(bot)
-    coffee_workflow = CoffeeWorkflow(bot, settings, ha, storage)
+    coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
