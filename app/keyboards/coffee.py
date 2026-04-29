@@ -18,7 +18,7 @@ def coffee_status(is_on: bool) -> InlineKeyboardMarkup:
 
 
 def coffee_settings(*, warmed_up_enabled: bool, long_running_enabled: bool) -> InlineKeyboardMarkup:
-    warmed_up_text = "Выключить готовность 15 мин" if warmed_up_enabled else "Включить готовность 15 мин"
+    warmed_up_text = "Выключить готовность 13 мин" if warmed_up_enabled else "Включить готовность 13 мин"
     long_running_text = "Выключить перегрев 1 час" if long_running_enabled else "Включить перегрев 1 час"
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -33,6 +33,7 @@ def coffee_turn_off_only() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [inline_button(text="⏹ Выключить", callback_data="coffee_alert:turn_off", style=BUTTON_DANGER)],
+            [inline_button(text="🗑 Удалить уведомление", callback_data="message:delete", style=BUTTON_DANGER)],
         ]
     )
 
