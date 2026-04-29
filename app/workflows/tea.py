@@ -51,8 +51,29 @@ ALL_TEA_WAIT_FLAGS = (
     HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
 )
 
-POSITIVE_WORDS = ("да", "хочу", "включи", "с поддержанием", "поддержание", "держи тепло", "поддерживать")
-NEGATIVE_WORDS = ("нет", "не надо", "без", "без поддержания", "не нужно")
+POSITIVE_WORDS = (
+    "да",
+    "хочу",
+    "буду",
+    "да буду",
+    "ага",
+    "можно",
+    "включи",
+    "с поддержанием",
+    "поддержание",
+    "держи тепло",
+    "поддерживать",
+)
+NEGATIVE_WORDS = (
+    "нет",
+    "не хочу",
+    "не надо",
+    "спасибо нет",
+    "нет спасибо",
+    "без",
+    "без поддержания",
+    "не нужно",
+)
 TEMPERATURE_WORDS = {
     "40": 40,
     "сорок": 40,
@@ -141,6 +162,14 @@ class TeaWorkflow:
 
         normalized = answer.answer.strip().lower()
         intent = answer.intent.strip()
+        LOGGER.info(
+            "Tea wants answer received: flow=%s dialog=%s intent=%s answer=%r normalized=%r",
+            flow_type,
+            answer.dialog,
+            intent,
+            answer.answer,
+            normalized,
+        )
         self._log_step(flow_type, "wants", normalized, "received answer")
         if intent == "YANDEX.REJECT" or _matches_answer(normalized, NEGATIVE_WORDS):
             await self._clear_all_wait_flags()
@@ -152,6 +181,7 @@ class TeaWorkflow:
                     reply_markup=delete_only(),
                 )
                 return
+            await self._ha.play_media(self._settings.bedroom_player_entity, "Хорошо.")
             await self._edit_active_or_send(tea_messages.tea_refused(), delete_only())
             await self._show_admin_menu()
             return

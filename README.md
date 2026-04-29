@@ -969,7 +969,9 @@ Core `automations.yaml` blocks:
       value_template: >-
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
-        {{ dialog == 'tg_ask_sonya_wants_tea' or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on') }}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {{ not service_phrase and (dialog == 'tg_ask_sonya_wants_tea' or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')) }}
   action:
     - action: input_boolean.turn_off
       target:
