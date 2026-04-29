@@ -302,6 +302,22 @@ input_boolean:
     name: Hall awaiting Sonya coffee temperature
   hall_awaiting_sonya_coffee_syrup:
     name: Hall awaiting Sonya coffee syrup
+  tg_awaiting_sonya_tea_wants:
+    name: Telegram awaiting Sonya tea wants
+  tg_awaiting_sonya_tea_keep_warm:
+    name: Telegram awaiting Sonya tea keep warm
+  tg_awaiting_sonya_tea_keep_warm_temperature:
+    name: Telegram awaiting Sonya tea keep warm temperature
+  sonya_direct_awaiting_tea_keep_warm:
+    name: Sonya direct awaiting tea keep warm
+  sonya_direct_awaiting_tea_keep_warm_temperature:
+    name: Sonya direct awaiting tea keep warm temperature
+  hall_awaiting_sonya_tea_wants:
+    name: Hall awaiting Sonya tea wants
+  hall_awaiting_sonya_tea_keep_warm:
+    name: Hall awaiting Sonya tea keep warm
+  hall_awaiting_sonya_tea_keep_warm_temperature:
+    name: Hall awaiting Sonya tea keep warm temperature
 ```
 
 Add or replace `rest_command` in `configuration.yaml`:
