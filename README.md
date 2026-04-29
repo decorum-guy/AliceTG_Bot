@@ -301,13 +301,27 @@ curl -X POST "http://localhost/tg/internal/coffee/sonya-wants-answer" \
   -d '{"answer":"да","intent":"YANDEX.CONFIRM","dialog":"tg_ask_sonya_wants_coffee"}'
 ```
 
-If running from another container in the same Docker network, use:
+Current recommended internal coffee endpoints:
 
 ```text
 http://telegram-bot:8088/internal/coffee/sonya-wants-answer
-http://telegram-bot:8088/internal/coffee/sonya-type-answer
-http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer
+http://telegram-bot:8088/internal/coffee/sonya-temperature-answer
+http://telegram-bot:8088/internal/coffee/sonya-syrup-answer
 ```
+
+Direct voice coffee flow uses the same recommended endpoints. The bot detects direct flow by `dialog`:
+
+- `sonya_direct_coffee_temperature`
+- `sonya_direct_coffee_syrup`
+
+Legacy compatibility endpoints still exist in the code:
+
+- `/internal/coffee/sonya-type-answer`
+- `/internal/coffee/sonya-direct-type-answer`
+
+Use them only for old integrations. New Home Assistant YAML should use `/sonya-temperature-answer`
+and `/sonya-syrup-answer`. The legacy endpoints handle only the old type/temperature step and do
+not replace syrup handling.
 
 ## Home Assistant configuration.yaml
 
