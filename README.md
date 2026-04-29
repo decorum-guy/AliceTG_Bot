@@ -373,6 +373,24 @@ rest_command:
       X-Internal-Secret: !secret internal_webhook_secret
     payload: "{}"
 
+  tg_coffee_warmed_up_alert:
+    url: "http://telegram-bot:8088/internal/coffee/warmed-up-alert"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: "{}"
+
+  tg_coffee_long_running_alert:
+    url: "http://telegram-bot:8088/internal/coffee/long-running-alert"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: "{}"
+
   tg_sonya_wants_tea_answer:
     url: "http://telegram-bot:8088/internal/tea/sonya-wants-answer"
     method: POST
@@ -895,6 +913,261 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         intent: "{{ trigger.event.data.intent | default('') }}"
         dialog: "sonya_direct_coffee_syrup"
     - action: rest_command.tg_sonya_syrup_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+- id: coffee_warmed_up_alert
+  alias: "Telegram bot - кофемашина разогрета"
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: switch.kofemashina
+      to: "on"
+      for: "00:15:00"
+  condition:
+    - condition: state
+      entity_id: switch.kofemashina
+      state: "on"
+  action:
+    - action: rest_command.tg_coffee_warmed_up_alert
+
+- id: coffee_long_running_alert
+  alias: "Telegram bot - кофемашина работает 1 час"
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: switch.kofemashina
+      to: "on"
+      for: "01:00:00"
+  condition:
+    - condition: state
+      entity_id: switch.kofemashina
+      state: "on"
+  action:
+    - action: rest_command.tg_coffee_long_running_alert
+
+- id: ask_sonya_about_tea
+  alias: "Спросить Соню про чай"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ 'сон' in text and 'чай' in text }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_tea_wants
+          - input_boolean.tg_awaiting_sonya_tea_keep_warm
+          - input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature
+          - input_boolean.sonya_direct_awaiting_tea_keep_warm
+          - input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature
+          - input_boolean.hall_awaiting_sonya_tea_wants
+          - input_boolean.hall_awaiting_sonya_tea_keep_warm
+          - input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature
+    - action: rest_command.tg_sonya_hall_tea_request
+
+- id: tg_sonya_direct_tea_request
+  alias: "Telegram bot - Соня сама просит чай"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
+        {% set any_active =
+          is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
+        %}
+        {% set intermediate = text in ['да', 'нет', 'не надо', 'не хочу', 'хочу', 'буду', 'сорок', 'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто'] %}
+        {{ not is_service_phrase
+           and not any_active
+           and not intermediate
+           and 'чай' in text
+           and 'сон' not in text
+           and 'спроси сон' not in text
+           and 'узнай' not in text
+           and dialog not in [
+             'tg_ask_sonya_wants_tea',
+             'tg_ask_sonya_tea_keep_warm',
+             'tg_ask_sonya_tea_keep_warm_temperature',
+             'sonya_direct_tea_keep_warm',
+             'sonya_direct_tea_keep_warm_temperature',
+             'hall_ask_sonya_wants_tea',
+             'hall_sonya_tea_keep_warm',
+             'hall_sonya_tea_keep_warm_temperature'
+           ] }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_tea_wants
+          - input_boolean.tg_awaiting_sonya_tea_keep_warm
+          - input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature
+          - input_boolean.sonya_direct_awaiting_tea_keep_warm
+          - input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature
+          - input_boolean.hall_awaiting_sonya_tea_wants
+          - input_boolean.hall_awaiting_sonya_tea_keep_warm
+          - input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature
+    - action: rest_command.tg_sonya_direct_tea_request
+
+- id: tg_sonya_wants_tea_answer
+  alias: "Telegram bot - ответ Сони хочет ли чай"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
+        {{ not is_service_phrase
+           and (
+             dialog in ['tg_ask_sonya_wants_tea', 'hall_ask_sonya_wants_tea']
+             or (
+               is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')
+               or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
+             )
+           ) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_tea_wants
+          - input_boolean.hall_awaiting_sonya_tea_wants
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('tg_ask_sonya_wants_tea') }}
+    - action: rest_command.tg_sonya_wants_tea_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_tea_keep_warm_answer
+  alias: "Telegram bot - ответ Сони поддержание тепла для чая"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
+        {{ not is_service_phrase
+           and (
+             dialog in [
+               'tg_ask_sonya_tea_keep_warm',
+               'sonya_direct_tea_keep_warm',
+               'hall_sonya_tea_keep_warm'
+             ]
+             or (
+               is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
+               or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on')
+               or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
+             )
+           ) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_tea_keep_warm
+          - input_boolean.sonya_direct_awaiting_tea_keep_warm
+          - input_boolean.hall_awaiting_sonya_tea_keep_warm
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('tg_ask_sonya_tea_keep_warm') }}
+    - action: rest_command.tg_sonya_tea_keep_warm_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_tea_keep_warm_temperature_answer
+  alias: "Telegram bot - ответ Сони температура поддержания тепла для чая"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
+        {% set temperature_words = ['40', '50', '60', '70', '80', '90', 'сорок', 'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто'] %}
+        {% set has_temperature = temperature_words | select('in', text) | list | count > 0 %}
+        {{ not is_service_phrase
+           and (
+             dialog in [
+               'tg_ask_sonya_tea_keep_warm_temperature',
+               'sonya_direct_tea_keep_warm_temperature',
+               'hall_sonya_tea_keep_warm_temperature'
+             ]
+             or (
+               has_temperature and (
+                 is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
+                 or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
+                 or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
+               )
+             )
+           ) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature
+          - input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature
+          - input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('tg_ask_sonya_tea_keep_warm_temperature') }}
+    - action: rest_command.tg_sonya_tea_keep_warm_temperature_answer
       data:
         answer: "{{ answer }}"
         intent: "{{ intent }}"
