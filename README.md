@@ -352,9 +352,25 @@ Add to `secrets.yaml`:
 internal_webhook_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
 ```
 
-Add or replace in `configuration.yaml`:
+Use this as the full ready-to-copy content of `config/configuration.yaml`:
 
 ```yaml
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.16.0.0/12
+
 input_boolean:
   tg_awaiting_sonya_coffee_temperature:
     name: Telegram awaiting Sonya coffee temperature
