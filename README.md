@@ -2,24 +2,73 @@
 
 Telegram assistant for Home Assistant. The bot is named **Алиса** and speaks as a soft home companion.
 
-## Features
+## What This Bot Does
 
-- aiogram 3 Telegram webhook bot.
-- aiogram 3 Telegram bot in polling mode by default.
-- Optional webhook mode.
-- aiohttp server on port `8088` for health and internal endpoints.
-- Telegram webhook endpoint: `/webhook` behind Caddy path `/tg/webhook`.
-- Internal Home Assistant endpoints under `/internal/coffee/*` behind Caddy path `/tg/internal/coffee/*`.
-- Home Assistant REST API client.
-- Whitelist by Telegram `user_id`.
-- Telegram webhook `secret_token` check.
-- Internal endpoint header `X-Internal-Secret`.
-- In-memory reminders for MVP.
-- Storage interface prepared for a future SQLite backend.
-- Optional HTTP proxy for all outgoing Telegram Bot API requests.
-- Styled Telegram buttons for supported clients and Bot API versions.
+- Telegram bot for Home Assistant smart home control.
+- Coffee workflow: Artem can ask Sonya, Sonya can order by voice, hall/zal can ask Sonya, and Sonya can order from her Telegram menu.
+- Tea/kettle workflow: Artem can ask Sonya, Sonya can order by voice, hall/zal can ask Sonya, and Sonya can order from her Telegram menu.
+- Separate Telegram menus for Artem and Sonya.
+- Yandex Station dialog integration through Home Assistant `media_player.play_media`.
+- aiohttp server on port `8088` for health checks and internal Home Assistant endpoints.
+- Home Assistant REST API client, reminders, Telegram proxy support, and styled Telegram buttons.
 
 No Redis, Postgres, Node-RED, Grafana, InfluxDB, or MariaDB are used.
+
+## Runtime Behavior
+
+### Artem Menu
+
+Main menu:
+
+- `Умные устройства`
+- `Спросить Соню`
+
+`Умные устройства` contains:
+
+- `Кофемашина`
+- `Чайник`
+- `Назад`
+
+### Sonya Menu
+
+Sonya sees only her own order menu:
+
+- `☕️ Кофе`
+- `🍵 Чай`
+
+Sonya does not see `Спросить Соню`, `Умные устройства`, direct coffee machine control, or direct kettle control.
+
+### Coffee Workflow
+
+- Telegram-initiated coffee flow may edit the active Telegram message after each step.
+- Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
+- Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, auto-enables the coffee machine after a positive answer, and sends Telegram only an info notification with `Удалить уведомление`.
+- Sonya Telegram order uses `source=sonya_telegram_order`, so the bedroom does not say `Твой кофе скоро будет готов` after Artem presses `Да`.
+- Voice-based coffee flows say a short bedroom acknowledgement after syrup, for example `Хорошо, горячий кофе без сиропа, поняла.` Confirmation speech is delayed briefly so it does not overlap.
+- Before Artem confirms, the coffee machine does not turn on, except in the hall/zal voice flow where it turns on automatically after Sonya says yes.
+- If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all coffee wait flags through Home Assistant.
+
+### Coffee Alerts
+
+- If `switch.kofemashina` stays on continuously for 15 minutes, Telegram receives a warmed-up alert with a `Выключить` button.
+- If `switch.kofemashina` turns off before 15 minutes, the warmed-up alert is not sent.
+- If `switch.kofemashina` stays on continuously for 1 hour, Telegram receives a warning alert with a `Выключить` button.
+- Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
+
+### Tea And Kettle Workflow
+
+- Telegram ask-Sonya tea flow asks whether Sonya wants tea, then asks about keep-warm.
+- Direct voice tea flow asks keep-warm first and does not start the kettle before Artem confirms.
+- Hall/zal tea flow asks whether Sonya wants tea first, starts the kettle automatically after a positive answer, and sends Telegram only an info notification.
+- Sonya Telegram tea order does not speak in the bedroom.
+- Boil with `water_heater.set_temperature` and `temperature: 100`.
+- Stop with `water_heater.set_operation_mode` and `operation_mode: "off"`.
+- Do not use `water_heater.turn_on` or `water_heater.turn_off`.
+- Keep-warm uses numeric temperatures only: `40`, `50`, `60`, `70`, `80`, `90`.
+- To enable keep-warm, first call `water_heater.set_temperature`, then `switch.turn_on switch.chainik_podderzhanie_tepla`.
+- Kettle light is `switch.chainik_podsvetka`.
+- Kettle mute mode is `switch.chainik_bez_zvuka`.
+- `switch.chainik_blokirovka_upravleniia` is intentionally not exposed in Telegram.
 
 ## Telegram Proxy
 
@@ -81,7 +130,7 @@ The bot sends button styles through the Bot API field `style`:
 
 Color rendering depends on the current Telegram client and Bot API support. If a client does not render colors, the same buttons still work as ordinary inline buttons because `callback_data` is unchanged.
 
-## Environment
+## Environment Variables
 
 Copy `.env.example` to `.env` on the server and fill values:
 
@@ -260,9 +309,9 @@ http://telegram-bot:8088/internal/coffee/sonya-type-answer
 http://telegram-bot:8088/internal/coffee/sonya-direct-type-answer
 ```
 
-## Current Home Assistant Automation
+## Home Assistant configuration.yaml
 
-Use this section as the source of truth. Replace the coffee-related Home Assistant YAML with the complete blocks below. Keep secrets in `secrets.yaml`; do not paste secret values into git.
+Use this section as the source of truth for Home Assistant `configuration.yaml`. Keep secrets in `secrets.yaml`; do not paste secret values into git.
 
 The active automation IDs are:
 
@@ -273,20 +322,23 @@ The active automation IDs are:
 - `tg_sonya_direct_coffee_request`
 - `tg_sonya_direct_temperature_answer`
 - `tg_sonya_direct_syrup_answer`
+- `coffee_warmed_up_alert`
+- `coffee_long_running_alert`
+- `ask_sonya_about_tea`
+- `tg_sonya_direct_tea_request`
+- `tg_sonya_wants_tea_answer`
+- `tg_sonya_tea_keep_warm_answer`
+- `tg_sonya_tea_keep_warm_temperature_answer`
 
-Old pre-split coffee automations should be removed before pasting this file so there are no duplicate handlers.
+Old pre-split coffee/tea automations should be removed before pasting this file so there are no duplicate handlers.
 
-Runtime behavior:
+Add to `secrets.yaml`:
 
-- Telegram-initiated coffee flow may edit the active Telegram message after each step.
-- Sonya Telegram order uses `source=sonya_telegram_order`, so the bedroom does not say `Твой кофе скоро будет готов` after Artem presses `Да`.
-- Sonya sees only her short order menu: `☕️ Кофе` and `🍵 Чай`.
-- Voice-based coffee flows say a short bedroom acknowledgement after syrup, for example `Хорошо, горячий кофе без сиропа, поняла.` Confirmation speech is delayed briefly so it does not overlap.
-- Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
-- Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, auto-enables the coffee machine after a positive answer, and sends Telegram only an info notification with `Удалить уведомление`.
-- If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all coffee wait flags through Home Assistant.
+```yaml
+internal_webhook_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
+```
 
-Add helpers to `configuration.yaml`:
+Add or replace in `configuration.yaml`:
 
 ```yaml
 input_boolean:
@@ -318,11 +370,7 @@ input_boolean:
     name: Hall awaiting Sonya tea keep warm
   hall_awaiting_sonya_tea_keep_warm_temperature:
     name: Hall awaiting Sonya tea keep warm temperature
-```
 
-Add or replace `rest_command` in `configuration.yaml`:
-
-```yaml
 rest_command:
   tg_sonya_wants_coffee_answer:
     url: "http://telegram-bot:8088/internal/coffee/sonya-wants-answer"
@@ -459,11 +507,7 @@ rest_command:
     payload: "{}"
 ```
 
-Add to `secrets.yaml`:
-
-```yaml
-internal_webhook_secret: "put-the-same-value-as-INTERNAL_WEBHOOK_SECRET"
-```
+## Home Assistant automations.yaml
 
 Use this as the full ready-to-copy content of `config/automations.yaml`. Going forward, when this workflow changes, update this complete file block rather than separate fragments.
 
@@ -1174,14 +1218,9 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         dialog: "{{ dialog }}"
 ```
 
-## Tea Workflow
+## Tea And Kettle Reference
 
-Artem menu now uses:
-
-- `Умные устройства`
-- `Спросить Соню`
-
-`Умные устройства` contains `Кофемашина`, `Чайник`, and `Назад`. Sonya still sees only her own order menu: `☕️ Кофе` and `🍵 Чай`.
+This section is reference only. Do not copy YAML from here; the ready-to-copy Home Assistant YAML lives in the two sections above.
 
 Kettle entities:
 
@@ -1209,297 +1248,6 @@ Tea internal endpoints:
 - `/internal/tea/sonya-auto-enabled`
 - `/internal/tea/sonya-hall-refused`
 
-Add these helpers to `configuration.yaml`:
-
-```yaml
-input_boolean:
-  tg_awaiting_sonya_tea_wants:
-    name: Telegram awaiting Sonya tea wants
-  tg_awaiting_sonya_tea_keep_warm:
-    name: Telegram awaiting Sonya tea keep warm
-  tg_awaiting_sonya_tea_keep_warm_temperature:
-    name: Telegram awaiting Sonya tea keep warm temperature
-  sonya_direct_awaiting_tea_keep_warm:
-    name: Sonya direct awaiting tea keep warm
-  sonya_direct_awaiting_tea_keep_warm_temperature:
-    name: Sonya direct awaiting tea keep warm temperature
-  hall_awaiting_sonya_tea_wants:
-    name: Hall awaiting Sonya tea wants
-  hall_awaiting_sonya_tea_keep_warm:
-    name: Hall awaiting Sonya tea keep warm
-  hall_awaiting_sonya_tea_keep_warm_temperature:
-    name: Hall awaiting Sonya tea keep warm temperature
-```
-
-Tea `rest_command` entries are included in the complete `configuration.yaml` block above.
-
-Tea automation ids to add to `automations.yaml`:
-
-- `tg_sonya_wants_tea_answer`
-- `tg_sonya_tea_keep_warm_answer`
-- `tg_sonya_tea_keep_warm_temperature_answer`
-- `tg_sonya_direct_tea_request`
-- `tg_sonya_direct_keep_warm_answer`
-- `tg_sonya_direct_keep_warm_temperature_answer`
-- `hall_ask_sonya_about_tea`
-- `hall_sonya_wants_tea_answer`
-- `hall_sonya_tea_keep_warm_answer`
-- `hall_sonya_tea_keep_warm_temperature_answer`
-
-Use these dialog tags:
-
-- `tg_ask_sonya_wants_tea`
-- `tg_ask_sonya_tea_keep_warm`
-- `tg_ask_sonya_tea_keep_warm_temperature`
-- `sonya_direct_tea_keep_warm`
-- `sonya_direct_tea_keep_warm_temperature`
-- `hall_ask_sonya_wants_tea`
-- `hall_ask_sonya_tea_keep_warm`
-- `hall_ask_sonya_tea_keep_warm_temperature`
-
-Core `automations.yaml` blocks:
-
-```yaml
-- id: tg_sonya_wants_tea_answer
-  alias: "Telegram bot - ответ Сони хочет ли чай"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {% set text = trigger.event.data.text | default('') | lower %}
-        {% set yandex_dialog_skill_name = 'домашний помощник' %}
-        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
-        {{ not service_phrase and (dialog == 'tg_ask_sonya_wants_tea' or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')) }}
-  action:
-    - action: input_boolean.turn_off
-      target:
-        entity_id: input_boolean.tg_awaiting_sonya_tea_wants
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "tg_ask_sonya_wants_tea"
-    - action: rest_command.tg_sonya_wants_tea_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-
-- id: tg_sonya_tea_keep_warm_answer
-  alias: "Telegram bot - ответ Сони поддержание тепла чай"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {% set text = trigger.event.data.text | default('') | lower %}
-        {% set yandex_dialog_skill_name = 'домашний помощник' %}
-        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
-        {{ not service_phrase and (dialog == 'tg_ask_sonya_tea_keep_warm' or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')) }}
-  action:
-    - action: input_boolean.turn_off
-      target:
-        entity_id: input_boolean.tg_awaiting_sonya_tea_keep_warm
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "tg_ask_sonya_tea_keep_warm"
-    - action: rest_command.tg_sonya_tea_keep_warm_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-
-- id: tg_sonya_tea_keep_warm_temperature_answer
-  alias: "Telegram bot - ответ Сони температура поддержания чая"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {% set text = trigger.event.data.text | default('') | lower %}
-        {% set yandex_dialog_skill_name = 'домашний помощник' %}
-        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
-        {{ not service_phrase and (dialog == 'tg_ask_sonya_tea_keep_warm_temperature' or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')) }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "tg_ask_sonya_tea_keep_warm_temperature"
-    - action: rest_command.tg_sonya_tea_keep_warm_temperature_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-```
-
-For direct tea, use one fallback trigger per automation and filter in `condition`:
-
-```yaml
-- id: tg_sonya_direct_tea_request
-  alias: "Telegram bot - Соня сама просит чай"
-  mode: single
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set text = trigger.event.data.text | default('') | lower %}
-        {% set yandex_dialog_skill_name = 'домашний помощник' %}
-        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
-        {% set beverage_active = states.input_boolean | selectattr('entity_id', 'search', 'awaiting_sonya_(coffee|tea)|awaiting_(coffee|tea)') | selectattr('state', 'eq', 'on') | list | count > 0 %}
-        {{ not service_phrase and not beverage_active and 'сон' not in text and 'чай' in text and ('хочу' in text or 'сделай' in text or 'закажи' in text or 'попроси' in text) }}
-  action:
-    - action: rest_command.tg_sonya_direct_tea_request
-
-- id: tg_sonya_direct_keep_warm_answer
-  alias: "Telegram bot - прямой ответ Сони поддержание тепла чай"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {{ dialog == 'sonya_direct_tea_keep_warm' or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on') }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "sonya_direct_tea_keep_warm"
-    - action: rest_command.tg_sonya_tea_keep_warm_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-
-- id: tg_sonya_direct_keep_warm_temperature_answer
-  alias: "Telegram bot - прямой ответ Сони температура поддержания чая"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {{ dialog == 'sonya_direct_tea_keep_warm_temperature' or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on') }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "sonya_direct_tea_keep_warm_temperature"
-    - action: rest_command.tg_sonya_tea_keep_warm_temperature_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-```
-
-Hall/zal tea flow uses a separate `hall_*` dialog and sends only info notifications:
-
-```yaml
-- id: hall_ask_sonya_about_tea
-  alias: "Telegram bot - hall asks Sonya about tea"
-  mode: single
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set text = trigger.event.data.text | default('') | lower %}
-        {% set beverage_active = states.input_boolean | selectattr('entity_id', 'search', 'awaiting_sonya_(coffee|tea)|awaiting_(coffee|tea)') | selectattr('state', 'eq', 'on') | list | count > 0 %}
-        {{ not beverage_active and 'сон' in text and 'чай' in text and ('спроси' in text or 'будет ли' in text or 'будешь' in text or 'хочет ли' in text) }}
-  action:
-    - action: rest_command.tg_sonya_hall_tea_request
-
-- id: hall_sonya_wants_tea_answer
-  alias: "Telegram bot - hall Sonya tea wants answer"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {{ dialog == 'hall_ask_sonya_wants_tea' or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on') }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "hall_ask_sonya_wants_tea"
-    - action: rest_command.tg_sonya_wants_tea_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-
-- id: hall_sonya_tea_keep_warm_answer
-  alias: "Telegram bot - hall Sonya tea keep-warm answer"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {{ dialog == 'hall_ask_sonya_tea_keep_warm' or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on') }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "hall_ask_sonya_tea_keep_warm"
-    - action: rest_command.tg_sonya_tea_keep_warm_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-
-- id: hall_sonya_tea_keep_warm_temperature_answer
-  alias: "Telegram bot - hall Sonya tea keep-warm temperature answer"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {{ dialog == 'hall_ask_sonya_tea_keep_warm_temperature' or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on') }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        dialog: "hall_ask_sonya_tea_keep_warm_temperature"
-    - action: rest_command.tg_sonya_tea_keep_warm_temperature_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-```
-
 Testing checklist:
 
 - Sonya Telegram tea order does not speak in bedroom.
@@ -1508,13 +1256,15 @@ Testing checklist:
 - Reminder `Да` starts kettle without bedroom TTS.
 - Manual kettle stop uses state-aware stop.
 
-Check and restart:
+## Useful Maintenance Commands
 
 ```bash
 docker compose exec homeassistant python -m homeassistant --script check_config --config /config
 docker compose restart homeassistant
-docker compose up -d --build telegram-bot
+docker compose restart telegram-bot
+docker compose logs --tail=100 telegram-bot
 ```
+
 ## Run Locally
 
 Install dependencies:
