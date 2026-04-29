@@ -1,3 +1,5 @@
+FUTURE_UPDATES.md
+
 .env
 *.env
 !.env.example
