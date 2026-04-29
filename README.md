@@ -50,11 +50,11 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 
 ### Coffee Alerts
 
-- If `switch.kofemashina` stays on continuously for 15 minutes, Telegram receives a warmed-up alert with a `Выключить` button.
-- If `switch.kofemashina` turns off before 15 minutes, the warmed-up alert is not sent.
+- If `switch.kofemashina` stays on continuously for 13 minutes, Telegram receives a warmed-up alert with a `Выключить` button.
+- If `switch.kofemashina` turns off before 13 minutes, the warmed-up alert is not sent.
 - If `switch.kofemashina` stays on continuously for 1 hour, Telegram receives a warning alert with a `Выключить` button.
 - In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to enable or disable coffee alerts separately:
-  `Уведомление о готовности 15 мин` and `Уведомление о перегреве 1 час`.
+  `Уведомление о готовности 13 мин` and `Уведомление о перегреве 1 час`.
 - The alert settings are stored in `APP_STATE_PATH` and survive bot container restarts.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
 
@@ -178,7 +178,7 @@ TELEGRAM_SONYA_USER_IDS=222222222
 ```
 
 `APP_STATE_PATH` stores persistent bot UI settings. Currently it stores the separate coffee alert
-toggles from `Умные устройства` -> `Кофемашина` -> `Настройки`: 15-minute readiness and 1-hour
+toggles from `Умные устройства` -> `Кофемашина` -> `Настройки`: 13-minute readiness and 1-hour
 overheat warnings. Mount `/app/data` as a Docker volume if the container is recreated, not only restarted.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
@@ -1008,7 +1008,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
     - platform: state
       entity_id: switch.kofemashina
       to: "on"
-      for: "00:15:00"
+      for: "00:13:00"
   condition:
     - condition: state
       entity_id: switch.kofemashina
@@ -1348,6 +1348,6 @@ If the bot container fails, Home Assistant should still be reachable through the
 
 Reminder tasks are stored in memory through `asyncio.create_task`. They are lost when the bot container restarts. The storage interface is intentionally separated so SQLite can replace in-memory storage later.
 
-Coffee alert settings are not reminder tasks. The 15-minute readiness toggle and the 1-hour
+Coffee alert settings are not reminder tasks. The 13-minute readiness toggle and the 1-hour
 overheat toggle are stored separately in the JSON file configured by `APP_STATE_PATH`, so normal
 container restarts keep both settings.
