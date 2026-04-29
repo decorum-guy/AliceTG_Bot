@@ -51,14 +51,17 @@ async def show_coffee_settings(
 
     if callback.message:
         await callback.message.edit_text(
-            _coffee_settings_text(app_state.coffee_alerts_enabled),
-            reply_markup=coffee_settings(app_state.coffee_alerts_enabled),
+            _coffee_settings_text(app_state),
+            reply_markup=coffee_settings(
+                warmed_up_enabled=app_state.coffee_warmed_up_alert_enabled,
+                long_running_enabled=app_state.coffee_long_running_alert_enabled,
+            ),
         )
     await callback.answer()
 
 
-@router.callback_query(F.data == "coffee:toggle_alerts")
-async def toggle_coffee_alerts(
+@router.callback_query(F.data == "coffee:toggle_warmed_up_alert")
+async def toggle_coffee_warmed_up_alert(
     callback: CallbackQuery,
     settings: Settings,
     app_state: AppStateStore,
@@ -67,14 +70,40 @@ async def toggle_coffee_alerts(
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    enabled = not app_state.coffee_alerts_enabled
-    await app_state.set_coffee_alerts_enabled(enabled)
+    enabled = not app_state.coffee_warmed_up_alert_enabled
+    await app_state.set_coffee_warmed_up_alert_enabled(enabled)
     if callback.message:
         await callback.message.edit_text(
-            _coffee_settings_text(enabled),
-            reply_markup=coffee_settings(enabled),
+            _coffee_settings_text(app_state),
+            reply_markup=coffee_settings(
+                warmed_up_enabled=app_state.coffee_warmed_up_alert_enabled,
+                long_running_enabled=app_state.coffee_long_running_alert_enabled,
+            ),
         )
-    await callback.answer("Уведомления включены" if enabled else "Уведомления выключены")
+    await callback.answer("Готовность включена" if enabled else "Готовность выключена")
+
+
+@router.callback_query(F.data == "coffee:toggle_long_running_alert")
+async def toggle_coffee_long_running_alert(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    enabled = not app_state.coffee_long_running_alert_enabled
+    await app_state.set_coffee_long_running_alert_enabled(enabled)
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_settings_text(app_state),
+            reply_markup=coffee_settings(
+                warmed_up_enabled=app_state.coffee_warmed_up_alert_enabled,
+                long_running_enabled=app_state.coffee_long_running_alert_enabled,
+            ),
+        )
+    await callback.answer("Перегрев включен" if enabled else "Перегрев выключен")
 
 
 @router.callback_query(F.data.in_({"coffee:turn_on", "coffee:turn_off"}))
@@ -376,10 +405,12 @@ def _parse_ha_datetime(value: str | None) -> datetime | None:
         return None
 
 
-def _coffee_settings_text(alerts_enabled: bool) -> str:
-    state = "включены" if alerts_enabled else "выключены"
+def _coffee_settings_text(app_state: AppStateStore) -> str:
+    warmed_up_state = "включено" if app_state.coffee_warmed_up_alert_enabled else "выключено"
+    long_running_state = "включено" if app_state.coffee_long_running_alert_enabled else "выключено"
     return (
         "⚙️ <b>Настройки кофемашины</b>\n\n"
-        f"Уведомления о кофемашине: <b>{state}</b>\n\n"
-        "Настройка управляет уведомлениями через 15 минут и через 1 час непрерывной работы."
+        f"Уведомление о готовности 15 мин: <b>{warmed_up_state}</b>\n"
+        f"Уведомление о перегреве 1 час: <b>{long_running_state}</b>\n\n"
+        "Эти настройки управляют только Telegram-уведомлениями, не самой кофемашиной."
     )

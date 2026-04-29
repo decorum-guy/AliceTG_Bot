@@ -13,18 +13,25 @@ class AppStateStore:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
         self._lock = asyncio.Lock()
-        self._state: dict[str, Any] = {
-            "coffee_alerts_enabled": True,
-        }
+        self._state: dict[str, Any] = {}
         self._load()
 
     @property
-    def coffee_alerts_enabled(self) -> bool:
-        return bool(self._state.get("coffee_alerts_enabled", True))
+    def coffee_warmed_up_alert_enabled(self) -> bool:
+        return bool(self._state.get("coffee_warmed_up_alert_enabled", self._legacy_coffee_alerts_enabled()))
 
-    async def set_coffee_alerts_enabled(self, enabled: bool) -> None:
+    @property
+    def coffee_long_running_alert_enabled(self) -> bool:
+        return bool(self._state.get("coffee_long_running_alert_enabled", self._legacy_coffee_alerts_enabled()))
+
+    async def set_coffee_warmed_up_alert_enabled(self, enabled: bool) -> None:
         async with self._lock:
-            self._state["coffee_alerts_enabled"] = enabled
+            self._state["coffee_warmed_up_alert_enabled"] = enabled
+            await asyncio.to_thread(self._save)
+
+    async def set_coffee_long_running_alert_enabled(self, enabled: bool) -> None:
+        async with self._lock:
+            self._state["coffee_long_running_alert_enabled"] = enabled
             await asyncio.to_thread(self._save)
 
     def _load(self) -> None:
@@ -37,6 +44,9 @@ class AppStateStore:
             return
         if isinstance(data, dict):
             self._state.update(data)
+
+    def _legacy_coffee_alerts_enabled(self) -> bool:
+        return bool(self._state.get("coffee_alerts_enabled", True))
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

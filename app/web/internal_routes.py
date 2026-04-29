@@ -150,8 +150,8 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
     ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
 
-    if not app_state.coffee_alerts_enabled:
-        LOGGER.info("Coffee warm-up alert skipped because coffee alerts are disabled")
+    if not app_state.coffee_warmed_up_alert_enabled:
+        LOGGER.info("Coffee warm-up alert skipped because this alert is disabled")
         return web.json_response({"ok": True, "sent": False, "disabled": True})
 
     switch_state = await ha.get_state(settings.coffee_switch_entity)
@@ -174,8 +174,8 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
 
-    if not app_state.coffee_alerts_enabled:
-        LOGGER.info("Coffee long-running alert skipped because coffee alerts are disabled")
+    if not app_state.coffee_long_running_alert_enabled:
+        LOGGER.info("Coffee long-running alert skipped because this alert is disabled")
         return web.json_response({"ok": True, "sent": False, "disabled": True})
 
     switch_state = await ha.get_state(settings.coffee_switch_entity)

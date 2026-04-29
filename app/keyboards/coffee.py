@@ -17,11 +17,13 @@ def coffee_status(is_on: bool) -> InlineKeyboardMarkup:
     )
 
 
-def coffee_settings(alerts_enabled: bool) -> InlineKeyboardMarkup:
-    toggle_text = "Выключить уведомления" if alerts_enabled else "Включить уведомления"
+def coffee_settings(*, warmed_up_enabled: bool, long_running_enabled: bool) -> InlineKeyboardMarkup:
+    warmed_up_text = "Выключить готовность 15 мин" if warmed_up_enabled else "Включить готовность 15 мин"
+    long_running_text = "Выключить перегрев 1 час" if long_running_enabled else "Включить перегрев 1 час"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [inline_button(text=toggle_text, callback_data="coffee:toggle_alerts", style=BUTTON_PRIMARY)],
+            [inline_button(text=warmed_up_text, callback_data="coffee:toggle_warmed_up_alert", style=BUTTON_PRIMARY)],
+            [inline_button(text=long_running_text, callback_data="coffee:toggle_long_running_alert", style=BUTTON_PRIMARY)],
             [inline_button(text="⬅️ Назад", callback_data="coffee:status", style=BUTTON_PRIMARY)],
         ]
     )
