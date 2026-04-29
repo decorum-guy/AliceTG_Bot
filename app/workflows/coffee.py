@@ -11,6 +11,8 @@ from aiogram.types import InlineKeyboardMarkup
 from app.config import Settings
 from app.keyboards.coffee import confirmation, delete_only
 from app.keyboards.main import main_menu, sonya_order_menu
+from app.messages import coffee as coffee_messages
+from app.messages.common import admin_menu_text, sonya_menu_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.storage.base import Reminder, Storage
@@ -109,7 +111,7 @@ class CoffeeWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            "Я уточняю у Сони, хочет ли она кофе...",
+            coffee_messages.coffee_questioning(),
             delete_only(),
         )
         self._set_active_message(chat_id, edited_id)
@@ -127,7 +129,7 @@ class CoffeeWorkflow:
 
         if intent == "YANDEX.REJECT" or any(word in normalized for word in NEGATIVE_WORDS):
             await self._clear_all_wait_flags()
-            await self._edit_active_or_send("Соня отказалась от кофе. Не включаю кофемашину.", delete_only())
+            await self._edit_active_or_send(coffee_messages.coffee_refused(), delete_only())
             await self._show_admin_menu()
             return
 
@@ -146,7 +148,7 @@ class CoffeeWorkflow:
         self._latest_context = context
         await self._clear_all_wait_flags()
         await self._edit_active_or_send(
-            f"Соня ответила: {_h(shown)}. Включить кофемашину?",
+            coffee_messages.coffee_unknown_answer(shown),
             confirmation(),
             context=context,
         )
@@ -223,7 +225,7 @@ class CoffeeWorkflow:
         await self._clear_all_wait_flags()
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
-            "Соня отказалась от кофе. Кофемашина не включена.",
+            coffee_messages.coffee_hall_refused(),
             reply_markup=delete_only(),
         )
 
@@ -235,7 +237,7 @@ class CoffeeWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            f"Я включила кофемашину. Соня просила: {_h(context.coffee_type)}.",
+            coffee_messages.coffee_started(context.coffee_type),
             delete_only(),
         )
         if context.speak_to_bedroom_on_confirm:
@@ -250,7 +252,7 @@ class CoffeeWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            f"Я не включаю кофемашину. Соня просила: {_h(context.coffee_type)}.",
+            coffee_messages.coffee_declined(context.coffee_type),
             delete_only(),
         )
         if context.speak_to_bedroom_on_decline:
@@ -457,15 +459,15 @@ class CoffeeWorkflow:
     async def _show_admin_menu(self) -> None:
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
-            "Я рядом. Что делаем дальше?",
+            admin_menu_text(),
             reply_markup=main_menu(),
         )
 
     async def _show_menu_for_chat(self, chat_id: int) -> None:
         if chat_id == self._settings.telegram_admin_chat_id:
-            await self._telegram_messages.safe_send(chat_id, "Я рядом. Что делаем дальше?", reply_markup=main_menu())
+            await self._telegram_messages.safe_send(chat_id, admin_menu_text(), reply_markup=main_menu())
             return
-        await self._telegram_messages.safe_send(chat_id, "Что заказать?", reply_markup=sonya_order_menu())
+        await self._telegram_messages.safe_send(chat_id, sonya_menu_text(), reply_markup=sonya_order_menu())
 
 
 def normalize_coffee_answer(answer: str) -> str:
@@ -511,51 +513,19 @@ def context_from_text(answer: str) -> CoffeeMessageContext:
 
 
 def order_progress_text(temperature: str | None, syrup: str | None) -> str:
-    return "\n".join(
-        [
-            "Соня хочет кофе.",
-            f"Тип: {_h(temperature) if temperature else '<em>уточняю</em>'}",
-            f"Сироп: {_h(syrup) if syrup else '<em>уточняю</em>'}",
-        ]
-    )
+    return coffee_messages.coffee_order_progress(temperature, syrup)
 
 
 def order_confirmation_text(context: CoffeeMessageContext) -> str:
-    return "\n".join(
-        [
-            "Соня попросила кофе.",
-            f"Тип: {_h(context.temperature or context.coffee_type)}",
-            f"Сироп: {_h(context.syrup or 'не указано')}",
-            "",
-            "Включить кофемашину?",
-        ]
-    )
+    return coffee_messages.coffee_order_confirmation(context.temperature or context.coffee_type, context.syrup or "не указано")
 
 
 def auto_enabled_text(context: CoffeeMessageContext) -> str:
-    return "\n".join(
-        [
-            "Соня заказала кофе.",
-            f"Тип: {_h(context.temperature or context.coffee_type)}",
-            f"Сироп: {_h(context.syrup or 'не указано')}",
-            "",
-            "Кофемашина уже включена.",
-        ]
-    )
+    return coffee_messages.coffee_auto_enabled(context.temperature or context.coffee_type, context.syrup or "не указано")
 
 
 def reminder_text(context: CoffeeMessageContext) -> str:
-    return "\n".join(
-        [
-            "Напоминание",
-            "",
-            "Соня просила кофе.",
-            f"Тип: {_h(context.temperature or context.coffee_type)}",
-            f"Сироп: {_h(context.syrup or 'не указано')}",
-            "",
-            "Включить кофемашину?",
-        ]
-    )
+    return coffee_messages.coffee_reminder(context.temperature or context.coffee_type, context.syrup or "не указано")
 
 
 def minute_word(minutes: int) -> str:

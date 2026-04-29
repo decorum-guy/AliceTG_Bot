@@ -11,6 +11,8 @@ from app.config import Settings
 from app.keyboards.coffee import delete_only
 from app.keyboards.main import main_menu, sonya_order_menu
 from app.keyboards.tea import tea_confirmation
+from app.messages import tea as tea_messages
+from app.messages.common import admin_menu_text, sonya_menu_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.storage.base import Reminder
@@ -122,7 +124,7 @@ class TeaWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            "Я уточняю у Сони, хочет ли она чай...",
+            tea_messages.tea_questioning(),
             delete_only(),
         )
         self._set_active_message(chat_id, edited_id)
@@ -146,11 +148,11 @@ class TeaWorkflow:
                 await self._ha.play_media(self._settings.living_room_player_entity, "Соня отказалась от чая.")
                 await self._telegram_messages.safe_send(
                     self._settings.telegram_admin_chat_id,
-                    "Соня отказалась от чая. Чайник не включен.",
+                    tea_messages.tea_hall_refused(),
                     reply_markup=delete_only(),
                 )
                 return
-            await self._edit_active_or_send("Соня отказалась от чая. Не включаю чайник.", delete_only())
+            await self._edit_active_or_send(tea_messages.tea_refused(), delete_only())
             await self._show_admin_menu()
             return
 
@@ -233,7 +235,7 @@ class TeaWorkflow:
         await self._clear_all_wait_flags()
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
-            "Соня отказалась от чая. Чайник не включен.",
+            tea_messages.tea_hall_refused(),
             reply_markup=delete_only(),
         )
 
@@ -293,7 +295,7 @@ class TeaWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            "Я не включаю чайник. Соня просила чай.",
+            tea_messages.tea_declined(),
             delete_only(),
         )
         if context.speak_to_bedroom_on_decline:
@@ -488,13 +490,13 @@ class TeaWorkflow:
         task.add_done_callback(self._tasks.discard)
 
     async def _show_admin_menu(self) -> None:
-        await self._telegram_messages.safe_send(self._settings.telegram_admin_chat_id, "Я рядом. Что делаем дальше?", reply_markup=main_menu())
+        await self._telegram_messages.safe_send(self._settings.telegram_admin_chat_id, admin_menu_text(), reply_markup=main_menu())
 
     async def _show_menu_for_chat(self, chat_id: int) -> None:
         if chat_id == self._settings.telegram_admin_chat_id:
-            await self._telegram_messages.safe_send(chat_id, "Я рядом. Что делаем дальше?", reply_markup=main_menu())
+            await self._telegram_messages.safe_send(chat_id, admin_menu_text(), reply_markup=main_menu())
             return
-        await self._telegram_messages.safe_send(chat_id, "Что заказать?", reply_markup=sonya_order_menu())
+        await self._telegram_messages.safe_send(chat_id, sonya_menu_text(), reply_markup=sonya_order_menu())
 
     def _is_duplicate_event(self, step: str, answer: TeaAnswer) -> bool:
         now = time.monotonic()
@@ -551,15 +553,15 @@ def tea_keep_warm_label(context: TeaContext) -> str:
 
 
 def tea_progress_text(keep_warm: str = "уточняю") -> str:
-    return "\n".join(["Соня хочет чай.", f"Поддержание тепла: {keep_warm}"])
+    return tea_messages.tea_progress(keep_warm)
 
 
 def tea_confirmation_text(context: TeaContext) -> str:
-    return "\n".join(["Соня попросила чай.", f"Поддержание тепла: {tea_keep_warm_label(context)}", "", "Включить чайник?"])
+    return tea_messages.tea_confirmation(tea_keep_warm_label(context))
 
 
 def tea_auto_enabled_text(context: TeaContext) -> str:
-    return "\n".join(["Соня заказала чай.", f"Поддержание тепла: {tea_keep_warm_label(context)}", "", "Чайник уже включен."])
+    return tea_messages.tea_auto_enabled(tea_keep_warm_label(context))
 
 
 def tea_hall_result_speech(context: TeaContext) -> str:
@@ -569,13 +571,11 @@ def tea_hall_result_speech(context: TeaContext) -> str:
 
 
 def tea_reminder_text(context: TeaContext) -> str:
-    return "\n".join(["Напоминание", "", "Соня просила чай.", f"Поддержание тепла: {tea_keep_warm_label(context)}", "", "Включить чайник?"])
+    return tea_messages.tea_reminder(tea_keep_warm_label(context))
 
 
 def tea_started_text(context: TeaContext) -> str:
-    if context.keep_warm_temperature is None:
-        return "Я включила чайник. Грею до кипения."
-    return f"Я включила чайник. После закипания включу поддержание тепла на {context.keep_warm_temperature} °C."
+    return tea_messages.tea_started(context.keep_warm_temperature)
 
 
 def _matches_answer(normalized: str, words: tuple[str, ...]) -> bool:

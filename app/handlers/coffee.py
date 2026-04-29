@@ -10,6 +10,8 @@ from aiogram.types import CallbackQuery
 from app.config import Settings
 from app.keyboards.coffee import coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
+from app.messages import coffee as coffee_messages
+from app.messages.common import reminder_scheduled_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.workflows.coffee import CoffeeWorkflow
@@ -27,7 +29,7 @@ async def show_coffee_status(
     telegram_messages: TelegramMessages,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     text, is_on = await _coffee_status_text(settings, ha)
@@ -44,7 +46,7 @@ async def toggle_coffee(
     telegram_messages: TelegramMessages,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     turn_on = callback.data == "coffee:turn_on"
@@ -87,7 +89,7 @@ async def turn_off_from_coffee_alert(
     telegram_messages: TelegramMessages,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     try:
@@ -101,7 +103,7 @@ async def turn_off_from_coffee_alert(
         await telegram_messages.safe_edit(
             callback.message.chat.id,
             callback.message.message_id,
-            "Кофемашина выключена.",
+            coffee_messages.coffee_alert_turned_off(),
             delete_only(),
         )
     await callback.answer("Выключила")
@@ -110,11 +112,11 @@ async def turn_off_from_coffee_alert(
 @router.callback_query(F.data == "sonya:menu")
 async def ask_sonya_menu(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:
-        await callback.message.edit_text("Я уточняю у Сони.", reply_markup=sonya_menu())
+        await callback.message.edit_text(coffee_messages.coffee_questioning(), reply_markup=sonya_menu())
     await callback.answer()
 
 
@@ -125,7 +127,7 @@ async def ask_sonya_coffee(
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:
@@ -145,7 +147,7 @@ async def coffee_confirmation(
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.data == "coffee_confirm:later":
@@ -183,24 +185,24 @@ async def coffee_later(
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     minutes = int((callback.data or "").split(":", 1)[1])
     await coffee_workflow.schedule_reminder(callback.message.chat.id, minutes, callback.message.message_id)  # type: ignore[union-attr]
     if callback.message:
-        await callback.message.edit_text(f"Я напомню через {minutes} {minute_word(minutes)}.", reply_markup=delete_only())
+        await callback.message.edit_text(reminder_scheduled_text(minutes, minute_word(minutes)), reply_markup=delete_only())
     await callback.answer("Я напомню позже")
 
 
 @router.callback_query(F.data == "sonya_order:coffee")
 async def sonya_order_coffee(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:
-        await callback.message.edit_text("Какой кофе?", reply_markup=sonya_temperature_menu())
+        await callback.message.edit_text(coffee_messages.sonya_coffee_temperature_question(), reply_markup=sonya_temperature_menu())
     await callback.answer()
 
 
@@ -211,13 +213,13 @@ async def sonya_order_temperature(
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
     if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     temperature = (callback.data or "").split(":", 1)[1]
     await coffee_workflow.set_sonya_order_temperature(callback.from_user.id, temperature)
     if callback.message:
-        await callback.message.edit_text("С сиропом?", reply_markup=sonya_syrup_menu())
+        await callback.message.edit_text(coffee_messages.sonya_coffee_syrup_question(), reply_markup=sonya_syrup_menu())
     await callback.answer()
 
 
@@ -228,14 +230,14 @@ async def sonya_order_syrup(
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
     if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     syrup = (callback.data or "").split(":", 1)[1]
     draft = await coffee_workflow.set_sonya_order_syrup(callback.from_user.id, syrup)
     if callback.message:
         await callback.message.edit_text(
-            f"Проверяю заказ:\n{draft.order_text()}.\nВсё верно?",
+            coffee_messages.sonya_coffee_confirm(draft.order_text()),
             reply_markup=sonya_order_confirm_menu(),
         )
     await callback.answer()
@@ -248,23 +250,23 @@ async def sonya_order_confirm(
     coffee_workflow: CoffeeWorkflow,
 ) -> None:
     if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     await coffee_workflow.submit_sonya_order(callback.from_user.id)
     if callback.message:
-        await callback.message.edit_text("Передаю заказ Артёму.\nКофе скоро будет готов.", reply_markup=sonya_order_menu())
+        await callback.message.edit_text(coffee_messages.sonya_coffee_sent(), reply_markup=sonya_order_menu())
     await callback.answer("Готово, я передала сообщение")
 
 
 @router.callback_query(F.data == "sonya_order:cancel")
 async def sonya_order_cancel(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:
-        await callback.message.edit_text("Хорошо, отменяю заказ.", reply_markup=sonya_order_menu())
+        await callback.message.edit_text(coffee_messages.sonya_order_cancelled(), reply_markup=sonya_order_menu())
     await callback.answer()
 
 
@@ -272,8 +274,7 @@ async def _coffee_status_text(settings: Settings, ha: HomeAssistantClient) -> tu
     switch_state = await ha.get_state(settings.coffee_switch_entity)
     state = (switch_state or {}).get("state", "unavailable")
     is_on = state == "on"
-    lines = [f"Кофемашина: {'включена' if is_on else 'выключена' if state == 'off' else 'н/д'}"]
-    lines.append(f"Время работы: {_coffee_uptime_minutes_text(switch_state, is_on)}")
+    sensors: list[tuple[str, str]] = []
 
     labels = {
         "power": "Мощность",
@@ -288,9 +289,13 @@ async def _coffee_status_text(settings: Settings, ha: HomeAssistantClient) -> tu
             if sensor_state and sensor_state.get("state") not in {None, "unknown", "unavailable", ""}:
                 unit = sensor_state.get("attributes", {}).get("unit_of_measurement", "")
                 value = f"{sensor_state['state']} {unit}".strip()
-        lines.append(f"{label}: {value}")
+        sensors.append((label, value))
 
-    return "\n".join(lines), is_on
+    return coffee_messages.coffee_status_text(
+        is_on=is_on,
+        uptime=_coffee_uptime_minutes_text(switch_state, is_on),
+        sensors=sensors,
+    ), is_on
 
 
 async def _refresh_later(

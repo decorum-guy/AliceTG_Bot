@@ -14,7 +14,7 @@ async def delete_message(
     telegram_messages: TelegramMessages,
 ) -> None:
     if not settings.is_allowed_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:

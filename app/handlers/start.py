@@ -4,34 +4,30 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import Settings
 from app.keyboards.main import main_menu, smart_devices_menu, sonya_order_menu
+from app.messages.common import access_denied_text, admin_menu_text, smart_devices_menu_text, sonya_menu_text
 
 router = Router()
 
-SONYA_MENU_TEXT = (
-    "Привет, Соня 💛\n"
-    "Я Алиса, твой умный домашний помощник.\n\n"
-    "Я могу передать Артёму заказ и помочь быстро попросить кофе или чай.\n\n"
-    "Что заказать?"
-)
+SONYA_MENU_TEXT = sonya_menu_text()
 
 
 @router.message(CommandStart())
 async def start(message: Message, settings: Settings) -> None:
     if not settings.is_allowed_user(message.from_user.id if message.from_user else None):
-        await message.answer("Доступ запрещён")
+        await message.answer(access_denied_text())
         return
 
     if settings.is_sonya_user(message.from_user.id if message.from_user else None):
         await message.answer(SONYA_MENU_TEXT, reply_markup=sonya_order_menu())
         return
 
-    await message.answer("Я Алиса. Чем займёмся дома?", reply_markup=main_menu())
+    await message.answer(admin_menu_text(), reply_markup=main_menu())
 
 
 @router.callback_query(F.data == "menu:main")
 async def menu_main(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_allowed_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if settings.is_sonya_user(callback.from_user.id):
@@ -41,25 +37,25 @@ async def menu_main(callback: CallbackQuery, settings: Settings) -> None:
         return
 
     if callback.message:
-        await callback.message.edit_text("Я Алиса. Чем займёмся дома?", reply_markup=main_menu())
+        await callback.message.edit_text(admin_menu_text(), reply_markup=main_menu())
     await callback.answer()
 
 
 @router.callback_query(F.data == "devices:menu")
 async def devices_menu(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_admin_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:
-        await callback.message.edit_text("Умные устройства", reply_markup=smart_devices_menu())
+        await callback.message.edit_text(smart_devices_menu_text(), reply_markup=smart_devices_menu())
     await callback.answer()
 
 
 @router.callback_query(F.data == "menu:sonya")
 async def menu_sonya(callback: CallbackQuery, settings: Settings) -> None:
     if not settings.is_sonya_user(callback.from_user.id):
-        await callback.answer("Доступ запрещён", show_alert=True)
+        await callback.answer("Нет доступа", show_alert=True)
         return
 
     if callback.message:

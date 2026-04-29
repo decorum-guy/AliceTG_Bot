@@ -7,6 +7,7 @@ from aiohttp import web
 
 from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
+from app.messages import coffee as coffee_messages
 from app.services.home_assistant import HomeAssistantClient
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.tea import TeaAnswer, TeaWorkflow
@@ -154,7 +155,7 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
 
     await bot.send_message(
         settings.telegram_admin_chat_id,
-        "Уведомление: Кофемашина разогрета.",
+        coffee_messages.coffee_warmed_up(),
         reply_markup=coffee_turn_off_only(),
     )
     return web.json_response({"ok": True, "sent": True})
@@ -174,8 +175,7 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     runtime_text = _coffee_runtime_text(switch_state)
     await bot.send_message(
         settings.telegram_admin_chat_id,
-        "Предупреждение: Внимание, кофемашина работает непрерывно уже 1 час, рекомендуется выключить.\n"
-        f"Время непрерывной работы: {runtime_text}",
+        coffee_messages.coffee_warning_long_running_text(runtime_text),
         reply_markup=coffee_turn_off_only(),
     )
     return web.json_response({"ok": True, "sent": True})
