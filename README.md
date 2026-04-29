@@ -1091,8 +1091,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
              'sonya_direct_tea_keep_warm',
              'sonya_direct_tea_keep_warm_temperature',
              'hall_ask_sonya_wants_tea',
-             'hall_sonya_tea_keep_warm',
-             'hall_sonya_tea_keep_warm_temperature'
+             'hall_ask_sonya_tea_keep_warm',
+             'hall_ask_sonya_tea_keep_warm_temperature'
            ] }}
   action:
     - action: input_boolean.turn_off
@@ -1168,7 +1168,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
              dialog in [
                'tg_ask_sonya_tea_keep_warm',
                'sonya_direct_tea_keep_warm',
-               'hall_sonya_tea_keep_warm'
+               'hall_ask_sonya_tea_keep_warm'
              ]
              or (
                is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
@@ -1210,30 +1210,20 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set yandex_dialog_skill_name = 'домашний помощник' %}
         {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
-        {% set temperature_words = ['40', '50', '60', '70', '80', '90', 'сорок', 'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто'] %}
-        {% set has_temperature = temperature_words | select('in', text) | list | count > 0 %}
         {{ not is_service_phrase
            and (
              dialog in [
                'tg_ask_sonya_tea_keep_warm_temperature',
                'sonya_direct_tea_keep_warm_temperature',
-               'hall_sonya_tea_keep_warm_temperature'
+               'hall_ask_sonya_tea_keep_warm_temperature'
              ]
              or (
-               has_temperature and (
-                 is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
-                 or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
-                 or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
-               )
+               is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
+               or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
+               or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
              )
            ) }}
   action:
-    - action: input_boolean.turn_off
-      target:
-        entity_id:
-          - input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature
-          - input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature
-          - input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature
     - variables:
         answer: "{{ trigger.event.data.text | default('') }}"
         intent: "{{ trigger.event.data.intent | default('') }}"

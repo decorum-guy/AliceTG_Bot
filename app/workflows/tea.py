@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -140,6 +141,7 @@ class TeaWorkflow:
         self._dedupe_ttl_seconds = 5.0
 
     async def start_telegram_question(self, chat_id: int, message_id: int | None) -> int | None:
+        self._tg_draft = TeaDraft()
         await self._clear_all_wait_flags()
         await self._set_only_wait_flag(TG_AWAITING_TEA_WANTS)
         await self._ha.play_media(
@@ -157,6 +159,7 @@ class TeaWorkflow:
         return edited_id
 
     async def start_hall_question(self) -> None:
+        self._hall_draft = TeaDraft()
         await self._clear_all_wait_flags()
         await self._set_only_wait_flag(HALL_AWAITING_TEA_WANTS)
         await self._ha.play_media(
@@ -235,6 +238,7 @@ class TeaWorkflow:
             draft.keep_warm = False
             draft.keep_warm_temperature = None
             await self._finish_order(flow_type=flow_type)
+            self._schedule_bedroom_speech("Хорошо.", delay_seconds=1.0)
             return
 
         if intent == "YANDEX.CONFIRM" or _matches_answer(normalized, POSITIVE_WORDS):
@@ -253,13 +257,24 @@ class TeaWorkflow:
         temperature = parse_keep_warm_temperature(answer.answer)
         self._log_step(flow_type, "keep_warm_temperature", str(temperature or answer.answer), "received answer")
         if temperature is None:
-            await self._ha.play_media(self._settings.bedroom_player_entity, "Выбери температуру от 40 до 90 градусов с шагом 10.")
+            await self._set_only_wait_flag(self._temperature_wait_flag(flow_type))
+            await self._ha.play_media(
+                self._settings.bedroom_player_entity,
+                "Выбери температуру от 40 до 90 градусов с шагом 10.",
+                yandex_dialog_content_type(self._settings, self._temperature_dialog_id(flow_type)),
+            )
+            if flow_type == "telegram":
+                await self._edit_active_or_send(
+                    tea_progress_text("нужна температура 40, 50, 60, 70, 80 или 90 °C"),
+                    delete_only(),
+                )
             return
 
         draft = self._draft_for_flow(flow_type)
         draft.keep_warm = True
         draft.keep_warm_temperature = temperature
         await self._finish_order(flow_type=flow_type)
+        self._schedule_bedroom_speech("Хорошо.", delay_seconds=1.0)
 
     async def notify_auto_enabled(self, answer: TeaAnswer) -> None:
         if self._is_duplicate_event("auto_enabled", answer):
@@ -489,6 +504,20 @@ class TeaWorkflow:
             return self._hall_draft
         return self._tg_draft
 
+    def _temperature_wait_flag(self, flow_type: str) -> str:
+        if flow_type == "direct":
+            return DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE
+        if flow_type == "hall":
+            return HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE
+        return TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE
+
+    def _temperature_dialog_id(self, flow_type: str) -> str:
+        if flow_type == "direct":
+            return DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
+        if flow_type == "hall":
+            return HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
+        return TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
+
     async def _set_only_wait_flag(self, entity_id: str) -> None:
         await self._clear_all_wait_flags()
         await self._ha.input_boolean_turn_on(entity_id)
@@ -586,9 +615,11 @@ def context_from_draft(
 
 
 def parse_keep_warm_temperature(answer: str) -> int | None:
-    normalized = answer.strip().lower().replace("°", "").replace("градусов", "").replace("градуса", "").replace("градус", "").strip()
-    for key, value in TEMPERATURE_WORDS.items():
-        if key in normalized:
+    normalized = answer.strip().lower().replace("ё", "е")
+    tokens = re.findall(r"\d+|[а-яе]+", normalized)
+    for token in tokens:
+        value = TEMPERATURE_WORDS.get(token)
+        if value is not None:
             return value
     return None
 
