@@ -410,7 +410,7 @@ def _coffee_settings_text(app_state: AppStateStore) -> str:
     long_running_state = "включено" if app_state.coffee_long_running_alert_enabled else "выключено"
     return (
         "⚙️ <b>Настройки кофемашины</b>\n\n"
-        f"Уведомление о готовности 15 мин: <b>{warmed_up_state}</b>\n"
+        f"Уведомление о готовности 13 мин: <b>{warmed_up_state}</b>\n"
         f"Уведомление о перегреве 1 час: <b>{long_running_state}</b>\n\n"
         "Эти настройки управляют только Telegram-уведомлениями, не самой кофемашиной."
     )
