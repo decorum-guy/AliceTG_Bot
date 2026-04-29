@@ -372,6 +372,73 @@ rest_command:
       Content-Type: "application/json"
       X-Internal-Secret: !secret internal_webhook_secret
     payload: "{}"
+
+  tg_sonya_wants_tea_answer:
+    url: "http://telegram-bot:8088/internal/tea/sonya-wants-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_tea_keep_warm_answer:
+    url: "http://telegram-bot:8088/internal/tea/sonya-keep-warm-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_tea_keep_warm_temperature_answer:
+    url: "http://telegram-bot:8088/internal/tea/sonya-keep-warm-temperature-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_direct_tea_request:
+    url: "http://telegram-bot:8088/internal/tea/sonya-direct-request"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: "{}"
+
+  tg_sonya_hall_tea_request:
+    url: "http://telegram-bot:8088/internal/tea/hall-request"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: "{}"
+
+  tg_sonya_tea_auto_enabled:
+    url: "http://telegram-bot:8088/internal/tea/sonya-auto-enabled"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_tea_hall_refused:
+    url: "http://telegram-bot:8088/internal/tea/sonya-hall-refused"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: "{}"
 ```
 
 Add to `secrets.yaml`:
@@ -891,77 +958,7 @@ input_boolean:
     name: Hall awaiting Sonya tea keep warm temperature
 ```
 
-Add these `rest_command` entries to `configuration.yaml`:
-
-```yaml
-rest_command:
-  tg_sonya_wants_tea_answer:
-    url: "http://telegram-bot:8088/internal/tea/sonya-wants-answer"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
-
-  tg_sonya_tea_keep_warm_answer:
-    url: "http://telegram-bot:8088/internal/tea/sonya-keep-warm-answer"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
-
-  tg_sonya_tea_keep_warm_temperature_answer:
-    url: "http://telegram-bot:8088/internal/tea/sonya-keep-warm-temperature-answer"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
-
-  tg_sonya_direct_tea_request:
-    url: "http://telegram-bot:8088/internal/tea/sonya-direct-request"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: "{}"
-
-  tg_sonya_hall_tea_request:
-    url: "http://telegram-bot:8088/internal/tea/hall-request"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: "{}"
-
-  tg_sonya_tea_auto_enabled:
-    url: "http://telegram-bot:8088/internal/tea/sonya-auto-enabled"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
-
-  tg_sonya_tea_hall_refused:
-    url: "http://telegram-bot:8088/internal/tea/sonya-hall-refused"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: "{}"
-```
+Tea `rest_command` entries are included in the complete `configuration.yaml` block above.
 
 Tea automation ids to add to `automations.yaml`:
 
