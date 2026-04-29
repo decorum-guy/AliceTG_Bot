@@ -238,7 +238,7 @@ class TeaWorkflow:
             draft.keep_warm = False
             draft.keep_warm_temperature = None
             await self._finish_order(flow_type=flow_type)
-            self._schedule_bedroom_speech("Хорошо.", delay_seconds=1.0)
+            self._schedule_bedroom_speech("Хорошо, заказ принят.", delay_seconds=1.0)
             return
 
         if intent == "YANDEX.CONFIRM" or _matches_answer(normalized, POSITIVE_WORDS):
@@ -274,7 +274,7 @@ class TeaWorkflow:
         draft.keep_warm = True
         draft.keep_warm_temperature = temperature
         await self._finish_order(flow_type=flow_type)
-        self._schedule_bedroom_speech("Хорошо.", delay_seconds=1.0)
+        self._schedule_bedroom_speech("Хорошо, заказ принят.", delay_seconds=1.0)
 
     async def notify_auto_enabled(self, answer: TeaAnswer) -> None:
         if self._is_duplicate_event("auto_enabled", answer):
@@ -341,8 +341,6 @@ class TeaWorkflow:
             tea_started_text(context),
             delete_only(),
         )
-        if context.speak_to_bedroom_on_confirm:
-            self._schedule_bedroom_speech("Чай скоро будет готов.", delay_seconds=2.0)
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
@@ -356,8 +354,6 @@ class TeaWorkflow:
             tea_messages.tea_declined(),
             delete_only(),
         )
-        if context.speak_to_bedroom_on_decline:
-            self._schedule_bedroom_speech("Артём пока не включает чайник.", delay_seconds=2.0)
         await self._show_menu_for_chat(chat_id)
         return edited_id
 

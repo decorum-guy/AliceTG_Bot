@@ -12,6 +12,7 @@ from aiohttp import web
 
 from app.config import Settings
 from app.handlers import coffee, common, start, tea
+from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient
 from app.services.telegram_messages import TelegramMessages
 from app.storage.memory import MemoryStorage
@@ -49,6 +50,7 @@ async def create_app() -> web.Application:
 
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
     storage = MemoryStorage()
+    app_state = AppStateStore(settings.app_state_path)
     telegram_messages = TelegramMessages(bot)
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
@@ -56,6 +58,7 @@ async def create_app() -> web.Application:
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
     dispatcher["storage"] = storage
+    dispatcher["app_state"] = app_state
     dispatcher["telegram_messages"] = telegram_messages
     dispatcher["coffee_workflow"] = coffee_workflow
     dispatcher["tea_workflow"] = tea_workflow
@@ -65,6 +68,7 @@ async def create_app() -> web.Application:
     app["bot"] = bot
     app["dispatcher"] = dispatcher
     app["ha"] = ha
+    app["app_state"] = app_state
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow
 

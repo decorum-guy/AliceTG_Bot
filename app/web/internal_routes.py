@@ -8,6 +8,7 @@ from aiohttp import web
 from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
 from app.messages import coffee as coffee_messages
+from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.tea import TeaAnswer, TeaWorkflow
@@ -145,8 +146,13 @@ async def sonya_hall_refused(request: web.Request) -> web.Response:
 async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     settings: Settings = request.app["settings"]
+    app_state: AppStateStore = request.app["app_state"]
     ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
+
+    if not app_state.coffee_alerts_enabled:
+        LOGGER.info("Coffee warm-up alert skipped because coffee alerts are disabled")
+        return web.json_response({"ok": True, "sent": False, "disabled": True})
 
     switch_state = await ha.get_state(settings.coffee_switch_entity)
     if not switch_state or switch_state.get("state") != "on":
@@ -164,8 +170,13 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
 async def coffee_long_running_alert(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     settings: Settings = request.app["settings"]
+    app_state: AppStateStore = request.app["app_state"]
     ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
+
+    if not app_state.coffee_alerts_enabled:
+        LOGGER.info("Coffee long-running alert skipped because coffee alerts are disabled")
+        return web.json_response({"ok": True, "sent": False, "disabled": True})
 
     switch_state = await ha.get_state(settings.coffee_switch_entity)
     if not switch_state or switch_state.get("state") != "on":

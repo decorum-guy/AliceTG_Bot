@@ -8,10 +8,11 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from app.config import Settings
-from app.keyboards.coffee import coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
+from app.keyboards.coffee import coffee_settings, coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.messages import coffee as coffee_messages
 from app.messages.common import reminder_scheduled_text
+from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.workflows.coffee import CoffeeWorkflow
@@ -36,6 +37,44 @@ async def show_coffee_status(
     if callback.message:
         await telegram_messages.safe_edit(callback.message.chat.id, callback.message.message_id, text, coffee_status(is_on))
     await callback.answer("Обновила")
+
+
+@router.callback_query(F.data == "coffee:settings")
+async def show_coffee_settings(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_settings_text(app_state.coffee_alerts_enabled),
+            reply_markup=coffee_settings(app_state.coffee_alerts_enabled),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "coffee:toggle_alerts")
+async def toggle_coffee_alerts(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    enabled = not app_state.coffee_alerts_enabled
+    await app_state.set_coffee_alerts_enabled(enabled)
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_settings_text(enabled),
+            reply_markup=coffee_settings(enabled),
+        )
+    await callback.answer("Уведомления включены" if enabled else "Уведомления выключены")
 
 
 @router.callback_query(F.data.in_({"coffee:turn_on", "coffee:turn_off"}))
@@ -335,3 +374,12 @@ def _parse_ha_datetime(value: str | None) -> datetime | None:
     except ValueError:
         LOGGER.warning("Cannot parse Home Assistant datetime: %s", value)
         return None
+
+
+def _coffee_settings_text(alerts_enabled: bool) -> str:
+    state = "включены" if alerts_enabled else "выключены"
+    return (
+        "⚙️ <b>Настройки кофемашины</b>\n\n"
+        f"Уведомления о кофемашине: <b>{state}</b>\n\n"
+        "Настройка управляет уведомлениями через 15 минут и через 1 час непрерывной работы."
+    )

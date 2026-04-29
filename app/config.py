@@ -53,6 +53,7 @@ class Settings:
     ha_url: str
     ha_long_lived_token: str
     internal_webhook_secret: str
+    app_state_path: str = "/app/data/state.json"
     webhook_path: str = "/webhook"
     listen_host: str = "0.0.0.0"
     listen_port: int = 8088
@@ -91,6 +92,7 @@ class Settings:
             ha_url=os.getenv("HA_URL", "http://homeassistant:8123").rstrip("/"),
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
+            app_state_path=os.getenv("APP_STATE_PATH", "/app/data/state.json").strip() or "/app/data/state.json",
             yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
             or "домашний помощник",
         )

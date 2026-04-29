@@ -130,6 +130,7 @@ class CoffeeWorkflow:
 
         if intent == "YANDEX.REJECT" or any(word in normalized for word in NEGATIVE_WORDS):
             await self._clear_all_wait_flags()
+            await self._say_bedroom("Хорошо.")
             await self._edit_active_or_send(coffee_messages.coffee_refused(), delete_only())
             await self._show_admin_menu()
             return
@@ -241,8 +242,6 @@ class CoffeeWorkflow:
             coffee_messages.coffee_started(context.coffee_type),
             delete_only(),
         )
-        if context.speak_to_bedroom_on_confirm:
-            self._schedule_bedroom_speech("Твой кофе скоро будет готов.", delay_seconds=2.0)
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
@@ -256,8 +255,6 @@ class CoffeeWorkflow:
             coffee_messages.coffee_declined(context.coffee_type),
             delete_only(),
         )
-        if context.speak_to_bedroom_on_decline:
-            self._schedule_bedroom_speech("Артём пока не включает кофемашину.", delay_seconds=2.0)
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
@@ -460,8 +457,7 @@ class CoffeeWorkflow:
         if not context.bedroom_ack_enabled:
             return
 
-        syrup = context.syrup or "без сиропа"
-        await self._say_bedroom(f"Хорошо, {context.temperature or context.coffee_type} {syrup}, поняла.")
+        await self._say_bedroom("Хорошо, заказ принят.")
 
     async def _show_admin_menu(self) -> None:
         await self._telegram_messages.safe_send(

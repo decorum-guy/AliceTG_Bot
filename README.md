@@ -43,8 +43,8 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - Telegram-initiated coffee flow may edit the active Telegram message after each step.
 - Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
 - Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, auto-enables the coffee machine after a positive answer, and sends Telegram only an info notification with `Удалить уведомление`.
-- Sonya Telegram order uses `source=sonya_telegram_order`, so the bedroom does not say `Твой кофе скоро будет готов` after Artem presses `Да`.
-- Voice-based coffee flows say a short bedroom acknowledgement after syrup, for example `Хорошо, горячий кофе без сиропа, поняла.` Confirmation speech is delayed briefly so it does not overlap.
+- Voice-based coffee flows say one short bedroom acknowledgement after Sonya gives the final answer: `Хорошо, заказ принят.`.
+- After Artem presses `Да`, `Нет`, or `Попозже` in Telegram, the bedroom does not say anything. Telegram messages and device actions continue normally.
 - Before Artem confirms, the coffee machine does not turn on, except in the hall/zal voice flow where it turns on automatically after Sonya says yes.
 - If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all coffee wait flags through Home Assistant.
 
@@ -53,6 +53,8 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - If `switch.kofemashina` stays on continuously for 15 minutes, Telegram receives a warmed-up alert with a `Выключить` button.
 - If `switch.kofemashina` turns off before 15 minutes, the warmed-up alert is not sent.
 - If `switch.kofemashina` stays on continuously for 1 hour, Telegram receives a warning alert with a `Выключить` button.
+- In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to enable or disable both coffee alerts.
+- The alert setting is stored in `APP_STATE_PATH` and survives bot container restarts.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
 
 ### Tea And Kettle Workflow
@@ -60,6 +62,8 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - Telegram ask-Sonya tea flow asks whether Sonya wants tea, then asks about keep-warm.
 - Direct voice tea flow asks keep-warm first and does not start the kettle before Artem confirms.
 - Hall/zal tea flow asks whether Sonya wants tea first, starts the kettle automatically after a positive answer, and sends Telegram only an info notification.
+- Voice-based tea flows say one short bedroom acknowledgement after Sonya gives the final order answer: `Хорошо, заказ принят.`.
+- After Artem presses `Да`, `Нет`, or `Попозже` in Telegram, the bedroom does not say anything. Telegram messages, kettle start, and post-boil keep-warm continue normally.
 - Sonya Telegram tea order does not speak in the bedroom.
 - Boil with `water_heater.set_temperature` and `temperature: 100`.
 - Stop with `water_heater.set_operation_mode` and `operation_mode: "off"`.
@@ -146,6 +150,7 @@ TELEGRAM_DROP_PENDING_UPDATES=true
 TELEGRAM_POLLING_TIMEOUT=30
 TELEGRAM_POLLING_MAX_ERRORS=10
 TELEGRAM_ENABLE_TEST_1_MIN_REMINDER=false
+APP_STATE_PATH=/app/data/state.json
 
 # HTTP proxy for Telegram API requests only.
 TELEGRAM_PROXY=login:pass@host:port
@@ -170,6 +175,10 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 ```env
 TELEGRAM_SONYA_USER_IDS=222222222
 ```
+
+`APP_STATE_PATH` stores persistent bot UI settings. Currently it stores the coffee alert toggle
+from `Умные устройства` -> `Кофемашина` -> `Настройки`. Mount `/app/data` as a Docker volume if
+the container is recreated, not only restarted.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
 values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is
@@ -1337,3 +1346,6 @@ If the bot container fails, Home Assistant should still be reachable through the
 ## MVP Limitations
 
 Reminder tasks are stored in memory through `asyncio.create_task`. They are lost when the bot container restarts. The storage interface is intentionally separated so SQLite can replace in-memory storage later.
+
+Coffee alert settings are not reminder tasks. They are stored in the JSON file configured by
+`APP_STATE_PATH`, so normal container restarts keep the setting.

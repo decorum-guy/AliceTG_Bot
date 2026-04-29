@@ -12,6 +12,17 @@ def coffee_status(is_on: bool) -> InlineKeyboardMarkup:
             [inline_button(text=label, callback_data=action, style=action_style)],
             [inline_button(text="🔄 Обновить", callback_data="coffee:status", style=BUTTON_PRIMARY)],
             [inline_button(text="⬅️ Назад", callback_data="devices:menu", style=BUTTON_PRIMARY)],
+            [inline_button(text="⚙️ Настройки", callback_data="coffee:settings", style=BUTTON_PRIMARY)],
+        ]
+    )
+
+
+def coffee_settings(alerts_enabled: bool) -> InlineKeyboardMarkup:
+    toggle_text = "Выключить уведомления" if alerts_enabled else "Включить уведомления"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text=toggle_text, callback_data="coffee:toggle_alerts", style=BUTTON_PRIMARY)],
+            [inline_button(text="⬅️ Назад", callback_data="coffee:status", style=BUTTON_PRIMARY)],
         ]
     )
 
