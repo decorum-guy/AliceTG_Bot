@@ -104,6 +104,7 @@ TELEGRAM_PROXY=login:pass@host:port
 # Home Assistant
 HA_URL=http://homeassistant:8123
 HA_LONG_LIVED_TOKEN=
+YANDEX_DIALOG_SKILL_NAME=домашний помощник
 
 # Internal webhook security between Home Assistant and bot
 INTERNAL_WEBHOOK_SECRET=
@@ -120,6 +121,14 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 ```env
 TELEGRAM_SONYA_USER_IDS=222222222
 ```
+
+`YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
+values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is
+`домашний помощник`, so existing setups keep working.
+
+Home Assistant YAML does not read the bot `.env`. If you rename the Yandex skill, update
+`YANDEX_DIALOG_SKILL_NAME` in `.env` and replace all `домашний помощник` occurrences in the
+Home Assistant YAML examples below, including `media_content_type` and service phrase checks.
 
 ## Create Telegram Bot
 
@@ -442,7 +451,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                               {% set text = wait.trigger.event.data.text | default('') | lower %}
                               {% set session = wait.trigger.event.data.session | default({}) %}
                               {% set dialog = session.dialog | default('') %}
-                              {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+                              {% set yandex_dialog_skill_name = 'домашний помощник' %}
+                              {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
                               {{ is_service_phrase or not (dialog == 'hall_sonya_coffee_temperature' or (is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on') and ('холод' in text or 'горяч' in text))) }}
                             {% endif %}
                       sequence:
@@ -493,7 +503,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                                   {% set text = wait.trigger.event.data.text | default('') | lower %}
                                   {% set session = wait.trigger.event.data.session | default({}) %}
                                   {% set dialog = session.dialog | default('') %}
-                                  {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+                                  {% set yandex_dialog_skill_name = 'домашний помощник' %}
+                                  {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
                                   {{ is_service_phrase or not (dialog == 'hall_sonya_coffee_syrup' or (is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on') and ('сироп' in text or 'без' in text or text in ['да', 'нет', 'хочу', 'не хочу']))) }}
                                 {% endif %}
                           sequence:
@@ -605,7 +616,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {% set direct_active = is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on') or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') %}
         {% set hall_active = is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on') %}
         {{ not is_service_phrase
@@ -640,7 +652,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {% set direct_active = is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on') or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on') %}
         {% set hall_active = is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on') %}
         {% set is_valid_syrup = 'сироп' in text or 'без' in text or text in ['да', 'нет', 'хочу', 'не хочу'] %}
@@ -675,7 +688,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
-        {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {% set any_active = is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
            or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on')
            or is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
@@ -743,7 +757,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {% set tg_active = is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on') %}
         {% set hall_active = is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on') %}
         {{ not is_service_phrase
@@ -778,7 +793,8 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set is_service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {% set tg_active = is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on') %}
         {% set hall_active = is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on') or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on') %}
         {% set is_valid_syrup = 'сироп' in text or 'без' in text or text in ['да', 'нет', 'хочу', 'не хочу'] %}
@@ -970,7 +986,8 @@ Core `automations.yaml` blocks:
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {{ not service_phrase and (dialog == 'tg_ask_sonya_wants_tea' or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')) }}
   action:
     - action: input_boolean.turn_off
@@ -998,7 +1015,8 @@ Core `automations.yaml` blocks:
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {{ not service_phrase and (dialog == 'tg_ask_sonya_tea_keep_warm' or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')) }}
   action:
     - action: input_boolean.turn_off
@@ -1026,7 +1044,8 @@ Core `automations.yaml` blocks:
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {{ not service_phrase and (dialog == 'tg_ask_sonya_tea_keep_warm_temperature' or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')) }}
   action:
     - variables:
@@ -1053,7 +1072,8 @@ For direct tea, use one fallback trigger per automation and filter in `condition
     - condition: template
       value_template: >-
         {% set text = trigger.event.data.text | default('') | lower %}
-        {% set service_phrase = 'скажи навыку' in text or 'домашний помощник' in text %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
         {% set beverage_active = states.input_boolean | selectattr('entity_id', 'search', 'awaiting_sonya_(coffee|tea)|awaiting_(coffee|tea)') | selectattr('state', 'eq', 'on') | list | count > 0 %}
         {{ not service_phrase and not beverage_active and 'сон' not in text and 'чай' in text and ('хочу' in text or 'сделай' in text or 'закажи' in text or 'попроси' in text) }}
   action:

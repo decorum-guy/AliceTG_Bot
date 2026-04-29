@@ -15,6 +15,7 @@ from app.messages import coffee as coffee_messages
 from app.messages.common import admin_menu_text, sonya_menu_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
+from app.services.yandex_dialogs import yandex_dialog_content_type
 from app.storage.base import Reminder, Storage
 
 LOGGER = logging.getLogger(__name__)
@@ -22,11 +23,11 @@ LOGGER = logging.getLogger(__name__)
 POSITIVE_WORDS = ("да", "хочу", "ага", "можно", "буду", "конечно")
 NEGATIVE_WORDS = ("нет спасибо", "не хочу", "не надо", "нет")
 
-TG_WANTS_DIALOG = "dialog:домашний помощник:tg_ask_sonya_wants_coffee"
-TG_TEMPERATURE_DIALOG = "dialog:домашний помощник:tg_ask_sonya_coffee_temperature"
-TG_SYRUP_DIALOG = "dialog:домашний помощник:tg_ask_sonya_coffee_syrup"
-DIRECT_TEMPERATURE_DIALOG = "dialog:домашний помощник:sonya_direct_coffee_temperature"
-DIRECT_SYRUP_DIALOG = "dialog:домашний помощник:sonya_direct_coffee_syrup"
+TG_WANTS_DIALOG_ID = "tg_ask_sonya_wants_coffee"
+TG_TEMPERATURE_DIALOG_ID = "tg_ask_sonya_coffee_temperature"
+TG_SYRUP_DIALOG_ID = "tg_ask_sonya_coffee_syrup"
+DIRECT_TEMPERATURE_DIALOG_ID = "sonya_direct_coffee_temperature"
+DIRECT_SYRUP_DIALOG_ID = "sonya_direct_coffee_syrup"
 
 TG_AWAITING_TEMPERATURE = "input_boolean.tg_awaiting_sonya_coffee_temperature"
 TG_AWAITING_SYRUP = "input_boolean.tg_awaiting_sonya_coffee_syrup"
@@ -106,7 +107,7 @@ class CoffeeWorkflow:
         await self._ha.play_media(
             self._settings.bedroom_player_entity,
             "Соня, тебя спрашивают: будешь кофе?",
-            TG_WANTS_DIALOG,
+            yandex_dialog_content_type(self._settings, TG_WANTS_DIALOG_ID),
         )
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
@@ -312,7 +313,10 @@ class CoffeeWorkflow:
         await self._ha.play_media(
             self._settings.bedroom_player_entity,
             "Какой кофе ты хочешь: горячий или холодный?",
-            DIRECT_TEMPERATURE_DIALOG if direct else TG_TEMPERATURE_DIALOG,
+            yandex_dialog_content_type(
+                self._settings,
+                DIRECT_TEMPERATURE_DIALOG_ID if direct else TG_TEMPERATURE_DIALOG_ID,
+            ),
         )
 
     async def _ask_syrup(self, *, direct: bool) -> None:
@@ -320,7 +324,10 @@ class CoffeeWorkflow:
         await self._ha.play_media(
             self._settings.bedroom_player_entity,
             "С сиропом или без?",
-            DIRECT_SYRUP_DIALOG if direct else TG_SYRUP_DIALOG,
+            yandex_dialog_content_type(
+                self._settings,
+                DIRECT_SYRUP_DIALOG_ID if direct else TG_SYRUP_DIALOG_ID,
+            ),
         )
 
     async def _remind_later(self, reminder_id: int, reminder: Reminder) -> None:

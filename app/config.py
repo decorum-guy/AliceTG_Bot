@@ -61,6 +61,7 @@ class Settings:
     kettle_keep_warm_switch_entity: str = "switch.chainik_podderzhanie_tepla"
     kettle_light_switch_entity: str = "switch.chainik_podsvetka"
     kettle_mute_switch_entity: str = "switch.chainik_bez_zvuka"
+    yandex_dialog_skill_name: str = "домашний помощник"
     bedroom_player_entity: str = "media_player.stantsiia_mini_spalnia"
     living_room_player_entity: str = "media_player.stantsiia_mini_zal"
     coffee_sensors: dict[str, str] = field(default_factory=lambda: COFFEE_SENSORS.copy())
@@ -90,6 +91,8 @@ class Settings:
             ha_url=os.getenv("HA_URL", "http://homeassistant:8123").rstrip("/"),
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
+            yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
+            or "домашний помощник",
         )
 
     def is_allowed_user(self, user_id: int | None) -> bool:

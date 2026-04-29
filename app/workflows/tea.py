@@ -15,6 +15,7 @@ from app.messages import tea as tea_messages
 from app.messages.common import admin_menu_text, sonya_menu_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
+from app.services.yandex_dialogs import yandex_dialog_content_type
 from app.storage.base import Reminder
 from app.storage.base import Storage
 
@@ -22,14 +23,14 @@ LOGGER = logging.getLogger(__name__)
 
 KEEP_WARM_TEMPERATURES = (40, 50, 60, 70, 80, 90)
 
-TG_TEA_WANTS_DIALOG = "dialog:домашний помощник:tg_ask_sonya_wants_tea"
-TG_TEA_KEEP_WARM_DIALOG = "dialog:домашний помощник:tg_ask_sonya_tea_keep_warm"
-TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG = "dialog:домашний помощник:tg_ask_sonya_tea_keep_warm_temperature"
-DIRECT_TEA_KEEP_WARM_DIALOG = "dialog:домашний помощник:sonya_direct_tea_keep_warm"
-DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG = "dialog:домашний помощник:sonya_direct_tea_keep_warm_temperature"
-HALL_TEA_WANTS_DIALOG = "dialog:домашний помощник:hall_ask_sonya_wants_tea"
-HALL_TEA_KEEP_WARM_DIALOG = "dialog:домашний помощник:hall_ask_sonya_tea_keep_warm"
-HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG = "dialog:домашний помощник:hall_ask_sonya_tea_keep_warm_temperature"
+TG_TEA_WANTS_DIALOG_ID = "tg_ask_sonya_wants_tea"
+TG_TEA_KEEP_WARM_DIALOG_ID = "tg_ask_sonya_tea_keep_warm"
+TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "tg_ask_sonya_tea_keep_warm_temperature"
+DIRECT_TEA_KEEP_WARM_DIALOG_ID = "sonya_direct_tea_keep_warm"
+DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "sonya_direct_tea_keep_warm_temperature"
+HALL_TEA_WANTS_DIALOG_ID = "hall_ask_sonya_wants_tea"
+HALL_TEA_KEEP_WARM_DIALOG_ID = "hall_ask_sonya_tea_keep_warm"
+HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "hall_ask_sonya_tea_keep_warm_temperature"
 
 TG_AWAITING_TEA_WANTS = "input_boolean.tg_awaiting_sonya_tea_wants"
 TG_AWAITING_TEA_KEEP_WARM = "input_boolean.tg_awaiting_sonya_tea_keep_warm"
@@ -141,7 +142,11 @@ class TeaWorkflow:
     async def start_telegram_question(self, chat_id: int, message_id: int | None) -> int | None:
         await self._clear_all_wait_flags()
         await self._set_only_wait_flag(TG_AWAITING_TEA_WANTS)
-        await self._ha.play_media(self._settings.bedroom_player_entity, "Соня, тебя спрашивают: будешь чай?", TG_TEA_WANTS_DIALOG)
+        await self._ha.play_media(
+            self._settings.bedroom_player_entity,
+            "Соня, тебя спрашивают: будешь чай?",
+            yandex_dialog_content_type(self._settings, TG_TEA_WANTS_DIALOG_ID),
+        )
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
@@ -154,7 +159,11 @@ class TeaWorkflow:
     async def start_hall_question(self) -> None:
         await self._clear_all_wait_flags()
         await self._set_only_wait_flag(HALL_AWAITING_TEA_WANTS)
-        await self._ha.play_media(self._settings.bedroom_player_entity, "Соня, тебя спрашивают: будешь чай?", HALL_TEA_WANTS_DIALOG)
+        await self._ha.play_media(
+            self._settings.bedroom_player_entity,
+            "Соня, тебя спрашивают: будешь чай?",
+            yandex_dialog_content_type(self._settings, HALL_TEA_WANTS_DIALOG_ID),
+        )
 
     async def handle_wants_answer(self, answer: TeaAnswer, *, flow_type: str = "telegram") -> None:
         if self._is_duplicate_event("wants", answer):
@@ -198,7 +207,11 @@ class TeaWorkflow:
             return
 
         if flow_type == "hall":
-            await self._ha.play_media(self._settings.bedroom_player_entity, "Скажи да или нет.", HALL_TEA_WANTS_DIALOG)
+            await self._ha.play_media(
+                self._settings.bedroom_player_entity,
+                "Скажи да или нет.",
+                yandex_dialog_content_type(self._settings, HALL_TEA_WANTS_DIALOG_ID),
+            )
             return
 
         await self._clear_all_wait_flags()
@@ -381,27 +394,29 @@ class TeaWorkflow:
     async def _ask_keep_warm(self, *, flow_type: str) -> None:
         if flow_type == "direct":
             flag = DIRECT_AWAITING_TEA_KEEP_WARM
-            dialog = DIRECT_TEA_KEEP_WARM_DIALOG
+            dialog_id = DIRECT_TEA_KEEP_WARM_DIALOG_ID
         elif flow_type == "hall":
             flag = HALL_AWAITING_TEA_KEEP_WARM
-            dialog = HALL_TEA_KEEP_WARM_DIALOG
+            dialog_id = HALL_TEA_KEEP_WARM_DIALOG_ID
         else:
             flag = TG_AWAITING_TEA_KEEP_WARM
-            dialog = TG_TEA_KEEP_WARM_DIALOG
+            dialog_id = TG_TEA_KEEP_WARM_DIALOG_ID
         await self._set_only_wait_flag(flag)
+        dialog = yandex_dialog_content_type(self._settings, dialog_id)
         await self._ha.play_media(self._settings.bedroom_player_entity, "Включить поддержание тепла?", dialog)
 
     async def _ask_keep_warm_temperature(self, *, flow_type: str) -> None:
         if flow_type == "direct":
             flag = DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-            dialog = DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG
+            dialog_id = DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
         elif flow_type == "hall":
             flag = HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-            dialog = HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG
+            dialog_id = HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
         else:
             flag = TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-            dialog = TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG
+            dialog_id = TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
         await self._set_only_wait_flag(flag)
+        dialog = yandex_dialog_content_type(self._settings, dialog_id)
         await self._ha.play_media(self._settings.bedroom_player_entity, "На какой температуре поддерживать тепло: 40, 50, 60, 70, 80 или 90 градусов?", dialog)
 
     async def _finish_order(self, *, flow_type: str) -> None:
