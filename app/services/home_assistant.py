@@ -77,6 +77,16 @@ class HomeAssistantClient:
             },
         )
 
+    async def set_volume(self, entity_id: str, volume_level: float) -> None:
+        await self.call_service(
+            "media_player",
+            "volume_set",
+            {
+                "entity_id": entity_id,
+                "volume_level": volume_level,
+            },
+        )
+
     async def _raise_for_response(self, response: aiohttp.ClientResponse) -> None:
         if response.status < 400:
             return

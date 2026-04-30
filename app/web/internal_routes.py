@@ -8,6 +8,7 @@ from aiohttp import web
 from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
 from app.messages import coffee as coffee_messages
+from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
@@ -60,6 +61,23 @@ async def _parse_tea_answer(request: web.Request) -> TeaAnswer:
         answer.dialog,
         answer.intent,
         answer.answer,
+    )
+    return answer
+
+
+async def _parse_admin_talk_answer(request: web.Request) -> dict[str, str]:
+    payload = await request.json()
+    answer = {
+        "answer": str(payload.get("answer", "")),
+        "intent": str(payload.get("intent", "")),
+        "dialog": str(payload.get("dialog", "")),
+    }
+    LOGGER.info(
+        "Internal admin talk event: path=%s dialog=%s intent=%s answer=%r",
+        request.path,
+        answer["dialog"],
+        answer["intent"],
+        answer["answer"],
     )
     return answer
 
@@ -192,6 +210,29 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "sent": True})
 
 
+async def admin_talk_answer(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    settings: Settings = request.app["settings"]
+    admin_modes: AdminModeManager = request.app["admin_modes"]
+    bot = request.app["bot"]
+
+    answer = await _parse_admin_talk_answer(request)
+    dialog = answer["dialog"]
+    if dialog not in set(ADMIN_TALK_DIALOGS.values()):
+        raise web.HTTPBadRequest(text="Unsupported dialog")
+
+    matched = admin_modes.find_by_pending_dialog(dialog)
+    if matched is None:
+        LOGGER.info("Admin talk answer ignored without pending session: dialog=%s answer=%r", dialog, answer["answer"])
+        return web.json_response({"ok": True, "sent": False})
+
+    user_id, _ = matched
+    admin_modes.set_pending_dialog(user_id, None)
+    await bot.send_message(settings.telegram_admin_chat_id, f"Соня сказала: {answer['answer']}")
+    LOGGER.info("Admin talk answer sent to Telegram: dialog=%s user_id=%s", dialog, user_id)
+    return web.json_response({"ok": True, "sent": True})
+
+
 async def tea_wants_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: TeaWorkflow = request.app["tea_workflow"]
@@ -296,6 +337,7 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/coffee/sonya-hall-refused", sonya_hall_refused)
     app.router.add_post("/internal/coffee/warmed-up-alert", coffee_warmed_up_alert)
     app.router.add_post("/internal/coffee/long-running-alert", coffee_long_running_alert)
+    app.router.add_post("/internal/admin/talk-answer", admin_talk_answer)
     app.router.add_post("/internal/tea/sonya-wants-answer", tea_wants_answer)
     app.router.add_post("/internal/tea/sonya-keep-warm-answer", tea_keep_warm_answer)
     app.router.add_post("/internal/tea/sonya-keep-warm-temperature-answer", tea_keep_warm_temperature_answer)

@@ -11,7 +11,8 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 
 from app.config import Settings
-from app.handlers import coffee, common, start, tea
+from app.handlers import admin_modes, coffee, common, start, tea
+from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient
 from app.services.telegram_messages import TelegramMessages
@@ -44,6 +45,7 @@ async def create_app() -> web.Application:
     )
     dispatcher = Dispatcher()
     dispatcher.include_router(start.router)
+    dispatcher.include_router(admin_modes.router)
     dispatcher.include_router(coffee.router)
     dispatcher.include_router(tea.router)
     dispatcher.include_router(common.router)
@@ -51,6 +53,7 @@ async def create_app() -> web.Application:
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
     storage = MemoryStorage()
     app_state = AppStateStore(settings.app_state_path)
+    admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
@@ -59,6 +62,7 @@ async def create_app() -> web.Application:
     dispatcher["ha"] = ha
     dispatcher["storage"] = storage
     dispatcher["app_state"] = app_state
+    dispatcher["admin_modes"] = admin_mode_manager
     dispatcher["telegram_messages"] = telegram_messages
     dispatcher["coffee_workflow"] = coffee_workflow
     dispatcher["tea_workflow"] = tea_workflow
@@ -69,6 +73,7 @@ async def create_app() -> web.Application:
     app["dispatcher"] = dispatcher
     app["ha"] = ha
     app["app_state"] = app_state
+    app["admin_modes"] = admin_mode_manager
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow
 

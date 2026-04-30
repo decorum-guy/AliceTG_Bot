@@ -22,6 +22,8 @@ Main menu:
 
 - `Умные устройства`
 - `Спросить Соню`
+- `Озвучить`
+- `Разговор`
 
 `Умные устройства` contains:
 
@@ -37,6 +39,14 @@ Sonya sees only her own order menu:
 - `🍵 Чай`
 
 Sonya does not see `Спросить Соню`, `Умные устройства`, direct coffee machine control, or direct kettle control.
+
+### Admin Voice Modes
+
+- `Озвучить` is available only in Artem's main menu. Artem chooses `Зал` or `Спальня`, chooses volume from `0.0` to `1.0`, then every text message is spoken on the selected speaker as plain TTS.
+- `Разговор` is available only in Artem's main menu. Artem chooses `Зал` or `Спальня`, chooses volume, then each text message is spoken through a Yandex dialog tag: `admin_talk_zal` or `admin_talk_spalnia`.
+- In `Разговор`, if the station returns a `yandex_intent` answer for one of these two dialog tags, Telegram receives `Соня сказала: <answer>`.
+- `/stop` exits either admin mode, restores the speaker volume if the previous volume was available, and shows the normal admin menu.
+- Non-text messages in an active admin mode get `Отправь текст или /stop.`.
 
 ### Coffee Workflow
 
@@ -348,6 +358,7 @@ The active automation IDs are:
 - `tg_sonya_direct_syrup_answer`
 - `coffee_warmed_up_alert`
 - `coffee_long_running_alert`
+- `admin_talk_answer`
 - `ask_sonya_about_tea`
 - `tg_sonya_direct_tea_request`
 - `tg_sonya_wants_tea_answer`
@@ -478,6 +489,16 @@ rest_command:
       Content-Type: "application/json"
       X-Internal-Secret: !secret internal_webhook_secret
     payload: "{}"
+
+  tg_admin_talk_answer:
+    url: "http://telegram-bot:8088/internal/admin/talk-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
 
   tg_sonya_wants_tea_answer:
     url: "http://telegram-bot:8088/internal/tea/sonya-wants-answer"
@@ -1030,6 +1051,32 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
       state: "on"
   action:
     - action: rest_command.tg_coffee_long_running_alert
+
+- id: admin_talk_answer
+  alias: "Telegram bot - ответ в режиме разговора"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {{ dialog in ['admin_talk_spalnia', 'admin_talk_zal'] }}
+  action:
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('') }}
+    - action: rest_command.tg_admin_talk_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
 
 - id: ask_sonya_about_tea
   alias: "Спросить Соню про чай"
