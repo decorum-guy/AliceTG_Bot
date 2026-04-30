@@ -65,6 +65,11 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
 - Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, auto-enables the coffee machine after a positive answer, and sends Telegram only an info notification with `Удалить уведомление`.
 - Voice-based coffee flows say one short bedroom acknowledgement after Sonya gives the final answer: `Хорошо, заказ принят.`.
+- Coffee orders now ask one extra voice question after temperature and syrup: `Есть пожелания?`.
+  Send the answer to `/internal/coffee/sonya-comment-answer` with dialog `tg_ask_sonya_coffee_comment`
+  or `sonya_direct_coffee_comment`. HA auto-enabled hall flows that still call
+  `/internal/coffee/sonya-auto-enabled` directly can pass optional JSON `comment`;
+  otherwise Telegram shows `Комментарий: -`.
 - After Artem presses `Да`, `Нет`, or `Попозже` in Telegram, the bedroom does not say anything. Telegram messages and device actions continue normally.
 - Before Artem confirms, the coffee machine does not turn on, except in the hall/zal voice flow where it turns on automatically after Sonya says yes.
 - If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all coffee wait flags through Home Assistant.
@@ -85,6 +90,11 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - Direct voice tea flow asks keep-warm first and does not start the kettle before Artem confirms.
 - Hall/zal tea flow asks whether Sonya wants tea first, starts the kettle automatically after a positive answer, and sends Telegram only an info notification.
 - Voice-based tea flows say one short bedroom acknowledgement after Sonya gives the final order answer: `Хорошо, заказ принят.`.
+- Tea orders now ask one extra voice question after keep-warm settings: `Есть пожелания?`.
+  Send the answer to `/internal/tea/sonya-comment-answer` with dialog `tg_ask_sonya_tea_comment`,
+  `sonya_direct_tea_comment`, or `hall_ask_sonya_tea_comment`. HA auto-enabled hall flows that
+  still call `/internal/tea/sonya-auto-enabled` directly can pass optional JSON `comment`;
+  otherwise Telegram shows `Комментарий: -`.
 - After Artem presses `Да`, `Нет`, or `Попозже` in Telegram, the bedroom does not say anything. Telegram messages, kettle start, and post-boil keep-warm continue normally.
 - Sonya Telegram tea order does not speak in the bedroom.
 - Boil with `water_heater.set_temperature` and `temperature: 100`.
@@ -94,6 +104,18 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - To enable keep-warm, first call `water_heater.set_temperature`, then `switch.turn_on switch.chainik_podderzhanie_tepla`.
 - Kettle light is `switch.chainik_podsvetka`.
 - Kettle mute mode is `switch.chainik_bez_zvuka`.
+
+### Water Workflow
+
+- Sonya's Telegram menu includes `Вода`.
+- Artem's `Спросить Соню` menu includes `Хочет ли воды?`; this asks Sonya through the bedroom station and then asks `Есть пожелания?`.
+- Water orders do not use the coffee/tea `Да / Нет / Попозже` device confirmation. Telegram shows `Сейчас` and `Попозже`.
+- `Сейчас` says in the bedroom: `Артём скоро принесёт воду.` No Home Assistant device is switched.
+- `Попозже` offers 1-5 minutes, says in the bedroom: `Артём принесёт воду через X минут.`, and sends a final Telegram reminder with only `Удалить уведомление`.
+- New water internal endpoints:
+  - `/internal/water/sonya-wants-answer`
+  - `/internal/water/sonya-comment-answer`
+  - `/internal/water/sonya-direct-request`
 - `switch.chainik_blokirovka_upravleniia` is intentionally not exposed in Telegram.
 
 ## Telegram Proxy
@@ -364,6 +386,7 @@ The active automation IDs are:
 - `tg_sonya_wants_coffee_answer`
 - `tg_sonya_temperature_answer`
 - `tg_sonya_syrup_answer`
+- `tg_sonya_coffee_comment_answer`
 - `tg_sonya_direct_coffee_request`
 - `tg_sonya_direct_temperature_answer`
 - `tg_sonya_direct_syrup_answer`
@@ -375,6 +398,11 @@ The active automation IDs are:
 - `tg_sonya_wants_tea_answer`
 - `tg_sonya_tea_keep_warm_answer`
 - `tg_sonya_tea_keep_warm_temperature_answer`
+- `tg_sonya_tea_comment_answer`
+- `ask_sonya_about_water`
+- `tg_sonya_wants_water_answer`
+- `tg_sonya_water_comment_answer`
+- `tg_sonya_direct_water_request`
 
 Old pre-split coffee/tea automations should be removed before pasting this file so there are no duplicate handlers.
 
@@ -408,30 +436,48 @@ input_boolean:
     name: Telegram awaiting Sonya coffee temperature
   tg_awaiting_sonya_coffee_syrup:
     name: Telegram awaiting Sonya coffee syrup
+  tg_awaiting_sonya_coffee_comment:
+    name: Telegram awaiting Sonya coffee comment
   sonya_direct_awaiting_coffee_temperature:
     name: Sonya direct awaiting coffee temperature
   sonya_direct_awaiting_coffee_syrup:
     name: Sonya direct awaiting coffee syrup
+  sonya_direct_awaiting_coffee_comment:
+    name: Sonya direct awaiting coffee comment
   hall_awaiting_sonya_coffee_temperature:
     name: Hall awaiting Sonya coffee temperature
   hall_awaiting_sonya_coffee_syrup:
     name: Hall awaiting Sonya coffee syrup
+  hall_awaiting_sonya_coffee_comment:
+    name: Hall awaiting Sonya coffee comment
   tg_awaiting_sonya_tea_wants:
     name: Telegram awaiting Sonya tea wants
   tg_awaiting_sonya_tea_keep_warm:
     name: Telegram awaiting Sonya tea keep warm
   tg_awaiting_sonya_tea_keep_warm_temperature:
     name: Telegram awaiting Sonya tea keep warm temperature
+  tg_awaiting_sonya_tea_comment:
+    name: Telegram awaiting Sonya tea comment
   sonya_direct_awaiting_tea_keep_warm:
     name: Sonya direct awaiting tea keep warm
   sonya_direct_awaiting_tea_keep_warm_temperature:
     name: Sonya direct awaiting tea keep warm temperature
+  sonya_direct_awaiting_tea_comment:
+    name: Sonya direct awaiting tea comment
   hall_awaiting_sonya_tea_wants:
     name: Hall awaiting Sonya tea wants
   hall_awaiting_sonya_tea_keep_warm:
     name: Hall awaiting Sonya tea keep warm
   hall_awaiting_sonya_tea_keep_warm_temperature:
     name: Hall awaiting Sonya tea keep warm temperature
+  hall_awaiting_sonya_tea_comment:
+    name: Hall awaiting Sonya tea comment
+  tg_awaiting_sonya_water_wants:
+    name: Telegram awaiting Sonya water wants
+  tg_awaiting_sonya_water_comment:
+    name: Telegram awaiting Sonya water comment
+  sonya_direct_awaiting_water_comment:
+    name: Sonya direct awaiting water comment
 
 rest_command:
   tg_sonya_wants_coffee_answer:
@@ -464,6 +510,16 @@ rest_command:
     payload: >-
       {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
 
+  tg_sonya_coffee_comment_answer:
+    url: "http://telegram-bot:8088/internal/coffee/sonya-comment-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
   tg_sonya_auto_enabled:
     url: "http://telegram-bot:8088/internal/coffee/sonya-auto-enabled"
     method: POST
@@ -472,7 +528,7 @@ rest_command:
       Content-Type: "application/json"
       X-Internal-Secret: !secret internal_webhook_secret
     payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}, "comment": {{ comment | default('') | to_json }}}
 
   tg_sonya_hall_refused:
     url: "http://telegram-bot:8088/internal/coffee/sonya-hall-refused"
@@ -541,6 +597,16 @@ rest_command:
     payload: >-
       {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
 
+  tg_sonya_tea_comment_answer:
+    url: "http://telegram-bot:8088/internal/tea/sonya-comment-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
   tg_sonya_direct_tea_request:
     url: "http://telegram-bot:8088/internal/tea/sonya-direct-request"
     method: POST
@@ -567,10 +633,39 @@ rest_command:
       Content-Type: "application/json"
       X-Internal-Secret: !secret internal_webhook_secret
     payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}, "comment": {{ comment | default('') | to_json }}}
 
   tg_sonya_tea_hall_refused:
     url: "http://telegram-bot:8088/internal/tea/sonya-hall-refused"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: "{}"
+
+  tg_sonya_wants_water_answer:
+    url: "http://telegram-bot:8088/internal/water/sonya-wants-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_water_comment_answer:
+    url: "http://telegram-bot:8088/internal/water/sonya-comment-answer"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
+
+  tg_sonya_direct_water_request:
+    url: "http://telegram-bot:8088/internal/water/sonya-direct-request"
     method: POST
     content_type: "application/json"
     headers:
@@ -742,6 +837,31 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                             syrup_answer: "{{ wait.trigger.event.data.text | default('') | lower }}"
                             coffee_syrup: >-
                               {% if 'не хочу' in syrup_answer or 'нет' in syrup_answer or 'без' in syrup_answer %}без сиропа{% elif syrup_answer in ['да', 'хочу'] or 'сироп' in syrup_answer %}с сиропом{% else %}{{ syrup_answer }}{% endif %}
+                    - action: input_boolean.turn_on
+                      target:
+                        entity_id: input_boolean.hall_awaiting_sonya_coffee_comment
+                    - action: media_player.play_media
+                      target:
+                        entity_id: media_player.stantsiia_mini_spalnia
+                      data:
+                        media_content_id: "Есть пожелания?"
+                        media_content_type: "dialog:домашний помощник:hall_ask_sonya_coffee_comment"
+                    - wait_for_trigger:
+                        - platform: event
+                          event_type: yandex_intent
+                          event_data:
+                            session:
+                              dialog: hall_ask_sonya_coffee_comment
+                      timeout: "00:00:30"
+                      continue_on_timeout: true
+                    - variables:
+                        coffee_comment: >-
+                          {% if wait.trigger is none %}
+                            -
+                          {% else %}
+                            {% set raw_comment = wait.trigger.event.data.text | default('') | trim %}
+                            {% if (raw_comment | lower).startswith('нет') %}-{% else %}{{ raw_comment }}{% endif %}
+                          {% endif %}
                     - action: media_player.play_media
                       target:
                         entity_id: media_player.stantsiia_mini_spalnia
@@ -757,6 +877,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                           - input_boolean.sonya_direct_awaiting_coffee_syrup
                           - input_boolean.hall_awaiting_sonya_coffee_temperature
                           - input_boolean.hall_awaiting_sonya_coffee_syrup
+                          - input_boolean.hall_awaiting_sonya_coffee_comment
                     - action: media_player.play_media
                       target:
                         entity_id: media_player.stantsiia_mini_zal
@@ -768,6 +889,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                         answer: "{{ coffee_temperature }} {{ coffee_syrup }}"
                         intent: ""
                         dialog: "hall_sonya_coffee_syrup"
+                        comment: "{{ coffee_comment }}"
             - conditions:
                 - condition: template
                   value_template: >-
@@ -921,6 +1043,16 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
            or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
            or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
            or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on') %}
+        {% set any_active = any_active
+           or is_state('input_boolean.tg_awaiting_sonya_coffee_comment', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_coffee_comment', 'on')
+           or is_state('input_boolean.hall_awaiting_sonya_coffee_comment', 'on')
+           or is_state('input_boolean.tg_awaiting_sonya_tea_comment', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_tea_comment', 'on')
+           or is_state('input_boolean.hall_awaiting_sonya_tea_comment', 'on')
+           or is_state('input_boolean.tg_awaiting_sonya_water_wants', 'on')
+           or is_state('input_boolean.tg_awaiting_sonya_water_comment', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_water_comment', 'on') %}
         {% set intermediate = text in ['горячий', 'холодный', 'горячий кофе', 'холодный кофе', 'с сиропом', 'без сиропа', 'без', 'да', 'нет'] %}
         {{ not is_service_phrase
            and not any_active
@@ -1029,6 +1161,39 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         intent: "{{ trigger.event.data.intent | default('') }}"
         dialog: "sonya_direct_coffee_syrup"
     - action: rest_command.tg_sonya_syrup_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_coffee_comment_answer
+  alias: "Telegram bot - ответ Сони комментарий к кофе"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {{ dialog in ['tg_ask_sonya_coffee_comment', 'sonya_direct_coffee_comment']
+           or is_state('input_boolean.tg_awaiting_sonya_coffee_comment', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_coffee_comment', 'on') }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_coffee_comment
+          - input_boolean.sonya_direct_awaiting_coffee_comment
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('tg_ask_sonya_coffee_comment') }}
+    - action: rest_command.tg_sonya_coffee_comment_answer
       data:
         answer: "{{ answer }}"
         intent: "{{ intent }}"
@@ -1143,6 +1308,17 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
           or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
+        %}
+        {% set any_active = any_active
+          or is_state('input_boolean.tg_awaiting_sonya_coffee_comment', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_coffee_comment', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_coffee_comment', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_comment', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_tea_comment', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_comment', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_water_wants', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_water_comment', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_water_comment', 'on')
         %}
         {% set intermediate = text in ['да', 'нет', 'не надо', 'не хочу', 'хочу', 'буду', 'сорок', 'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто'] %}
         {{ not is_service_phrase
@@ -1304,6 +1480,176 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         answer: "{{ answer }}"
         intent: "{{ intent }}"
         dialog: "{{ dialog }}"
+
+- id: tg_sonya_tea_comment_answer
+  alias: "Telegram bot - ответ Сони комментарий к чаю"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {{ dialog in ['tg_ask_sonya_tea_comment', 'sonya_direct_tea_comment', 'hall_ask_sonya_tea_comment']
+           or is_state('input_boolean.tg_awaiting_sonya_tea_comment', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_tea_comment', 'on')
+           or is_state('input_boolean.hall_awaiting_sonya_tea_comment', 'on') }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_tea_comment
+          - input_boolean.sonya_direct_awaiting_tea_comment
+          - input_boolean.hall_awaiting_sonya_tea_comment
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('tg_ask_sonya_tea_comment') }}
+    - action: rest_command.tg_sonya_tea_comment_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: ask_sonya_about_water
+  alias: "Спросить Соню про воду"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {{ 'сон' in text and ('вод' in text or 'воды' in text) }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_water_wants
+          - input_boolean.tg_awaiting_sonya_water_comment
+          - input_boolean.sonya_direct_awaiting_water_comment
+    - action: media_player.play_media
+      target:
+        entity_id: media_player.stantsiia_mini_spalnia
+      data:
+        media_content_id: "Соня, тебя спрашивают: хочешь воды?"
+        media_content_type: "dialog:домашний помощник:tg_ask_sonya_wants_water"
+
+- id: tg_sonya_wants_water_answer
+  alias: "Telegram bot - ответ Сони хочет ли воды"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {{ dialog == 'tg_ask_sonya_wants_water'
+           or is_state('input_boolean.tg_awaiting_sonya_water_wants', 'on') }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.tg_awaiting_sonya_water_wants
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        dialog: "tg_ask_sonya_wants_water"
+    - action: rest_command.tg_sonya_wants_water_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_water_comment_answer
+  alias: "Telegram bot - ответ Сони комментарий к воде"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {{ dialog in ['tg_ask_sonya_water_comment', 'sonya_direct_water_comment']
+           or is_state('input_boolean.tg_awaiting_sonya_water_comment', 'on')
+           or is_state('input_boolean.sonya_direct_awaiting_water_comment', 'on') }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_water_comment
+          - input_boolean.sonya_direct_awaiting_water_comment
+    - variables:
+        answer: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: >-
+          {% set session = trigger.event.data.session | default({}) %}
+          {{ session.dialog | default('tg_ask_sonya_water_comment') }}
+    - action: rest_command.tg_sonya_water_comment_answer
+      data:
+        answer: "{{ answer }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+
+- id: tg_sonya_direct_water_request
+  alias: "Telegram bot - Соня сама просит воды"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set any_active =
+          is_state('input_boolean.tg_awaiting_sonya_coffee_temperature', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_coffee_syrup', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_coffee_comment', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_coffee_temperature', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_coffee_syrup', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_coffee_comment', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_coffee_temperature', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_coffee_comment', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_tea_comment', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_tea_comment', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
+          or is_state('input_boolean.hall_awaiting_sonya_tea_comment', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_water_wants', 'on')
+          or is_state('input_boolean.tg_awaiting_sonya_water_comment', 'on')
+          or is_state('input_boolean.sonya_direct_awaiting_water_comment', 'on')
+        %}
+        {{ not any_active
+           and ('вод' in text or 'воды' in text)
+           and 'сон' not in text
+           and dialog not in ['tg_ask_sonya_wants_water', 'tg_ask_sonya_water_comment', 'sonya_direct_water_comment'] }}
+  action:
+    - action: input_boolean.turn_off
+      target:
+        entity_id:
+          - input_boolean.tg_awaiting_sonya_water_wants
+          - input_boolean.tg_awaiting_sonya_water_comment
+          - input_boolean.sonya_direct_awaiting_water_comment
+    - action: rest_command.tg_sonya_direct_water_request
 ```
 
 ## Tea And Kettle Reference
