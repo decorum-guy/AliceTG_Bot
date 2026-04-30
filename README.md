@@ -45,6 +45,8 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - `Озвучить` is available only in Artem's main menu. Artem chooses `Зал` or `Спальня`, chooses volume from `0.0` to `1.0`, then every text message is spoken on the selected speaker as plain TTS.
 - `Разговор` is available only in Artem's main menu. Artem chooses `Зал` or `Спальня`, chooses volume, then each text message is spoken through a Yandex dialog tag: `admin_talk_zal` or `admin_talk_spalnia`.
 - In `Разговор`, if the station returns a `yandex_intent` answer for one of these two dialog tags, Telegram receives `Соня сказала: <answer>`.
+- In `Озвучить` and `Разговор`, prefix one message with `/шепот/ текст` or `/шёпот/ текст` to speak only that message in whisper mode. The next message is normal unless it also has the prefix.
+- Whisper in `Разговор` uses the same dialog tag and adds Yandex speaker markup to `media_content_id`, so the station should still listen for Sonya's answer after the whispered phrase.
 - `/stop` exits either admin mode, restores the speaker volume if the previous volume was available, and shows the normal admin menu.
 - Non-text messages in an active admin mode get `Отправь текст или /stop.`.
 

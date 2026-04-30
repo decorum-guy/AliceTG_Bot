@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import html
 import logging
+import re
+from dataclasses import dataclass
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -16,11 +19,25 @@ from app.services.yandex_dialogs import yandex_dialog_content_type
 
 LOGGER = logging.getLogger(__name__)
 router = Router()
+WHISPER_PREFIX = '<speaker is_whisper="true">'
+WHISPER_PATTERN = re.compile(r"^\s*/ш[её]пот/\s*", re.IGNORECASE)
 
 MODE_TITLES = {
     "announce": "Озвучить",
     "talk": "Разговор",
 }
+
+
+@dataclass(frozen=True)
+class VoiceMessage:
+    text: str
+    whisper: bool = False
+
+    @property
+    def media_content_id(self) -> str:
+        if not self.whisper:
+            return self.text
+        return f"{WHISPER_PREFIX}{html.escape(self.text, quote=True)}"
 
 
 @router.callback_query(F.data.in_({"admin_mode:start:announce", "admin_mode:start:talk"}))
@@ -172,14 +189,19 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
         await message.answer("Отправь текст или /stop.")
         return
 
+    voice_message = parse_voice_modifier(message.text)
+    if voice_message is None:
+        await message.answer("Напиши текст после /шепот/ или отправь /stop.")
+        return
+
     if session.mode == "announce":
         try:
-            await ha.play_media(session.entity_id, message.text, "text")
+            await ha.play_media(session.entity_id, voice_message.media_content_id, "text")
         except HomeAssistantError:
             LOGGER.exception("Cannot announce admin text: user_id=%s entity_id=%s", user_id, session.entity_id)
             await message.answer("Не удалось озвучить текст через Home Assistant.")
             return
-        LOGGER.info("Admin announce sent: user_id=%s entity_id=%s", user_id, session.entity_id)
+        LOGGER.info("Admin announce sent: user_id=%s entity_id=%s whisper=%s", user_id, session.entity_id, voice_message.whisper)
         await message.answer("Озвучила.")
         return
 
@@ -188,13 +210,15 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
         return
     dialog = ADMIN_TALK_DIALOGS[session.room]
     try:
-        await ha.play_media(session.entity_id, message.text, yandex_dialog_content_type(settings, dialog))
+        # Yandex Station dialog mode accepts the same speaker markup in media_content_id
+        # while media_content_type keeps the dialog tag that makes the station listen.
+        await ha.play_media(session.entity_id, voice_message.media_content_id, yandex_dialog_content_type(settings, dialog))
     except HomeAssistantError:
         LOGGER.exception("Cannot send admin talk text: user_id=%s entity_id=%s dialog=%s", user_id, session.entity_id, dialog)
         await message.answer("Не удалось отправить текст на колонку через Home Assistant.")
         return
     admin_modes.set_pending_dialog(user_id, dialog)
-    LOGGER.info("Admin talk sent: user_id=%s entity_id=%s dialog=%s", user_id, session.entity_id, dialog)
+    LOGGER.info("Admin talk sent: user_id=%s entity_id=%s dialog=%s whisper=%s", user_id, session.entity_id, dialog, voice_message.whisper)
     await message.answer("Отправила.")
 
 
@@ -241,3 +265,14 @@ async def _restore_volume(session, ha: HomeAssistantClient) -> None:
         LOGGER.exception("Cannot restore admin mode volume: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
         return
     LOGGER.info("Admin mode volume restored: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
+
+
+def parse_voice_modifier(text: str) -> VoiceMessage | None:
+    match = WHISPER_PATTERN.match(text)
+    if match is None:
+        return VoiceMessage(text=text)
+
+    clean_text = text[match.end() :].strip()
+    if not clean_text:
+        return None
+    return VoiceMessage(text=clean_text, whisper=True)
