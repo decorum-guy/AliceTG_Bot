@@ -23,7 +23,7 @@ def volume_menu(mode: str) -> InlineKeyboardMarkup:
     for index in range(0, len(values), 3):
         rows.append(
             [
-                inline_button(text=f"{value:.1f}", callback_data=f"admin_mode:volume:{mode}:{value:.1f}", style=BUTTON_PRIMARY)
+                inline_button(text=f"{int(value * 100)}%", callback_data=f"admin_mode:volume:{mode}:{value:.1f}", style=BUTTON_PRIMARY)
                 for value in values[index : index + 3]
             ]
         )

@@ -227,16 +227,18 @@ def _mode_enabled_text(mode: str, room_label: str, volume: float) -> str:
         return (
             "🔊 Режим озвучивания включен\n\n"
             f"Колонка: {room_label}\n"
-            f"Громкость: {volume:.1f}\n\n"
+            f"Громкость: {_volume_percent(volume)}\n\n"
             "Отправь текст, и я озвучу его на колонке.\n"
+            "Для разового шепота напиши /шепот/ текст.\n"
             "Чтобы выйти, напиши /stop."
         )
     return (
         "💬 Режим разговора включен\n\n"
         f"Колонка: {room_label}\n"
-        f"Громкость: {volume:.1f}\n\n"
+        f"Громкость: {_volume_percent(volume)}\n\n"
         "Пиши сообщения сюда - я буду озвучивать их на колонке и ждать ответ.\n"
         "Если Соня ответит, я пришлю ее ответ сюда.\n"
+        "Для разового шепота напиши /шепот/ текст.\n"
         "Чтобы выйти, напиши /stop."
     )
 
@@ -276,3 +278,7 @@ def parse_voice_modifier(text: str) -> VoiceMessage | None:
     if not clean_text:
         return None
     return VoiceMessage(text=clean_text, whisper=True)
+
+
+def _volume_percent(volume: float) -> str:
+    return f"{round(volume * 100)}%"
