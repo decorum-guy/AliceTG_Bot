@@ -24,6 +24,7 @@ Main menu:
 - `Спросить Соню`
 - `Озвучить`
 - `Разговор`
+- `Настройки`
 
 `Умные устройства` contains:
 
@@ -48,7 +49,15 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - In `Озвучить` and `Разговор`, prefix one message with `/шепот/ текст` or `/шёпот/ текст` to speak only that message in whisper mode. The next message is normal unless it also has the prefix.
 - Whisper in `Разговор` uses the same dialog tag and adds Yandex speaker markup to `media_content_id`, so the station should still listen for Sonya's answer after the whispered phrase.
 - `/stop` exits either admin mode, restores the speaker volume if the previous volume was available, and shows the normal admin menu.
+- If an active `Озвучить` or `Разговор` message ends with `/stop`, the bot sends the text before `/stop` first, then exits the mode and restores the speaker volume. A message containing only `/stop` exits without speaking.
 - Non-text messages in an active admin mode get `Отправь текст или /stop.`.
+
+### Admin Settings
+
+- `Настройки` is available only in Artem's main menu.
+- `Сбросить флаги и режимы` turns off only Sonya coffee/tea waiting `input_boolean` flags and clears Artem's active `Озвучить` or `Разговор` session.
+- If an active admin mode stored the previous speaker volume, the bot tries to restore it before clearing the session.
+- The reset does not turn off the coffee machine, kettle, sockets, kettle light, mute mode, or keep-warm mode.
 
 ### Coffee Workflow
 

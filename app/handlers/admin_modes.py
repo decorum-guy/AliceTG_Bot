@@ -11,9 +11,9 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import Settings
 from app.keyboards.admin_modes import room_menu, volume_menu
-from app.keyboards.main import main_menu
+from app.keyboards.main import admin_reset_confirm_menu, admin_settings_menu, main_menu
 from app.messages.common import admin_menu_text
-from app.services.admin_modes import ADMIN_ROOM_OPTIONS, ADMIN_TALK_DIALOGS, AdminModeManager
+from app.services.admin_modes import ADMIN_ROOM_OPTIONS, ADMIN_TALK_DIALOGS, SONYA_WAITING_FLAGS, AdminModeManager
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.yandex_dialogs import yandex_dialog_content_type
 
@@ -21,11 +21,17 @@ LOGGER = logging.getLogger(__name__)
 router = Router()
 WHISPER_PREFIX = '<speaker is_whisper="true">'
 WHISPER_PATTERN = re.compile(r"^\s*/ш[её]пот/\s*", re.IGNORECASE)
+STOP_SUFFIX_PATTERN = re.compile(r"(?:^|\s)/stop\s*$", re.IGNORECASE)
 
 MODE_TITLES = {
     "announce": "Озвучить",
     "talk": "Разговор",
 }
+
+
+SETTINGS_TEXT = "⚙️ Настройки"
+RESET_CONFIRM_TEXT = "Сбросить все флаги ожидания и активные админ-режимы?\nУстройства выключены не будут."
+RESET_DONE_TEXT = "Готово. Флаги ожидания и активные админ-режимы сброшены."
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,50 @@ class VoiceMessage:
         if not self.whisper:
             return self.text
         return f"{WHISPER_PREFIX}{html.escape(self.text, quote=True)}"
+
+
+@router.callback_query(F.data == "admin_settings:menu")
+async def admin_settings(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text(SETTINGS_TEXT, reply_markup=admin_settings_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_settings:reset:confirm")
+async def confirm_admin_reset(callback: CallbackQuery, settings: Settings) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text(RESET_CONFIRM_TEXT, reply_markup=admin_reset_confirm_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_settings:reset:yes")
+async def reset_admin_state(
+    callback: CallbackQuery,
+    settings: Settings,
+    admin_modes: AdminModeManager,
+    ha: HomeAssistantClient,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await _reset_sonya_waiting_flags(ha)
+    session = admin_modes.clear(callback.from_user.id)
+    if session is not None:
+        await _restore_volume(session, ha)
+        LOGGER.info("Admin mode cleared by settings reset: user_id=%s mode=%s", callback.from_user.id, session.mode)
+
+    if callback.message:
+        await callback.message.edit_text(RESET_DONE_TEXT, reply_markup=main_menu())
+    await callback.answer("Готово")
 
 
 @router.callback_query(F.data.in_({"admin_mode:start:announce", "admin_mode:start:talk"}))
@@ -189,7 +239,16 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
         await message.answer("Отправь текст или /stop.")
         return
 
-    voice_message = parse_voice_modifier(message.text)
+    stop_after_send, text = split_stop_suffix(message.text)
+    if stop_after_send and not text.strip():
+        session = admin_modes.clear(user_id)
+        if session is not None:
+            await _restore_volume(session, ha)
+            LOGGER.info("Admin mode stopped by suffix-only stop: user_id=%s mode=%s", user_id, session.mode)
+        await message.answer(admin_menu_text(), reply_markup=main_menu())
+        return
+
+    voice_message = parse_voice_modifier(text)
     if voice_message is None:
         await message.answer("Напиши текст после /шепот/ или отправь /stop.")
         return
@@ -202,6 +261,9 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
             await message.answer("Не удалось озвучить текст через Home Assistant.")
             return
         LOGGER.info("Admin announce sent: user_id=%s entity_id=%s whisper=%s", user_id, session.entity_id, voice_message.whisper)
+        if stop_after_send:
+            await _finish_admin_mode_after_send(message, admin_modes, ha, user_id, "announce")
+            return
         await message.answer("Озвучила.")
         return
 
@@ -219,6 +281,9 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
         return
     admin_modes.set_pending_dialog(user_id, dialog)
     LOGGER.info("Admin talk sent: user_id=%s entity_id=%s dialog=%s whisper=%s", user_id, session.entity_id, dialog, voice_message.whisper)
+    if stop_after_send:
+        await _finish_admin_mode_after_send(message, admin_modes, ha, user_id, "talk")
+        return
     await message.answer("Отправила.")
 
 
@@ -267,6 +332,35 @@ async def _restore_volume(session, ha: HomeAssistantClient) -> None:
         LOGGER.exception("Cannot restore admin mode volume: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
         return
     LOGGER.info("Admin mode volume restored: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
+
+
+async def _reset_sonya_waiting_flags(ha: HomeAssistantClient) -> None:
+    for entity_id in SONYA_WAITING_FLAGS:
+        try:
+            await ha.input_boolean_turn_off(entity_id)
+        except HomeAssistantError:
+            LOGGER.exception("Cannot reset Sonya waiting flag: entity_id=%s", entity_id)
+
+
+async def _finish_admin_mode_after_send(
+    message: Message,
+    admin_modes: AdminModeManager,
+    ha: HomeAssistantClient,
+    user_id: int,
+    mode: str,
+) -> None:
+    session = admin_modes.clear(user_id)
+    if session is not None:
+        await _restore_volume(session, ha)
+    LOGGER.info("Admin mode stopped after successful send: user_id=%s mode=%s", user_id, mode)
+    await message.answer(admin_menu_text(), reply_markup=main_menu())
+
+
+def split_stop_suffix(text: str) -> tuple[bool, str]:
+    match = STOP_SUFFIX_PATTERN.search(text)
+    if match is None:
+        return False, text
+    return True, text[: match.start()].rstrip()
 
 
 def parse_voice_modifier(text: str) -> VoiceMessage | None:

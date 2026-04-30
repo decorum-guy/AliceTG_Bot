@@ -12,6 +12,25 @@ def main_menu() -> InlineKeyboardMarkup:
                 inline_button(text="🔊 Озвучить", callback_data="admin_mode:start:announce"),
                 inline_button(text="💬 Разговор", callback_data="admin_mode:start:talk"),
             ],
+            [inline_button(text="⚙️ Настройки", callback_data="admin_settings:menu")],
+        ]
+    )
+
+
+def admin_settings_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text="♻️ Сбросить флаги и режимы", callback_data="admin_settings:reset:confirm", style=BUTTON_DANGER)],
+            [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
+        ]
+    )
+
+
+def admin_reset_confirm_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text="✅ Да, сбросить", callback_data="admin_settings:reset:yes", style=BUTTON_DANGER)],
+            [inline_button(text="❌ Отмена", callback_data="admin_settings:menu", style=BUTTON_PRIMARY)],
         ]
     )
 

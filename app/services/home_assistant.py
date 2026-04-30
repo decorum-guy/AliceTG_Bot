@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -15,34 +16,38 @@ class HomeAssistantError(RuntimeError):
 class HomeAssistantClient:
     def __init__(self, base_url: str, token: str) -> None:
         self._base_url = base_url.rstrip("/")
-        self._session = aiohttp.ClientSession(
+        self._token = token
+        self._session = self._create_session()
+
+    def _create_session(self) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
             },
             timeout=aiohttp.ClientTimeout(total=20),
         )
 
     async def close(self) -> None:
-        await self._session.close()
+        if not self._session.closed:
+            await self._session.close()
 
     async def get_state(self, entity_id: str) -> dict[str, Any] | None:
-        try:
-            async with self._session.get(f"{self._base_url}/api/states/{entity_id}") as response:
-                if response.status == 404:
-                    return None
-                await self._raise_for_response(response)
-                return await response.json()
-        except aiohttp.ClientError as exc:
-            raise HomeAssistantError(f"Cannot read state for {entity_id}") from exc
+        return await self._request(
+            "GET",
+            f"/api/states/{entity_id}",
+            error_message=f"Cannot read state for {entity_id}",
+            json_response=True,
+            not_found_none=True,
+        )
 
     async def call_service(self, domain: str, service: str, payload: dict[str, Any]) -> None:
-        try:
-            url = f"{self._base_url}/api/services/{domain}/{service}"
-            async with self._session.post(url, json=payload) as response:
-                await self._raise_for_response(response)
-        except aiohttp.ClientError as exc:
-            raise HomeAssistantError(f"Cannot call {domain}.{service}") from exc
+        await self._request(
+            "POST",
+            f"/api/services/{domain}/{service}",
+            error_message=f"Cannot call {domain}.{service}",
+            payload=payload,
+        )
 
     async def switch_turn_on(self, entity_id: str) -> None:
         await self.call_service("switch", "turn_on", {"entity_id": entity_id})
@@ -87,9 +92,59 @@ class HomeAssistantClient:
             },
         )
 
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        error_message: str,
+        payload: dict[str, Any] | None = None,
+        json_response: bool = False,
+        not_found_none: bool = False,
+    ) -> dict[str, Any] | None:
+        url = f"{self._base_url}{path}"
+        for attempt in range(2):
+            try:
+                if self._session.closed:
+                    raise RuntimeError("Home Assistant aiohttp session is closed")
+                async with self._session.request(method, url, json=payload) as response:
+                    if not_found_none and response.status == 404:
+                        return None
+                    await self._raise_for_response(response)
+                    if json_response:
+                        return await response.json()
+                    return None
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                if isinstance(exc, RuntimeError) and not self._is_retryable_runtime_error(exc):
+                    raise HomeAssistantError(error_message) from exc
+                if attempt == 0:
+                    LOGGER.warning(
+                        "Home Assistant request failed, recreating aiohttp session and retrying once: method=%s path=%s error=%r",
+                        method,
+                        path,
+                        exc,
+                    )
+                    await self._recreate_session()
+                    continue
+                raise HomeAssistantError(error_message) from exc
+        raise HomeAssistantError(error_message)
+
     async def _raise_for_response(self, response: aiohttp.ClientResponse) -> None:
         if response.status < 400:
             return
         body = await response.text()
         LOGGER.warning("Home Assistant API error: status=%s body=%s", response.status, body[:500])
         raise HomeAssistantError(f"Home Assistant API returned HTTP {response.status}")
+
+    async def _recreate_session(self) -> None:
+        old_session = self._session
+        try:
+            if not old_session.closed:
+                await old_session.close()
+        except Exception:
+            LOGGER.exception("Cannot close stale Home Assistant aiohttp session")
+        self._session = self._create_session()
+
+    def _is_retryable_runtime_error(self, exc: RuntimeError) -> bool:
+        message = str(exc).lower()
+        return "session is closed" in message or "session closed" in message
