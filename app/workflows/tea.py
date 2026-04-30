@@ -24,42 +24,34 @@ from app.workflows.comments import NO_COMMENT, normalize_order_comment
 LOGGER = logging.getLogger(__name__)
 
 KEEP_WARM_TEMPERATURES = (40, 50, 60, 70, 80, 90)
+DEFAULT_KEEP_WARM_TEMPERATURE = 80
 
 TG_TEA_WANTS_DIALOG_ID = "tg_ask_sonya_wants_tea"
 TG_TEA_KEEP_WARM_DIALOG_ID = "tg_ask_sonya_tea_keep_warm"
-TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "tg_ask_sonya_tea_keep_warm_temperature"
 TG_TEA_COMMENT_DIALOG_ID = "tg_ask_sonya_tea_comment"
 DIRECT_TEA_KEEP_WARM_DIALOG_ID = "sonya_direct_tea_keep_warm"
-DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "sonya_direct_tea_keep_warm_temperature"
 DIRECT_TEA_COMMENT_DIALOG_ID = "sonya_direct_tea_comment"
 HALL_TEA_WANTS_DIALOG_ID = "hall_ask_sonya_wants_tea"
 HALL_TEA_KEEP_WARM_DIALOG_ID = "hall_ask_sonya_tea_keep_warm"
-HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "hall_ask_sonya_tea_keep_warm_temperature"
 HALL_TEA_COMMENT_DIALOG_ID = "hall_ask_sonya_tea_comment"
 
 TG_AWAITING_TEA_WANTS = "input_boolean.tg_awaiting_sonya_tea_wants"
 TG_AWAITING_TEA_KEEP_WARM = "input_boolean.tg_awaiting_sonya_tea_keep_warm"
-TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE = "input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature"
 TG_AWAITING_TEA_COMMENT = "input_boolean.tg_awaiting_sonya_tea_comment"
 DIRECT_AWAITING_TEA_KEEP_WARM = "input_boolean.sonya_direct_awaiting_tea_keep_warm"
-DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE = "input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature"
 DIRECT_AWAITING_TEA_COMMENT = "input_boolean.sonya_direct_awaiting_tea_comment"
 HALL_AWAITING_TEA_WANTS = "input_boolean.hall_awaiting_sonya_tea_wants"
 HALL_AWAITING_TEA_KEEP_WARM = "input_boolean.hall_awaiting_sonya_tea_keep_warm"
-HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE = "input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature"
 HALL_AWAITING_TEA_COMMENT = "input_boolean.hall_awaiting_sonya_tea_comment"
 
 ALL_TEA_WAIT_FLAGS = (
     TG_AWAITING_TEA_WANTS,
     TG_AWAITING_TEA_KEEP_WARM,
-    TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
     TG_AWAITING_TEA_COMMENT,
     DIRECT_AWAITING_TEA_KEEP_WARM,
-    DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
     DIRECT_AWAITING_TEA_COMMENT,
     HALL_AWAITING_TEA_WANTS,
     HALL_AWAITING_TEA_KEEP_WARM,
-    HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
     HALL_AWAITING_TEA_COMMENT,
 )
 
@@ -214,10 +206,19 @@ class TeaWorkflow:
         if intent == "YANDEX.CONFIRM" or _matches_answer(normalized, POSITIVE_WORDS):
             if flow_type == "hall":
                 self._hall_draft = TeaDraft()
-                await self.boil()
+                LOGGER.info(
+                    "Tea workflow: received Sonya answer, draft only, no device action: flow=%s step=wants draft=%s",
+                    flow_type,
+                    self._hall_draft,
+                )
                 await self._ask_keep_warm(flow_type="hall")
             else:
                 self._tg_draft = TeaDraft()
+                LOGGER.info(
+                    "Tea workflow: received Sonya answer, draft only, no device action: flow=%s step=wants draft=%s",
+                    flow_type,
+                    self._tg_draft,
+                )
                 await self._ask_keep_warm(flow_type="telegram")
                 await self._edit_active_or_send(tea_progress_text(), delete_only())
             return
@@ -250,42 +251,30 @@ class TeaWorkflow:
         if intent == "YANDEX.REJECT" or _matches_answer(normalized, NEGATIVE_WORDS):
             draft.keep_warm = False
             draft.keep_warm_temperature = None
+            LOGGER.info(
+                "Tea workflow: received Sonya answer, draft only, no device action: flow=%s step=keep_warm draft=%s",
+                flow_type,
+                draft,
+            )
             await self._ask_comment(flow_type=flow_type)
+            if flow_type == "telegram":
+                await self._edit_active_or_send(tea_progress_text("нет"), delete_only())
             return
 
         if intent == "YANDEX.CONFIRM" or _matches_answer(normalized, POSITIVE_WORDS):
             draft.keep_warm = True
-            await self._ask_keep_warm_temperature(flow_type=flow_type)
+            draft.keep_warm_temperature = DEFAULT_KEEP_WARM_TEMPERATURE
+            LOGGER.info(
+                "Tea workflow: received Sonya answer, draft only, no device action: flow=%s step=keep_warm draft=%s",
+                flow_type,
+                draft,
+            )
+            await self._ask_comment(flow_type=flow_type)
             if flow_type == "telegram":
-                await self._edit_active_or_send(tea_progress_text("уточняю"), delete_only())
+                await self._edit_active_or_send(tea_progress_text(f"{DEFAULT_KEEP_WARM_TEMPERATURE} °C"), delete_only())
             return
 
         await self._ha.play_media(self._settings.bedroom_player_entity, "Скажи да или нет.")
-
-    async def handle_keep_warm_temperature_answer(self, answer: TeaAnswer, *, flow_type: str) -> None:
-        if self._is_duplicate_event("keep_warm_temperature", answer):
-            return
-
-        temperature = parse_keep_warm_temperature(answer.answer)
-        self._log_step(flow_type, "keep_warm_temperature", str(temperature or answer.answer), "received answer")
-        if temperature is None:
-            await self._set_only_wait_flag(self._temperature_wait_flag(flow_type))
-            await self._ha.play_media(
-                self._settings.bedroom_player_entity,
-                "Выбери температуру от 40 до 90 градусов с шагом 10.",
-                yandex_dialog_content_type(self._settings, self._temperature_dialog_id(flow_type)),
-            )
-            if flow_type == "telegram":
-                await self._edit_active_or_send(
-                    tea_progress_text("нужна температура 40, 50, 60, 70, 80 или 90 °C"),
-                    delete_only(),
-                )
-            return
-
-        draft = self._draft_for_flow(flow_type)
-        draft.keep_warm = True
-        draft.keep_warm_temperature = temperature
-        await self._ask_comment(flow_type=flow_type)
 
     async def handle_comment_answer(self, answer: TeaAnswer, *, flow_type: str) -> None:
         if self._is_duplicate_event("comment", answer):
@@ -294,6 +283,11 @@ class TeaWorkflow:
         draft = self._draft_for_flow(flow_type)
         draft.comment = normalize_order_comment(answer.answer)
         self._log_step(flow_type, "comment", draft.comment, "received answer")
+        LOGGER.info(
+            "Tea workflow: received Sonya answer, draft only, no device action: flow=%s step=comment draft=%s",
+            flow_type,
+            draft,
+        )
         await self._finish_order(flow_type=flow_type)
         self._schedule_bedroom_speech("Хорошо, заказ принят.", delay_seconds=1.0)
 
@@ -310,6 +304,10 @@ class TeaWorkflow:
         )
         self._latest_context = context
         await self._clear_all_wait_flags()
+        LOGGER.info(
+            "Tea workflow: legacy auto-enabled endpoint handled as Telegram info only, no device action: context=%s",
+            context,
+        )
         await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
             tea_auto_enabled_text(context),
@@ -359,6 +357,13 @@ class TeaWorkflow:
         context = self._context_for_message(message_id)
         self._log_step("telegram", "confirm", tea_keep_warm_label(context), f"turn on source={context.source}")
         await self._clear_all_wait_flags()
+        LOGGER.info(
+            "Tea device action allowed: source=telegram_confirm_yes chat_id=%s message_id=%s keep_warm_temperature=%s comment_present=%s",
+            chat_id,
+            message_id,
+            context.keep_warm_temperature,
+            context.comment != NO_COMMENT,
+        )
         await self.boil()
         if context.keep_warm_temperature is not None:
             self._schedule_post_boil_keep_warm(context.keep_warm_temperature)
@@ -445,20 +450,6 @@ class TeaWorkflow:
         dialog = yandex_dialog_content_type(self._settings, dialog_id)
         await self._ha.play_media(self._settings.bedroom_player_entity, "Включить поддержание тепла?", dialog)
 
-    async def _ask_keep_warm_temperature(self, *, flow_type: str) -> None:
-        if flow_type == "direct":
-            flag = DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-            dialog_id = DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
-        elif flow_type == "hall":
-            flag = HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-            dialog_id = HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
-        else:
-            flag = TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-            dialog_id = TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
-        await self._set_only_wait_flag(flag)
-        dialog = yandex_dialog_content_type(self._settings, dialog_id)
-        await self._ha.play_media(self._settings.bedroom_player_entity, "На какой температуре поддерживать тепло: 40, 50, 60, 70, 80 или 90 градусов?", dialog)
-
     async def _ask_comment(self, *, flow_type: str) -> None:
         if flow_type == "direct":
             flag = DIRECT_AWAITING_TEA_COMMENT
@@ -486,15 +477,11 @@ class TeaWorkflow:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
         await self._clear_all_wait_flags()
         if flow_type == "hall":
-            if context.keep_warm_temperature is not None:
-                self._schedule_post_boil_keep_warm(context.keep_warm_temperature)
-            await self._ha.play_media(self._settings.living_room_player_entity, tea_hall_result_speech(context))
-            await self._telegram_messages.safe_send(
-                self._settings.telegram_admin_chat_id,
-                tea_auto_enabled_text(context),
-                reply_markup=delete_only(),
+            self._set_active_message(self._settings.telegram_admin_chat_id, None)
+            LOGGER.info(
+                "Tea workflow: hall order collected, showing Telegram confirmation only, no device action: context=%s",
+                context,
             )
-            return
         await self._edit_active_or_send(tea_confirmation_text(context), tea_confirmation(), context=context)
 
     async def _remind_later(self, reminder_id: int, reminder: Reminder) -> None:
@@ -543,20 +530,6 @@ class TeaWorkflow:
         if flow_type == "hall":
             return self._hall_draft
         return self._tg_draft
-
-    def _temperature_wait_flag(self, flow_type: str) -> str:
-        if flow_type == "direct":
-            return DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-        if flow_type == "hall":
-            return HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-        return TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE
-
-    def _temperature_dialog_id(self, flow_type: str) -> str:
-        if flow_type == "direct":
-            return DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
-        if flow_type == "hall":
-            return HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
-        return TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID
 
     async def _set_only_wait_flag(self, entity_id: str) -> None:
         await self._clear_all_wait_flags()
@@ -634,6 +607,7 @@ class TeaWorkflow:
             {
                 "telegram": self._tg_draft,
                 "direct": self._direct_draft,
+                "hall": self._hall_draft,
             },
             action,
         )

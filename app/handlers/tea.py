@@ -19,7 +19,7 @@ from app.messages.devices import device_action_prefix, kettle_status_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.workflows.coffee import minute_word
-from app.workflows.tea import TeaWorkflow
+from app.workflows.tea import DEFAULT_KEEP_WARM_TEMPERATURE, TeaWorkflow
 from app.workflows.tea import context_from_draft
 from app.workflows.tea import tea_keep_warm_label
 
@@ -210,7 +210,8 @@ async def sonya_tea_keep_warm(callback: CallbackQuery, settings: Settings, tea_w
     draft = await tea_workflow.set_sonya_order_keep_warm(callback.from_user.id, keep_warm)
     if callback.message:
         if keep_warm:
-            await callback.message.edit_text(tea_messages.sonya_tea_temperature_question(), reply_markup=sonya_tea_temperature_menu())
+            draft = await tea_workflow.set_sonya_order_temperature(callback.from_user.id, DEFAULT_KEEP_WARM_TEMPERATURE)
+            await callback.message.edit_text(_sonya_tea_confirmation_text(draft), reply_markup=sonya_tea_confirm_menu())
         else:
             await callback.message.edit_text(_sonya_tea_confirmation_text(draft), reply_markup=sonya_tea_confirm_menu())
     await callback.answer()

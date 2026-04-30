@@ -149,6 +149,10 @@ class CoffeeWorkflow:
 
         if intent == "YANDEX.CONFIRM" or any(word in normalized for word in POSITIVE_WORDS):
             self._tg_draft = CoffeeDraft()
+            LOGGER.info(
+                "Coffee workflow: received Sonya answer, draft only, no device action: flow=telegram step=wants draft=%s",
+                self._tg_draft,
+            )
             await self._ask_temperature(direct=False)
             await self._edit_active_or_send(
                 order_progress_text(None, None),
@@ -160,6 +164,10 @@ class CoffeeWorkflow:
         coffee_type = normalize_coffee_answer(shown)
         context = CoffeeMessageContext(coffee_type=coffee_type)
         self._latest_context = context
+        LOGGER.info(
+            "Coffee workflow: received Sonya answer, draft only, no device action: flow=telegram step=wants context=%s",
+            context,
+        )
         await self._clear_all_wait_flags()
         await self._edit_active_or_send(
             coffee_messages.coffee_unknown_answer(shown),
@@ -176,6 +184,11 @@ class CoffeeWorkflow:
         LOGGER.info("Sonya temperature received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
         flow_type = "direct" if direct else "telegram"
         self._log_step(flow_type, "temperature", draft.temperature, "received answer")
+        LOGGER.info(
+            "Coffee workflow: received Sonya answer, draft only, no device action: flow=%s step=temperature draft=%s",
+            flow_type,
+            draft,
+        )
 
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
@@ -196,6 +209,11 @@ class CoffeeWorkflow:
         flow_type = "direct" if direct else "telegram"
         LOGGER.info("Sonya syrup received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
         self._log_step(flow_type, "syrup", draft.syrup or answer.answer, "received answer")
+        LOGGER.info(
+            "Coffee workflow: received Sonya answer, draft only, no device action: flow=%s step=syrup draft=%s",
+            flow_type,
+            draft,
+        )
 
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
@@ -218,6 +236,11 @@ class CoffeeWorkflow:
         self._latest_context = context
         LOGGER.info("Sonya coffee comment received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
         self._log_step(flow_type, "comment", draft.comment, "received answer")
+        LOGGER.info(
+            "Coffee workflow: received Sonya answer, draft only, no device action: flow=%s step=comment draft=%s",
+            flow_type,
+            draft,
+        )
 
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
@@ -234,20 +257,26 @@ class CoffeeWorkflow:
         if self._is_duplicate_event("auto_enabled", answer):
             return
 
-        context = context_from_text(answer.answer, comment=normalize_order_comment(answer.comment or ""))
+        context = context_from_text(answer.answer, comment=normalize_order_comment(answer.comment or ""), source="hall")
         self._latest_context = context
         self._log_step(
             "hall",
             "final",
             context.coffee_type,
-            "auto_enabled=True telegram info only / no confirmation buttons",
+            "legacy auto-enabled endpoint converted to Telegram confirmation / no device action",
         )
         await self._clear_all_wait_flags()
-        await self._telegram_messages.safe_send(
-            self._settings.telegram_admin_chat_id,
-            auto_enabled_text(context),
-            reply_markup=delete_only(),
+        LOGGER.info(
+            "Coffee workflow: legacy auto-enabled endpoint handled as Telegram confirmation, draft only, no device action: context=%s",
+            context,
         )
+        message_id = await self._telegram_messages.safe_send(
+            self._settings.telegram_admin_chat_id,
+            order_confirmation_text(context),
+            reply_markup=confirmation(),
+        )
+        if message_id is not None:
+            self._context_by_message_id[message_id] = context
 
     async def notify_hall_refused(self) -> None:
         self._log_step(
@@ -267,6 +296,13 @@ class CoffeeWorkflow:
         context = self._context_for_message(message_id)
         self._log_step("telegram", "confirm", context.coffee_type, f"turn on source={context.source}")
         await self._clear_all_wait_flags()
+        LOGGER.info(
+            "Coffee device action allowed: source=telegram_confirm_yes chat_id=%s message_id=%s coffee_type=%s comment_present=%s",
+            chat_id,
+            message_id,
+            context.coffee_type,
+            context.comment != NO_COMMENT,
+        )
         await self._ha.switch_turn_on(self._settings.coffee_switch_entity)
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
@@ -552,7 +588,7 @@ def context_from_draft(
     )
 
 
-def context_from_text(answer: str, *, comment: str = NO_COMMENT) -> CoffeeMessageContext:
+def context_from_text(answer: str, *, comment: str = NO_COMMENT, source: str = "voice") -> CoffeeMessageContext:
     coffee_type = normalize_coffee_answer(answer)
     syrup = normalize_syrup(answer) if ("сироп" in answer.lower() or "без" in answer.lower()) else None
     return CoffeeMessageContext(
@@ -560,6 +596,7 @@ def context_from_text(answer: str, *, comment: str = NO_COMMENT) -> CoffeeMessag
         temperature=normalize_temperature(answer),
         syrup=syrup,
         comment=comment,
+        source=source,
     )
 
 

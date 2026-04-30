@@ -63,15 +63,16 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 
 - Telegram-initiated coffee flow may edit the active Telegram message after each step.
 - Direct voice coffee flow does not send an intermediate Telegram message after temperature. It creates the Telegram confirmation only after syrup is received.
-- Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, auto-enables the coffee machine after a positive answer, and sends Telegram only an info notification with `Удалить уведомление`.
+- Hall/zal voice flow is separate from direct voice flow. It asks whether Sonya wants coffee first, collects the order, and sends Artem a Telegram confirmation. It does not turn on the coffee machine from Sonya's voice answer.
 - Voice-based coffee flows say one short bedroom acknowledgement after Sonya gives the final answer: `Хорошо, заказ принят.`.
 - Coffee orders now ask one extra voice question after temperature and syrup: `Есть пожелания?`.
   Send the answer to `/internal/coffee/sonya-comment-answer` with dialog `tg_ask_sonya_coffee_comment`
-  or `sonya_direct_coffee_comment`. HA auto-enabled hall flows that still call
+  or `sonya_direct_coffee_comment`. Legacy HA hall flows that still call
   `/internal/coffee/sonya-auto-enabled` directly can pass optional JSON `comment`;
-  otherwise Telegram shows `Комментарий: -`.
+  the bot now treats that endpoint as a Telegram confirmation request, not as permission
+  to turn on the coffee machine. Otherwise Telegram shows `Комментарий: -`.
 - After Artem presses `Да`, `Нет`, or `Попозже` in Telegram, the bedroom does not say anything. Telegram messages and device actions continue normally.
-- Before Artem confirms, the coffee machine does not turn on, except in the hall/zal voice flow where it turns on automatically after Sonya says yes.
+- Before Artem confirms in Telegram, the coffee machine does not turn on.
 - If an internal coffee event fails while being processed, the bot logs `Coffee workflow failed, resetting coffee flags` and resets all coffee wait flags through Home Assistant.
 
 ### Coffee Alerts
@@ -88,13 +89,14 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 
 - Telegram ask-Sonya tea flow asks whether Sonya wants tea, then asks about keep-warm.
 - Direct voice tea flow asks keep-warm first and does not start the kettle before Artem confirms.
-- Hall/zal tea flow asks whether Sonya wants tea first, starts the kettle automatically after a positive answer, and sends Telegram only an info notification.
+- Hall/zal tea flow asks whether Sonya wants tea first, collects keep-warm and comment answers, and sends Artem a Telegram confirmation. It does not start the kettle from Sonya's voice answer.
 - Voice-based tea flows say one short bedroom acknowledgement after Sonya gives the final order answer: `Хорошо, заказ принят.`.
 - Tea orders now ask one extra voice question after keep-warm settings: `Есть пожелания?`.
   Send the answer to `/internal/tea/sonya-comment-answer` with dialog `tg_ask_sonya_tea_comment`,
-  `sonya_direct_tea_comment`, or `hall_ask_sonya_tea_comment`. HA auto-enabled hall flows that
+  `sonya_direct_tea_comment`, or `hall_ask_sonya_tea_comment`. Legacy HA hall flows that
   still call `/internal/tea/sonya-auto-enabled` directly can pass optional JSON `comment`;
-  otherwise Telegram shows `Комментарий: -`.
+  that endpoint sends Telegram info only and does not start the kettle. Otherwise Telegram
+  shows `Комментарий: -`.
 - After Artem presses `Да`, `Нет`, or `Попозже` in Telegram, the bedroom does not say anything. Telegram messages, kettle start, and post-boil keep-warm continue normally.
 - Sonya Telegram tea order does not speak in the bedroom.
 - Boil with `water_heater.set_temperature` and `temperature: 100`.
@@ -397,7 +399,6 @@ The active automation IDs are:
 - `tg_sonya_direct_tea_request`
 - `tg_sonya_wants_tea_answer`
 - `tg_sonya_tea_keep_warm_answer`
-- `tg_sonya_tea_keep_warm_temperature_answer`
 - `tg_sonya_tea_comment_answer`
 - `ask_sonya_about_water`
 - `tg_sonya_wants_water_answer`
@@ -454,22 +455,16 @@ input_boolean:
     name: Telegram awaiting Sonya tea wants
   tg_awaiting_sonya_tea_keep_warm:
     name: Telegram awaiting Sonya tea keep warm
-  tg_awaiting_sonya_tea_keep_warm_temperature:
-    name: Telegram awaiting Sonya tea keep warm temperature
   tg_awaiting_sonya_tea_comment:
     name: Telegram awaiting Sonya tea comment
   sonya_direct_awaiting_tea_keep_warm:
     name: Sonya direct awaiting tea keep warm
-  sonya_direct_awaiting_tea_keep_warm_temperature:
-    name: Sonya direct awaiting tea keep warm temperature
   sonya_direct_awaiting_tea_comment:
     name: Sonya direct awaiting tea comment
   hall_awaiting_sonya_tea_wants:
     name: Hall awaiting Sonya tea wants
   hall_awaiting_sonya_tea_keep_warm:
     name: Hall awaiting Sonya tea keep warm
-  hall_awaiting_sonya_tea_keep_warm_temperature:
-    name: Hall awaiting Sonya tea keep warm temperature
   hall_awaiting_sonya_tea_comment:
     name: Hall awaiting Sonya tea comment
   tg_awaiting_sonya_water_wants:
@@ -579,16 +574,6 @@ rest_command:
 
   tg_sonya_tea_keep_warm_answer:
     url: "http://telegram-bot:8088/internal/tea/sonya-keep-warm-answer"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: >-
-      {"answer": {{ answer | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
-
-  tg_sonya_tea_keep_warm_temperature_answer:
-    url: "http://telegram-bot:8088/internal/tea/sonya-keep-warm-temperature-answer"
     method: POST
     content_type: "application/json"
     headers:
@@ -736,9 +721,6 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
                     {% set positive_words = ['да', 'хочу', 'ага', 'можно', 'буду', 'конечно'] %}
                     {{ wants_intent == 'YANDEX.CONFIRM' or positive_words | select('in', wants_answer) | list | count > 0 }}
               sequence:
-                - action: switch.turn_on
-                  target:
-                    entity_id: switch.kofemashina
                 - action: input_boolean.turn_on
                   target:
                     entity_id: input_boolean.hall_awaiting_sonya_coffee_temperature
@@ -1037,12 +1019,10 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
            or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on')
            or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')
            or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
-           or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
            or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on')
-           or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
            or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
            or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
-           or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on') %}
+           or is_state('input_boolean.hall_awaiting_sonya_tea_comment', 'on') %}
         {% set any_active = any_active
            or is_state('input_boolean.tg_awaiting_sonya_coffee_comment', 'on')
            or is_state('input_boolean.sonya_direct_awaiting_coffee_comment', 'on')
@@ -1271,12 +1251,9 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         entity_id:
           - input_boolean.tg_awaiting_sonya_tea_wants
           - input_boolean.tg_awaiting_sonya_tea_keep_warm
-          - input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature
           - input_boolean.sonya_direct_awaiting_tea_keep_warm
-          - input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature
           - input_boolean.hall_awaiting_sonya_tea_wants
           - input_boolean.hall_awaiting_sonya_tea_keep_warm
-          - input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature
     - action: rest_command.tg_sonya_hall_tea_request
 
 - id: tg_sonya_direct_tea_request
@@ -1302,12 +1279,9 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
           or is_state('input_boolean.hall_awaiting_sonya_coffee_syrup', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
-          or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
           or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on')
-          or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
-          or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
         %}
         {% set any_active = any_active
           or is_state('input_boolean.tg_awaiting_sonya_coffee_comment', 'on')
@@ -1320,7 +1294,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
           or is_state('input_boolean.tg_awaiting_sonya_water_comment', 'on')
           or is_state('input_boolean.sonya_direct_awaiting_water_comment', 'on')
         %}
-        {% set intermediate = text in ['да', 'нет', 'не надо', 'не хочу', 'хочу', 'буду', 'сорок', 'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто'] %}
+        {% set intermediate = text in ['да', 'нет', 'не надо', 'не хочу', 'хочу', 'буду'] %}
         {{ not is_service_phrase
            and not any_active
            and not intermediate
@@ -1331,12 +1305,9 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
            and dialog not in [
              'tg_ask_sonya_wants_tea',
              'tg_ask_sonya_tea_keep_warm',
-             'tg_ask_sonya_tea_keep_warm_temperature',
              'sonya_direct_tea_keep_warm',
-             'sonya_direct_tea_keep_warm_temperature',
              'hall_ask_sonya_wants_tea',
              'hall_ask_sonya_tea_keep_warm',
-             'hall_ask_sonya_tea_keep_warm_temperature'
            ] }}
   action:
     - action: input_boolean.turn_off
@@ -1344,12 +1315,9 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         entity_id:
           - input_boolean.tg_awaiting_sonya_tea_wants
           - input_boolean.tg_awaiting_sonya_tea_keep_warm
-          - input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature
           - input_boolean.sonya_direct_awaiting_tea_keep_warm
-          - input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature
           - input_boolean.hall_awaiting_sonya_tea_wants
           - input_boolean.hall_awaiting_sonya_tea_keep_warm
-          - input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature
     - action: rest_command.tg_sonya_direct_tea_request
 
 - id: tg_sonya_wants_tea_answer
@@ -1435,47 +1403,6 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
           {% set session = trigger.event.data.session | default({}) %}
           {{ session.dialog | default('tg_ask_sonya_tea_keep_warm') }}
     - action: rest_command.tg_sonya_tea_keep_warm_answer
-      data:
-        answer: "{{ answer }}"
-        intent: "{{ intent }}"
-        dialog: "{{ dialog }}"
-
-- id: tg_sonya_tea_keep_warm_temperature_answer
-  alias: "Telegram bot - ответ Сони температура поддержания тепла для чая"
-  mode: queued
-  trigger:
-    - platform: event
-      event_type: yandex_intent
-  condition:
-    - condition: template
-      value_template: >-
-        {% set session = trigger.event.data.session | default({}) %}
-        {% set dialog = session.dialog | default('') %}
-        {% set text = trigger.event.data.text | default('') | lower %}
-        {% set yandex_dialog_skill_name = 'домашний помощник' %}
-        {% set is_service_phrase = 'скажи навыку' in text or yandex_dialog_skill_name in text %}
-        {{ not is_service_phrase
-           and (
-             dialog in [
-               'tg_ask_sonya_tea_keep_warm_temperature',
-               'sonya_direct_tea_keep_warm_temperature',
-               'hall_ask_sonya_tea_keep_warm_temperature'
-             ]
-             or (
-               is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
-               or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
-               or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
-             )
-           ) }}
-  action:
-    - variables:
-        answer: "{{ trigger.event.data.text | default('') }}"
-        intent: "{{ trigger.event.data.intent | default('') }}"
-        session: "{{ trigger.event.data.session | default({}) }}"
-        dialog: >-
-          {% set session = trigger.event.data.session | default({}) %}
-          {{ session.dialog | default('tg_ask_sonya_tea_keep_warm_temperature') }}
-    - action: rest_command.tg_sonya_tea_keep_warm_temperature_answer
       data:
         answer: "{{ answer }}"
         intent: "{{ intent }}"
@@ -1625,14 +1552,11 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
           or is_state('input_boolean.hall_awaiting_sonya_coffee_comment', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_tea_wants', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm', 'on')
-          or is_state('input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_tea_comment', 'on')
           or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm', 'on')
-          or is_state('input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature', 'on')
           or is_state('input_boolean.sonya_direct_awaiting_tea_comment', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_wants', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm', 'on')
-          or is_state('input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature', 'on')
           or is_state('input_boolean.hall_awaiting_sonya_tea_comment', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_water_wants', 'on')
           or is_state('input_boolean.tg_awaiting_sonya_water_comment', 'on')
@@ -1676,7 +1600,6 @@ Tea internal endpoints:
 
 - `/internal/tea/sonya-wants-answer`
 - `/internal/tea/sonya-keep-warm-answer`
-- `/internal/tea/sonya-keep-warm-temperature-answer`
 - `/internal/tea/sonya-direct-request`
 - `/internal/tea/hall-request`
 - `/internal/tea/sonya-auto-enabled`

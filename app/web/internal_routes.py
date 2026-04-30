@@ -298,24 +298,6 @@ async def tea_keep_warm_answer(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def tea_keep_warm_temperature_answer(request: web.Request) -> web.Response:
-    _check_internal_secret(request)
-    workflow: TeaWorkflow = request.app["tea_workflow"]
-    try:
-        answer = await _parse_tea_answer(request)
-        if answer.dialog == "sonya_direct_tea_keep_warm_temperature":
-            flow_type = "direct"
-        elif answer.dialog == "hall_ask_sonya_tea_keep_warm_temperature":
-            flow_type = "hall"
-        else:
-            flow_type = "telegram"
-        await workflow.handle_keep_warm_temperature_answer(answer, flow_type=flow_type)
-    except Exception:
-        await workflow.reset_after_failure()
-        raise
-    return web.json_response({"ok": True})
-
-
 async def tea_comment_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     workflow: TeaWorkflow = request.app["tea_workflow"]
@@ -427,7 +409,6 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/admin/talk-answer", admin_talk_answer)
     app.router.add_post("/internal/tea/sonya-wants-answer", tea_wants_answer)
     app.router.add_post("/internal/tea/sonya-keep-warm-answer", tea_keep_warm_answer)
-    app.router.add_post("/internal/tea/sonya-keep-warm-temperature-answer", tea_keep_warm_temperature_answer)
     app.router.add_post("/internal/tea/sonya-comment-answer", tea_comment_answer)
     app.router.add_post("/internal/tea/sonya-direct-request", tea_direct_request)
     app.router.add_post("/internal/tea/hall-request", tea_hall_request)
