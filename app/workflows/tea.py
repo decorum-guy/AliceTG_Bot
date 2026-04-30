@@ -19,6 +19,7 @@ from app.services.telegram_messages import TelegramMessages
 from app.services.yandex_dialogs import yandex_dialog_content_type
 from app.storage.base import Reminder
 from app.storage.base import Storage
+from app.workflows.comments import NO_COMMENT, normalize_order_comment
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,30 +28,39 @@ KEEP_WARM_TEMPERATURES = (40, 50, 60, 70, 80, 90)
 TG_TEA_WANTS_DIALOG_ID = "tg_ask_sonya_wants_tea"
 TG_TEA_KEEP_WARM_DIALOG_ID = "tg_ask_sonya_tea_keep_warm"
 TG_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "tg_ask_sonya_tea_keep_warm_temperature"
+TG_TEA_COMMENT_DIALOG_ID = "tg_ask_sonya_tea_comment"
 DIRECT_TEA_KEEP_WARM_DIALOG_ID = "sonya_direct_tea_keep_warm"
 DIRECT_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "sonya_direct_tea_keep_warm_temperature"
+DIRECT_TEA_COMMENT_DIALOG_ID = "sonya_direct_tea_comment"
 HALL_TEA_WANTS_DIALOG_ID = "hall_ask_sonya_wants_tea"
 HALL_TEA_KEEP_WARM_DIALOG_ID = "hall_ask_sonya_tea_keep_warm"
 HALL_TEA_KEEP_WARM_TEMPERATURE_DIALOG_ID = "hall_ask_sonya_tea_keep_warm_temperature"
+HALL_TEA_COMMENT_DIALOG_ID = "hall_ask_sonya_tea_comment"
 
 TG_AWAITING_TEA_WANTS = "input_boolean.tg_awaiting_sonya_tea_wants"
 TG_AWAITING_TEA_KEEP_WARM = "input_boolean.tg_awaiting_sonya_tea_keep_warm"
 TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE = "input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature"
+TG_AWAITING_TEA_COMMENT = "input_boolean.tg_awaiting_sonya_tea_comment"
 DIRECT_AWAITING_TEA_KEEP_WARM = "input_boolean.sonya_direct_awaiting_tea_keep_warm"
 DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE = "input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature"
+DIRECT_AWAITING_TEA_COMMENT = "input_boolean.sonya_direct_awaiting_tea_comment"
 HALL_AWAITING_TEA_WANTS = "input_boolean.hall_awaiting_sonya_tea_wants"
 HALL_AWAITING_TEA_KEEP_WARM = "input_boolean.hall_awaiting_sonya_tea_keep_warm"
 HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE = "input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature"
+HALL_AWAITING_TEA_COMMENT = "input_boolean.hall_awaiting_sonya_tea_comment"
 
 ALL_TEA_WAIT_FLAGS = (
     TG_AWAITING_TEA_WANTS,
     TG_AWAITING_TEA_KEEP_WARM,
     TG_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
+    TG_AWAITING_TEA_COMMENT,
     DIRECT_AWAITING_TEA_KEEP_WARM,
     DIRECT_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
+    DIRECT_AWAITING_TEA_COMMENT,
     HALL_AWAITING_TEA_WANTS,
     HALL_AWAITING_TEA_KEEP_WARM,
     HALL_AWAITING_TEA_KEEP_WARM_TEMPERATURE,
+    HALL_AWAITING_TEA_COMMENT,
 )
 
 POSITIVE_WORDS = (
@@ -99,17 +109,20 @@ class TeaAnswer:
     dialog: str | None = None
     source: str | None = None
     request_id: str | None = None
+    comment: str | None = None
 
 
 @dataclass
 class TeaDraft:
     keep_warm: bool | None = None
     keep_warm_temperature: int | None = None
+    comment: str = NO_COMMENT
 
 
 @dataclass(frozen=True)
 class TeaContext:
     keep_warm_temperature: int | None = None
+    comment: str = NO_COMMENT
     is_reminder: bool = False
     source: str = "voice"
     speak_to_bedroom_on_confirm: bool = True
@@ -237,8 +250,7 @@ class TeaWorkflow:
         if intent == "YANDEX.REJECT" or _matches_answer(normalized, NEGATIVE_WORDS):
             draft.keep_warm = False
             draft.keep_warm_temperature = None
-            await self._finish_order(flow_type=flow_type)
-            self._schedule_bedroom_speech("Хорошо, заказ принят.", delay_seconds=1.0)
+            await self._ask_comment(flow_type=flow_type)
             return
 
         if intent == "YANDEX.CONFIRM" or _matches_answer(normalized, POSITIVE_WORDS):
@@ -273,6 +285,15 @@ class TeaWorkflow:
         draft = self._draft_for_flow(flow_type)
         draft.keep_warm = True
         draft.keep_warm_temperature = temperature
+        await self._ask_comment(flow_type=flow_type)
+
+    async def handle_comment_answer(self, answer: TeaAnswer, *, flow_type: str) -> None:
+        if self._is_duplicate_event("comment", answer):
+            return
+
+        draft = self._draft_for_flow(flow_type)
+        draft.comment = normalize_order_comment(answer.answer)
+        self._log_step(flow_type, "comment", draft.comment, "received answer")
         await self._finish_order(flow_type=flow_type)
         self._schedule_bedroom_speech("Хорошо, заказ принят.", delay_seconds=1.0)
 
@@ -280,7 +301,13 @@ class TeaWorkflow:
         if self._is_duplicate_event("auto_enabled", answer):
             return
 
-        context = TeaContext(keep_warm_temperature=parse_keep_warm_temperature(answer.answer), source="hall", speak_to_bedroom_on_confirm=False, speak_to_bedroom_on_decline=False)
+        context = TeaContext(
+            keep_warm_temperature=parse_keep_warm_temperature(answer.answer),
+            comment=normalize_order_comment(answer.comment or ""),
+            source="hall",
+            speak_to_bedroom_on_confirm=False,
+            speak_to_bedroom_on_decline=False,
+        )
         self._latest_context = context
         await self._clear_all_wait_flags()
         await self._telegram_messages.safe_send(
@@ -351,13 +378,13 @@ class TeaWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            tea_messages.tea_declined(),
+            tea_messages.tea_declined(context.comment),
             delete_only(),
         )
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
-    async def schedule_reminder(self, chat_id: int, minutes: int, message_id: int | None = None) -> None:
+    async def schedule_reminder(self, chat_id: int, minutes: int, message_id: int | None = None) -> TeaContext:
         context = self._context_for_message(message_id)
         await self._clear_all_wait_flags()
         reminder = Reminder(
@@ -365,12 +392,14 @@ class TeaWorkflow:
             minutes=minutes,
             reason="sonya_tea",
             tea_keep_warm_temperature=context.keep_warm_temperature,
+            comment=context.comment,
         )
         reminder_id = await self._storage.add_reminder(reminder)
         task = asyncio.create_task(self._remind_later(reminder_id, reminder))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         await self._show_menu_for_chat(chat_id)
+        return context
 
     async def boil(self) -> None:
         await self._ha.water_heater_set_temperature(self._settings.kettle_entity, 100)
@@ -430,6 +459,20 @@ class TeaWorkflow:
         dialog = yandex_dialog_content_type(self._settings, dialog_id)
         await self._ha.play_media(self._settings.bedroom_player_entity, "На какой температуре поддерживать тепло: 40, 50, 60, 70, 80 или 90 градусов?", dialog)
 
+    async def _ask_comment(self, *, flow_type: str) -> None:
+        if flow_type == "direct":
+            flag = DIRECT_AWAITING_TEA_COMMENT
+            dialog_id = DIRECT_TEA_COMMENT_DIALOG_ID
+        elif flow_type == "hall":
+            flag = HALL_AWAITING_TEA_COMMENT
+            dialog_id = HALL_TEA_COMMENT_DIALOG_ID
+        else:
+            flag = TG_AWAITING_TEA_COMMENT
+            dialog_id = TG_TEA_COMMENT_DIALOG_ID
+        await self._set_only_wait_flag(flag)
+        dialog = yandex_dialog_content_type(self._settings, dialog_id)
+        await self._ha.play_media(self._settings.bedroom_player_entity, "Есть пожелания?", dialog)
+
     async def _finish_order(self, *, flow_type: str) -> None:
         draft = self._draft_for_flow(flow_type)
         context = context_from_draft(
@@ -459,6 +502,7 @@ class TeaWorkflow:
             await asyncio.sleep(reminder.minutes * 60)
             context = TeaContext(
                 keep_warm_temperature=reminder.tea_keep_warm_temperature,
+                comment=reminder.comment or NO_COMMENT,
                 is_reminder=True,
                 source="reminder",
                 speak_to_bedroom_on_confirm=False,
@@ -604,6 +648,7 @@ def context_from_draft(
 ) -> TeaContext:
     return TeaContext(
         keep_warm_temperature=draft.keep_warm_temperature if draft.keep_warm else None,
+        comment=draft.comment,
         source=source,
         speak_to_bedroom_on_confirm=speak_to_bedroom_on_confirm,
         speak_to_bedroom_on_decline=speak_to_bedroom_on_decline,
@@ -629,11 +674,11 @@ def tea_progress_text(keep_warm: str = "уточняю") -> str:
 
 
 def tea_confirmation_text(context: TeaContext) -> str:
-    return tea_messages.tea_confirmation(tea_keep_warm_label(context))
+    return tea_messages.tea_confirmation(tea_keep_warm_label(context), context.comment)
 
 
 def tea_auto_enabled_text(context: TeaContext) -> str:
-    return tea_messages.tea_auto_enabled(tea_keep_warm_label(context))
+    return tea_messages.tea_auto_enabled(tea_keep_warm_label(context), context.comment)
 
 
 def tea_hall_result_speech(context: TeaContext) -> str:
@@ -643,11 +688,11 @@ def tea_hall_result_speech(context: TeaContext) -> str:
 
 
 def tea_reminder_text(context: TeaContext) -> str:
-    return tea_messages.tea_reminder(tea_keep_warm_label(context))
+    return tea_messages.tea_reminder(tea_keep_warm_label(context), context.comment)
 
 
 def tea_started_text(context: TeaContext) -> str:
-    return tea_messages.tea_started(context.keep_warm_temperature)
+    return tea_messages.tea_started(context.keep_warm_temperature, context.comment)
 
 
 def _matches_answer(normalized: str, words: tuple[str, ...]) -> bool:

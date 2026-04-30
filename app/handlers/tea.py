@@ -15,7 +15,6 @@ from app.keyboards.tea import (
     tea_later_options,
 )
 from app.messages import tea as tea_messages
-from app.messages.common import reminder_scheduled_text
 from app.messages.devices import device_action_prefix, kettle_status_text
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
@@ -181,9 +180,12 @@ async def tea_later(callback: CallbackQuery, settings: Settings, tea_workflow: T
         return
 
     minutes = int((callback.data or "").split(":", 1)[1])
-    await tea_workflow.schedule_reminder(callback.message.chat.id, minutes, callback.message.message_id)  # type: ignore[union-attr]
+    context = await tea_workflow.schedule_reminder(callback.message.chat.id, minutes, callback.message.message_id)  # type: ignore[union-attr]
     if callback.message:
-        await callback.message.edit_text(reminder_scheduled_text(minutes, minute_word(minutes)), reply_markup=delete_only())
+        await callback.message.edit_text(
+            tea_messages.tea_scheduled(tea_keep_warm_label(context), context.comment, minutes, minute_word(minutes)),
+            reply_markup=delete_only(),
+        )
     await callback.answer("Я напомню позже")
 
 

@@ -17,6 +17,7 @@ from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.services.yandex_dialogs import yandex_dialog_content_type
 from app.storage.base import Reminder, Storage
+from app.workflows.comments import NO_COMMENT, normalize_order_comment
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,22 +27,30 @@ NEGATIVE_WORDS = ("нет спасибо", "не хочу", "не надо", "н
 TG_WANTS_DIALOG_ID = "tg_ask_sonya_wants_coffee"
 TG_TEMPERATURE_DIALOG_ID = "tg_ask_sonya_coffee_temperature"
 TG_SYRUP_DIALOG_ID = "tg_ask_sonya_coffee_syrup"
+TG_COMMENT_DIALOG_ID = "tg_ask_sonya_coffee_comment"
 DIRECT_TEMPERATURE_DIALOG_ID = "sonya_direct_coffee_temperature"
 DIRECT_SYRUP_DIALOG_ID = "sonya_direct_coffee_syrup"
+DIRECT_COMMENT_DIALOG_ID = "sonya_direct_coffee_comment"
 
 TG_AWAITING_TEMPERATURE = "input_boolean.tg_awaiting_sonya_coffee_temperature"
 TG_AWAITING_SYRUP = "input_boolean.tg_awaiting_sonya_coffee_syrup"
+TG_AWAITING_COMMENT = "input_boolean.tg_awaiting_sonya_coffee_comment"
 DIRECT_AWAITING_TEMPERATURE = "input_boolean.sonya_direct_awaiting_coffee_temperature"
 DIRECT_AWAITING_SYRUP = "input_boolean.sonya_direct_awaiting_coffee_syrup"
+DIRECT_AWAITING_COMMENT = "input_boolean.sonya_direct_awaiting_coffee_comment"
 HALL_AWAITING_TEMPERATURE = "input_boolean.hall_awaiting_sonya_coffee_temperature"
 HALL_AWAITING_SYRUP = "input_boolean.hall_awaiting_sonya_coffee_syrup"
+HALL_AWAITING_COMMENT = "input_boolean.hall_awaiting_sonya_coffee_comment"
 ALL_COFFEE_WAIT_FLAGS = (
     TG_AWAITING_TEMPERATURE,
     TG_AWAITING_SYRUP,
+    TG_AWAITING_COMMENT,
     DIRECT_AWAITING_TEMPERATURE,
     DIRECT_AWAITING_SYRUP,
+    DIRECT_AWAITING_COMMENT,
     HALL_AWAITING_TEMPERATURE,
     HALL_AWAITING_SYRUP,
+    HALL_AWAITING_COMMENT,
 )
 
 
@@ -52,12 +61,14 @@ class SonyaAnswer:
     dialog: str | None = None
     source: str | None = None
     request_id: str | None = None
+    comment: str | None = None
 
 
 @dataclass
 class CoffeeDraft:
     temperature: str | None = None
     syrup: str | None = None
+    comment: str = NO_COMMENT
 
     def order_text(self) -> str:
         temperature = self.temperature or "кофе"
@@ -72,6 +83,7 @@ class CoffeeMessageContext:
     coffee_type: str
     temperature: str | None = None
     syrup: str | None = None
+    comment: str = NO_COMMENT
     is_reminder: bool = False
     source: str = "voice"
     speak_to_bedroom_on_confirm: bool = True
@@ -182,10 +194,30 @@ class CoffeeWorkflow:
         draft = self._direct_draft if direct else self._tg_draft
         draft.syrup = normalize_syrup(answer.answer)
         flow_type = "direct" if direct else "telegram"
-        context = context_from_draft(draft, source=flow_type, bedroom_ack_enabled=True)
-        self._latest_context = context
         LOGGER.info("Sonya syrup received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
         self._log_step(flow_type, "syrup", draft.syrup or answer.answer, "received answer")
+
+        if direct:
+            self._set_active_message(self._settings.telegram_admin_chat_id, None)
+
+        await self._ask_comment(direct=direct)
+        if not direct:
+            await self._edit_active_or_send(
+                order_progress_text(draft.temperature, draft.syrup),
+                delete_only(),
+            )
+
+    async def handle_comment_answer(self, answer: SonyaAnswer, *, direct: bool) -> None:
+        if self._is_duplicate_event("comment", answer):
+            return
+
+        draft = self._direct_draft if direct else self._tg_draft
+        draft.comment = normalize_order_comment(answer.answer)
+        flow_type = "direct" if direct else "telegram"
+        context = context_from_draft(draft, source=flow_type, bedroom_ack_enabled=True)
+        self._latest_context = context
+        LOGGER.info("Sonya coffee comment received: dialog=%s direct=%s answer=%r", answer.dialog, direct, answer.answer)
+        self._log_step(flow_type, "comment", draft.comment, "received answer")
 
         if direct:
             self._set_active_message(self._settings.telegram_admin_chat_id, None)
@@ -202,7 +234,7 @@ class CoffeeWorkflow:
         if self._is_duplicate_event("auto_enabled", answer):
             return
 
-        context = context_from_text(answer.answer)
+        context = context_from_text(answer.answer, comment=normalize_order_comment(answer.comment or ""))
         self._latest_context = context
         self._log_step(
             "hall",
@@ -239,7 +271,7 @@ class CoffeeWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            coffee_messages.coffee_started(context.coffee_type),
+            coffee_messages.coffee_started(context.coffee_type, context.comment),
             delete_only(),
         )
         await self._show_menu_for_chat(chat_id)
@@ -252,13 +284,13 @@ class CoffeeWorkflow:
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
-            coffee_messages.coffee_declined(context.coffee_type),
+            coffee_messages.coffee_declined(context.coffee_type, context.comment),
             delete_only(),
         )
         await self._show_menu_for_chat(chat_id)
         return edited_id
 
-    async def schedule_reminder(self, chat_id: int, minutes: int, message_id: int | None = None) -> None:
+    async def schedule_reminder(self, chat_id: int, minutes: int, message_id: int | None = None) -> CoffeeMessageContext:
         context = self._context_for_message(message_id)
         await self._clear_all_wait_flags()
         reminder = Reminder(
@@ -268,12 +300,14 @@ class CoffeeWorkflow:
             coffee_type=context.coffee_type,
             coffee_temperature=context.temperature,
             coffee_syrup=context.syrup,
+            comment=context.comment,
         )
         reminder_id = await self._storage.add_reminder(reminder)
         task = asyncio.create_task(self._remind_later(reminder_id, reminder))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         await self._show_menu_for_chat(chat_id)
+        return context
 
     async def set_sonya_order_temperature(self, user_id: int, temperature: str) -> CoffeeDraft:
         draft = self._sonya_orders.setdefault(user_id, CoffeeDraft())
@@ -327,6 +361,17 @@ class CoffeeWorkflow:
             ),
         )
 
+    async def _ask_comment(self, *, direct: bool) -> None:
+        await self._set_only_wait_flag(DIRECT_AWAITING_COMMENT if direct else TG_AWAITING_COMMENT)
+        await self._ha.play_media(
+            self._settings.bedroom_player_entity,
+            "Есть пожелания?",
+            yandex_dialog_content_type(
+                self._settings,
+                DIRECT_COMMENT_DIALOG_ID if direct else TG_COMMENT_DIALOG_ID,
+            ),
+        )
+
     async def _remind_later(self, reminder_id: int, reminder: Reminder) -> None:
         try:
             await asyncio.sleep(reminder.minutes * 60)
@@ -334,6 +379,7 @@ class CoffeeWorkflow:
                 coffee_type=reminder.coffee_type or "кофе",
                 temperature=reminder.coffee_temperature,
                 syrup=reminder.coffee_syrup,
+                comment=reminder.comment or NO_COMMENT,
                 is_reminder=True,
                 source="reminder",
                 speak_to_bedroom_on_confirm=False,
@@ -498,6 +544,7 @@ def context_from_draft(
         coffee_type=normalize_coffee_answer(draft.order_text()),
         temperature=draft.temperature,
         syrup=draft.syrup,
+        comment=draft.comment,
         source=source,
         speak_to_bedroom_on_confirm=speak_to_bedroom_on_confirm,
         speak_to_bedroom_on_decline=speak_to_bedroom_on_decline,
@@ -505,13 +552,14 @@ def context_from_draft(
     )
 
 
-def context_from_text(answer: str) -> CoffeeMessageContext:
+def context_from_text(answer: str, *, comment: str = NO_COMMENT) -> CoffeeMessageContext:
     coffee_type = normalize_coffee_answer(answer)
     syrup = normalize_syrup(answer) if ("сироп" in answer.lower() or "без" in answer.lower()) else None
     return CoffeeMessageContext(
         coffee_type=coffee_type,
         temperature=normalize_temperature(answer),
         syrup=syrup,
+        comment=comment,
     )
 
 
@@ -520,15 +568,15 @@ def order_progress_text(temperature: str | None, syrup: str | None) -> str:
 
 
 def order_confirmation_text(context: CoffeeMessageContext) -> str:
-    return coffee_messages.coffee_order_confirmation(context.temperature or context.coffee_type, context.syrup or "не указано")
+    return coffee_messages.coffee_order_confirmation(context.temperature or context.coffee_type, context.syrup or "не указано", context.comment)
 
 
 def auto_enabled_text(context: CoffeeMessageContext) -> str:
-    return coffee_messages.coffee_auto_enabled(context.temperature or context.coffee_type, context.syrup or "не указано")
+    return coffee_messages.coffee_auto_enabled(context.temperature or context.coffee_type, context.syrup or "не указано", context.comment)
 
 
 def reminder_text(context: CoffeeMessageContext) -> str:
-    return coffee_messages.coffee_reminder(context.temperature or context.coffee_type, context.syrup or "не указано")
+    return coffee_messages.coffee_reminder(context.temperature or context.coffee_type, context.syrup or "не указано", context.comment)
 
 
 def minute_word(minutes: int) -> str:

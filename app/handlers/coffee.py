@@ -11,7 +11,6 @@ from app.config import Settings
 from app.keyboards.coffee import coffee_settings, coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.messages import coffee as coffee_messages
-from app.messages.common import reminder_scheduled_text
 from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
@@ -257,9 +256,18 @@ async def coffee_later(
         return
 
     minutes = int((callback.data or "").split(":", 1)[1])
-    await coffee_workflow.schedule_reminder(callback.message.chat.id, minutes, callback.message.message_id)  # type: ignore[union-attr]
+    context = await coffee_workflow.schedule_reminder(callback.message.chat.id, minutes, callback.message.message_id)  # type: ignore[union-attr]
     if callback.message:
-        await callback.message.edit_text(reminder_scheduled_text(minutes, minute_word(minutes)), reply_markup=delete_only())
+        await callback.message.edit_text(
+            coffee_messages.coffee_scheduled(
+                context.temperature or context.coffee_type,
+                context.syrup or "не указано",
+                context.comment,
+                minutes,
+                minute_word(minutes),
+            ),
+            reply_markup=delete_only(),
+        )
     await callback.answer("Я напомню позже")
 
 

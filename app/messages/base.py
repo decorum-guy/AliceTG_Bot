@@ -24,6 +24,7 @@ class EmojiProvider:
             "notification": "🔔",
             "coffee": "☕",
             "tea": "🫖",
+            "water": "💧",
             "warning": "⚠️",
             "success": "✅",
             "error": "❌",

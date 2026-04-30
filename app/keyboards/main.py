@@ -50,6 +50,7 @@ def sonya_order_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text="☕️ Кофе", callback_data="sonya_order:coffee")],
             [inline_button(text="🍵 Чай", callback_data="sonya_order:tea")],
+            [inline_button(text="💧 Вода", callback_data="sonya_order:water")],
         ]
     )
 

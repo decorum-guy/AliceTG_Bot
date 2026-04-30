@@ -19,18 +19,27 @@ ADMIN_TALK_DIALOGS: dict[AdminRoom, str] = {
 SONYA_WAITING_FLAGS: tuple[str, ...] = (
     "input_boolean.tg_awaiting_sonya_coffee_temperature",
     "input_boolean.tg_awaiting_sonya_coffee_syrup",
+    "input_boolean.tg_awaiting_sonya_coffee_comment",
     "input_boolean.sonya_direct_awaiting_coffee_temperature",
     "input_boolean.sonya_direct_awaiting_coffee_syrup",
+    "input_boolean.sonya_direct_awaiting_coffee_comment",
     "input_boolean.hall_awaiting_sonya_coffee_temperature",
     "input_boolean.hall_awaiting_sonya_coffee_syrup",
+    "input_boolean.hall_awaiting_sonya_coffee_comment",
     "input_boolean.tg_awaiting_sonya_tea_wants",
     "input_boolean.tg_awaiting_sonya_tea_keep_warm",
     "input_boolean.tg_awaiting_sonya_tea_keep_warm_temperature",
+    "input_boolean.tg_awaiting_sonya_tea_comment",
     "input_boolean.sonya_direct_awaiting_tea_keep_warm",
     "input_boolean.sonya_direct_awaiting_tea_keep_warm_temperature",
+    "input_boolean.sonya_direct_awaiting_tea_comment",
     "input_boolean.hall_awaiting_sonya_tea_wants",
     "input_boolean.hall_awaiting_sonya_tea_keep_warm",
     "input_boolean.hall_awaiting_sonya_tea_keep_warm_temperature",
+    "input_boolean.hall_awaiting_sonya_tea_comment",
+    "input_boolean.tg_awaiting_sonya_water_wants",
+    "input_boolean.tg_awaiting_sonya_water_comment",
+    "input_boolean.sonya_direct_awaiting_water_comment",
 )
 
 

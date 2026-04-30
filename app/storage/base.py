@@ -12,6 +12,7 @@ class Reminder:
     coffee_type: str | None = None
     coffee_temperature: str | None = None
     coffee_syrup: str | None = None
+    comment: str | None = None
     tea_keep_warm_temperature: int | None = None
 
 

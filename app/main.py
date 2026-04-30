@@ -11,7 +11,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 
 from app.config import Settings
-from app.handlers import admin_modes, coffee, common, start, tea
+from app.handlers import admin_modes, coffee, common, start, tea, water
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient
@@ -21,6 +21,7 @@ from app.web.internal_routes import setup_internal_routes
 from app.web.telegram_webhook import setup_telegram_routes
 from app.workflows.coffee import CoffeeWorkflow
 from app.workflows.tea import TeaWorkflow
+from app.workflows.water import WaterWorkflow
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ async def create_app() -> web.Application:
     dispatcher.include_router(admin_modes.router)
     dispatcher.include_router(coffee.router)
     dispatcher.include_router(tea.router)
+    dispatcher.include_router(water.router)
     dispatcher.include_router(common.router)
 
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
@@ -57,6 +59,7 @@ async def create_app() -> web.Application:
     telegram_messages = TelegramMessages(bot)
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
+    water_workflow = WaterWorkflow(settings, ha, storage, telegram_messages)
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
@@ -66,6 +69,7 @@ async def create_app() -> web.Application:
     dispatcher["telegram_messages"] = telegram_messages
     dispatcher["coffee_workflow"] = coffee_workflow
     dispatcher["tea_workflow"] = tea_workflow
+    dispatcher["water_workflow"] = water_workflow
 
     app = web.Application()
     app["settings"] = settings
@@ -76,6 +80,7 @@ async def create_app() -> web.Application:
     app["admin_modes"] = admin_mode_manager
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow
+    app["water_workflow"] = water_workflow
 
     if settings.telegram_mode == "webhook":
         setup_telegram_routes(app, settings.webhook_path)

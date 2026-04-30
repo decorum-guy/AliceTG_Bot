@@ -17,44 +17,55 @@ def coffee_order_progress(temperature: str | None, syrup: str | None) -> str:
     )
 
 
-def coffee_order_confirmation(temperature: str, syrup: str) -> str:
+def coffee_order_confirmation(temperature: str, syrup: str, comment: str) -> str:
     return render_message(
         COFFEE_STYLE,
         body=["Соня попросила кофе."],
-        details=[("Тип", temperature, False), ("Сироп", syrup, False)],
+        details=[("Температура", temperature, False), ("Сироп", syrup, False), ("Комментарий", comment, False)],
         footer="Включить кофемашину?",
     )
 
 
-def coffee_auto_enabled(temperature: str, syrup: str) -> str:
+def coffee_auto_enabled(temperature: str, syrup: str, comment: str) -> str:
     return render_message(
         COFFEE_STYLE,
         body=["Соня заказала кофе."],
-        details=[("Тип", temperature, False), ("Сироп", syrup, False)],
+        details=[("Температура", temperature, False), ("Сироп", syrup, False), ("Комментарий", comment, False)],
         footer="Кофемашина уже включена.",
     )
 
 
-def coffee_reminder(temperature: str, syrup: str) -> str:
+def coffee_reminder(temperature: str, syrup: str, comment: str) -> str:
     return render_message(
         MessageStyle(MessageKind.REMINDER, "reminder", "Напоминание"),
         body=["Соня просила кофе."],
-        details=[("Тип", temperature, False), ("Сироп", syrup, False)],
+        details=[("Температура", temperature, False), ("Сироп", syrup, False), ("Комментарий", comment, False)],
         footer="Включить кофемашину?",
     )
 
 
-def coffee_started(coffee_type: str) -> str:
+def coffee_scheduled(temperature: str, syrup: str, comment: str, minutes: int, minute_label: str) -> str:
     return render_message(
-        MessageStyle(MessageKind.SUCCESS, "success", "Готово"),
-        body=["Я включила кофемашину.", f"Соня просила: {h(coffee_type)}."],
+        MessageStyle(MessageKind.REMINDER, "reminder", "Отложено"),
+        body=["Соня просила кофе."],
+        details=[("Температура", temperature, False), ("Сироп", syrup, False), ("Комментарий", comment, False)],
+        footer=f"Напомню через {h(minutes)} {h(minute_label)}.",
     )
 
 
-def coffee_declined(coffee_type: str) -> str:
+def coffee_started(coffee_type: str, comment: str) -> str:
+    return render_message(
+        MessageStyle(MessageKind.SUCCESS, "success", "Готово"),
+        body=["Я включила кофемашину.", f"Соня просила: {h(coffee_type)}."],
+        details=[("Комментарий", comment, False)],
+    )
+
+
+def coffee_declined(coffee_type: str, comment: str) -> str:
     return render_message(
         MessageStyle(MessageKind.NOTIFICATION, "notification", "Заказ кофе"),
         body=["Я не включаю кофемашину.", f"Соня просила: {h(coffee_type)}."],
+        details=[("Комментарий", comment, False)],
     )
 
 

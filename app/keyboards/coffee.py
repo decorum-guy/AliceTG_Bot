@@ -43,6 +43,7 @@ def sonya_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text="Хочет ли кофе?", callback_data="sonya:ask_coffee")],
             [inline_button(text="Хочет ли чай?", callback_data="sonya:ask_tea")],
+            [inline_button(text="Хочет ли воды?", callback_data="sonya:ask_water")],
             [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
         ]
     )
