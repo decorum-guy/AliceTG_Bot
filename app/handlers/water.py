@@ -8,6 +8,7 @@ from app.keyboards.coffee import delete_only
 from app.keyboards.main import sonya_order_menu
 from app.keyboards.water import water_later_options
 from app.messages import water as water_messages
+from app.messages.common import sonya_menu_text
 from app.services.home_assistant import HomeAssistantError
 from app.workflows.coffee import minute_word
 from app.workflows.water import WaterWorkflow
@@ -40,8 +41,10 @@ async def sonya_order_water(callback: CallbackQuery, settings: Settings, water_w
 
     await water_workflow.submit_sonya_order(callback.from_user.id)
     if callback.message:
-        await callback.message.edit_text(water_messages.sonya_water_sent(), reply_markup=sonya_order_menu())
-    await callback.answer("Готово, я передала сообщение")
+        await callback.message.edit_text(water_messages.sonya_water_sent(), reply_markup=delete_only())
+    await callback.answer("Передала заказ Артему", show_alert=True)
+    if callback.message:
+        await callback.message.answer(sonya_menu_text(), reply_markup=sonya_order_menu())
 
 
 @router.callback_query(F.data.in_({"water:now", "water:later"}))

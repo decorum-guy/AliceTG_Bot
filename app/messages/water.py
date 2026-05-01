@@ -45,4 +45,7 @@ def water_reminder(comment: str) -> str:
 
 
 def sonya_water_sent() -> str:
-    return render_message(MessageStyle(MessageKind.SONYA, "success", "Заказ передан"), body=["Передаю заказ Артёму."])
+    return render_message(
+        MessageStyle(MessageKind.SONYA, "success", "Заказ передан"),
+        body=["Заказ успешно оформлен и передан Артему."],
+    )
