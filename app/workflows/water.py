@@ -71,6 +71,7 @@ class WaterWorkflow:
         self._active_message_id: int | None = None
         self._latest_context: WaterContext | None = None
         self._context_by_message_id: dict[int, WaterContext] = {}
+        self._sonya_order_messages: dict[int, tuple[int, int | None]] = {}
         self._recent_event_keys: dict[str, float] = {}
         self._dedupe_ttl_seconds = 5.0
 
@@ -95,8 +96,14 @@ class WaterWorkflow:
         self._set_active_message(self._settings.telegram_admin_chat_id, None)
         await self._ask_comment(direct=True)
 
-    async def submit_sonya_order(self, user_id: int) -> None:
-        context = WaterContext(source="sonya_telegram_order")
+    async def start_sonya_order_comment(self, user_id: int, chat_id: int, message_id: int | None) -> None:
+        self._sonya_order_messages[user_id] = (chat_id, message_id)
+
+    def is_waiting_sonya_order_comment(self, user_id: int | None) -> bool:
+        return user_id is not None and user_id in self._sonya_order_messages
+
+    async def submit_sonya_order(self, user_id: int, comment: str = NO_COMMENT) -> WaterContext:
+        context = WaterContext(comment=normalize_order_comment(comment), source="sonya_telegram_order")
         self._latest_context = context
         message_id = await self._telegram_messages.safe_send(
             self._settings.telegram_admin_chat_id,
@@ -105,6 +112,14 @@ class WaterWorkflow:
         )
         if message_id is not None:
             self._context_by_message_id[message_id] = context
+        return context
+
+    async def complete_sonya_order_message(self, user_id: int) -> None:
+        chat_id, message_id = self._sonya_order_messages.pop(user_id, (self._settings.telegram_admin_chat_id, None))
+        await self._telegram_messages.safe_edit(chat_id, message_id, water_messages.sonya_water_sent(), delete_only())
+
+    async def cancel_sonya_order_comment(self, user_id: int) -> None:
+        self._sonya_order_messages.pop(user_id, None)
 
     async def handle_wants_answer(self, answer: WaterAnswer) -> None:
         if self._is_duplicate_event("wants", answer):

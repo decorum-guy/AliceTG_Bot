@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
@@ -229,11 +230,11 @@ async def stop_admin_mode(message: Message, settings: Settings, admin_modes: Adm
 async def admin_mode_message(message: Message, settings: Settings, admin_modes: AdminModeManager, ha: HomeAssistantClient) -> None:
     user_id = message.from_user.id if message.from_user else None
     if not settings.is_admin_user(user_id):
-        return
+        raise SkipHandler()
 
     session = admin_modes.get(user_id) if user_id is not None else None
     if session is None or not session.active or not session.entity_id:
-        return
+        raise SkipHandler()
 
     if not message.text:
         await message.answer("Отправь текст или /stop.")

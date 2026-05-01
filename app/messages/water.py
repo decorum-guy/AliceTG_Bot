@@ -44,8 +44,22 @@ def water_reminder(comment: str) -> str:
     )
 
 
+def sonya_water_comment_question() -> str:
+    return render_message(
+        MessageStyle(MessageKind.SONYA, "water", "Комментарий к заказу"),
+        body=[
+            "Напиши пожелания к воде одним сообщением.",
+            "Если пожеланий нет, нажми «Без комментария».",
+        ],
+    )
+
+
 def sonya_water_sent() -> str:
     return render_message(
         MessageStyle(MessageKind.SONYA, "success", "Заказ передан"),
-        body=["Заказ успешно оформлен и передан Артему."],
+        body=["Заказ успешно оформлен и передан Артёму."],
     )
+
+
+def sonya_water_cancelled() -> str:
+    return render_message(MessageStyle(MessageKind.SONYA, "error", "Заказ отменен"), body=["Заказ воды отменен."])
