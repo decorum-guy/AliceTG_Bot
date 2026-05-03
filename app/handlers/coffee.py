@@ -5,13 +5,15 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
 
 from app.config import Settings
 from app.keyboards.coffee import coffee_settings, coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
+from app.services.coffee_machine import turn_off_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.workflows.coffee import CoffeeWorkflow
@@ -119,9 +121,9 @@ async def toggle_coffee(
     turn_on = callback.data == "coffee:turn_on"
     try:
         if turn_on:
-            await ha.switch_turn_on(settings.coffee_switch_entity)
+            await turn_on_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_on")
         else:
-            await ha.switch_turn_off(settings.coffee_switch_entity)
+            await turn_off_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_off")
     except HomeAssistantError:
         LOGGER.exception("Cannot toggle coffee machine")
         await callback.answer("Не получилось связаться с Home Assistant", show_alert=True)
@@ -148,6 +150,36 @@ async def toggle_coffee(
     await callback.answer("Готово")
 
 
+@router.message(Command("coffee_on"))
+async def coffee_on_command(message: Message, settings: Settings, ha: HomeAssistantClient) -> None:
+    if not settings.is_admin_user(message.from_user.id if message.from_user else None):
+        await message.answer("Нет доступа")
+        return
+
+    try:
+        await turn_on_coffee_machine(ha, settings, source="telegram_command:/coffee_on")
+    except HomeAssistantError:
+        LOGGER.exception("Cannot turn on coffee machine from Telegram command")
+        await message.answer("Не получилось включить кофемашину.")
+        return
+    await message.answer("☕ Кофемашина включена.")
+
+
+@router.message(Command("coffee_off"))
+async def coffee_off_command(message: Message, settings: Settings, ha: HomeAssistantClient) -> None:
+    if not settings.is_admin_user(message.from_user.id if message.from_user else None):
+        await message.answer("Нет доступа")
+        return
+
+    try:
+        await turn_off_coffee_machine(ha, settings, source="telegram_command:/coffee_off")
+    except HomeAssistantError:
+        LOGGER.exception("Cannot turn off coffee machine from Telegram command")
+        await message.answer("Не получилось выключить кофемашину.")
+        return
+    await message.answer("☕ Кофемашина выключена.")
+
+
 @router.callback_query(F.data == "coffee_alert:turn_off")
 async def turn_off_from_coffee_alert(
     callback: CallbackQuery,
@@ -160,7 +192,7 @@ async def turn_off_from_coffee_alert(
         return
 
     try:
-        await ha.switch_turn_off(settings.coffee_switch_entity)
+        await turn_off_coffee_machine(ha, settings, source="telegram_callback:coffee_alert:turn_off")
     except HomeAssistantError:
         LOGGER.exception("Cannot turn off coffee machine from alert")
         await callback.answer("Не получилось выключить кофемашину", show_alert=True)

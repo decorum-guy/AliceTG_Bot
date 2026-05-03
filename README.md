@@ -85,6 +85,88 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - The alert settings are stored in `APP_STATE_PATH` and survive bot container restarts.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
 
+### Siri And Telegram Coffee Control
+
+- Telegram admin commands:
+  - `/coffee_on` turns on `switch.kofemashina`.
+  - `/coffee_off` turns off `switch.kofemashina`.
+- Both commands are admin-only and use the same internal coffee action as the HTTP shortcut endpoint.
+- iPhone Shortcuts can call `POST /shortcut/espresso` on the bot HTTP server.
+- The shortcut endpoint requires `Authorization: Bearer <SHORTCUTS_SECRET_TOKEN>`.
+- If `SHORTCUTS_SECRET_TOKEN` is empty, the endpoint returns `503` and does not perform any action.
+- The endpoint accepts JSON body only:
+
+```json
+{"action": "turn_on"}
+```
+
+or:
+
+```json
+{"action": "turn_off"}
+```
+
+Example `curl`:
+
+```bash
+curl -X POST "https://your-bot-domain.example/shortcut/espresso" \
+  -H "Authorization: Bearer $SHORTCUTS_SECRET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"turn_on"}'
+```
+
+Successful response:
+
+```json
+{
+  "ok": true,
+  "action": "turn_on",
+  "message": "Кофемашина включена"
+}
+```
+
+Successful `turn_off` response:
+
+```json
+{
+  "ok": true,
+  "action": "turn_off",
+  "message": "Кофемашина выключена"
+}
+```
+
+Shortcut-safe error responses:
+
+```json
+{"ok": false, "error": "unauthorized", "message": "Команда отклонена: неверный токен"}
+{"ok": false, "error": "invalid_action", "message": "Неизвестная команда"}
+{"ok": false, "error": "home_assistant_error", "message": "Не удалось выполнить команду для кофемашины"}
+```
+
+iPhone Shortcut setup:
+
+1. Create a shortcut named `I want coffee` or `turn on espresso machine`.
+2. Add `Get Contents of URL`.
+3. URL: `https://<domain-or-ip>/shortcut/espresso`.
+4. Method: `POST`.
+5. Headers:
+   `Authorization: Bearer <SHORTCUTS_SECRET_TOKEN>`
+   `Content-Type: application/json`
+6. Request body:
+
+```json
+{"action": "turn_on"}
+```
+
+7. Add `Get Dictionary Value` with key `message`.
+8. Add `Show Notification` or `Speak Text`.
+
+For a second shortcut named `turn off espresso machine`, use the same setup with this body:
+
+```json
+{"action": "turn_off"}
+```
+
 ### Tea And Kettle Workflow
 
 - Telegram ask-Sonya tea flow asks whether Sonya wants tea, then asks about keep-warm.
@@ -208,6 +290,9 @@ YANDEX_DIALOG_SKILL_NAME=домашний помощник
 
 # Internal webhook security between Home Assistant and bot
 INTERNAL_WEBHOOK_SECRET=
+
+# iPhone Shortcuts / Siri HTTP endpoint security
+SHORTCUTS_SECRET_TOKEN=change_me
 ```
 
 `TELEGRAM_ALLOWED_USER_IDS` accepts comma-separated IDs, for example:

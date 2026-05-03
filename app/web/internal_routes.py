@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from datetime import datetime, timezone
 
@@ -10,7 +11,8 @@ from app.keyboards.coffee import coffee_turn_off_only
 from app.messages import coffee as coffee_messages
 from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager
 from app.services.app_state import AppStateStore
-from app.services.home_assistant import HomeAssistantClient
+from app.services.coffee_machine import set_coffee_machine
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.tea import TeaAnswer, TeaWorkflow
 from app.workflows.water import WaterAnswer, WaterWorkflow
@@ -26,6 +28,31 @@ def _check_internal_secret(request: web.Request) -> None:
     settings: Settings = request.app["settings"]
     if request.headers.get("X-Internal-Secret") != settings.internal_webhook_secret:
         raise web.HTTPUnauthorized(text="Invalid internal secret")
+
+
+def _shortcuts_json_error(error: str, message: str, *, status: int) -> web.Response:
+    return web.json_response({"ok": False, "error": error, "message": message}, status=status)
+
+
+def _check_shortcuts_auth(request: web.Request) -> web.Response | None:
+    settings: Settings = request.app["settings"]
+    LOGGER.info("Shortcut espresso authorization check started")
+    if not settings.shortcuts_secret_token:
+        LOGGER.warning("Shortcut espresso endpoint is disabled: SHORTCUTS_SECRET_TOKEN is not configured")
+        return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=503)
+
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        LOGGER.warning("Shortcut espresso authorization failed: missing or malformed Authorization header")
+        return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=401)
+
+    provided_token = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(provided_token, settings.shortcuts_secret_token):
+        LOGGER.warning("Shortcut espresso authorization failed: invalid bearer token")
+        return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=403)
+
+    LOGGER.info("Shortcut espresso authorization succeeded")
+    return None
 
 
 async def _parse_sonya_answer(request: web.Request) -> SonyaAnswer:
@@ -394,8 +421,48 @@ async def water_direct_request(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def shortcut_espresso(request: web.Request) -> web.Response:
+    LOGGER.info("Shortcut espresso request received")
+    auth_error = _check_shortcuts_auth(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        payload = await request.json()
+    except Exception:
+        LOGGER.warning("Shortcut espresso request rejected: invalid JSON body")
+        return _shortcuts_json_error("invalid_action", "Неизвестная команда", status=400)
+
+    action = str(payload.get("action", "")).strip()
+    LOGGER.info("Shortcut espresso action requested: action=%s", action)
+    if action not in {"turn_on", "turn_off"}:
+        LOGGER.warning("Shortcut espresso request rejected: unsupported action=%s", action)
+        return _shortcuts_json_error("invalid_action", "Неизвестная команда", status=400)
+
+    settings: Settings = request.app["settings"]
+    ha: HomeAssistantClient = request.app["ha"]
+    try:
+        await set_coffee_machine(ha, settings, action, source="shortcut:/shortcut/espresso")  # type: ignore[arg-type]
+    except HomeAssistantError:
+        LOGGER.exception("Shortcut espresso coffee action failed: action=%s", action)
+        return _shortcuts_json_error(
+            "home_assistant_error",
+            "Не удалось выполнить команду для кофемашины",
+            status=502,
+        )
+
+    return web.json_response(
+        {
+            "ok": True,
+            "action": action,
+            "message": "Кофемашина включена" if action == "turn_on" else "Кофемашина выключена",
+        }
+    )
+
+
 def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health", health)
+    app.router.add_post("/shortcut/espresso", shortcut_espresso)
     app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)
     app.router.add_post("/internal/coffee/sonya-type-answer", sonya_type_answer)
     app.router.add_post("/internal/coffee/sonya-direct-type-answer", sonya_direct_type_answer)

@@ -236,6 +236,11 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
     if session is None or not session.active or not session.entity_id:
         raise SkipHandler()
 
+    if message.text:
+        command = message.text.strip().split(maxsplit=1)[0].split("@", 1)[0].lower()
+        if command in {"/coffee_on", "/coffee_off"}:
+            raise SkipHandler()
+
     if not message.text:
         await message.answer("Отправь текст или /stop.")
         return

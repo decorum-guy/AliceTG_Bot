@@ -13,6 +13,7 @@ from app.keyboards.coffee import confirmation, delete_only
 from app.keyboards.main import main_menu, sonya_order_menu
 from app.messages import coffee as coffee_messages
 from app.messages.common import admin_menu_text, sonya_menu_text
+from app.services.coffee_machine import turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 from app.services.yandex_dialogs import yandex_dialog_content_type
@@ -303,7 +304,7 @@ class CoffeeWorkflow:
             context.coffee_type,
             context.comment != NO_COMMENT,
         )
-        await self._ha.switch_turn_on(self._settings.coffee_switch_entity)
+        await turn_on_coffee_machine(self._ha, self._settings, source="telegram_confirm_yes")
         edited_id = await self._telegram_messages.safe_edit(
             chat_id,
             message_id,
