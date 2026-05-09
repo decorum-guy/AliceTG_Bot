@@ -54,6 +54,7 @@ class Settings:
     ha_long_lived_token: str
     internal_webhook_secret: str
     shortcuts_secret_token: str
+    reminders_state_path: str = "/app/data/reminders.json"
     app_state_path: str = "/app/data/state.json"
     webhook_path: str = "/webhook"
     listen_host: str = "0.0.0.0"
@@ -94,6 +95,8 @@ class Settings:
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
             shortcuts_secret_token=os.getenv("SHORTCUTS_SECRET_TOKEN", "").strip(),
+            reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()
+            or "/app/data/reminders.json",
             app_state_path=os.getenv("APP_STATE_PATH", "/app/data/state.json").strip() or "/app/data/state.json",
             yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
             or "домашний помощник",

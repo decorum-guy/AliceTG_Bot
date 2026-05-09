@@ -167,6 +167,53 @@ For a second shortcut named `turn off espresso machine`, use the same setup with
 {"action": "turn_off"}
 ```
 
+### Reminders
+
+- Main admin menu has `Напоминания`.
+- `Создать напоминание` waits for text. You can write the reminder and delay in one message:
+  `напомни убрать посуду через 10 минут`.
+- If the message has no delay, the bot asks `Через сколько напомнить?`; answer with `через 10 минут`
+  or `через 2 часа`.
+- `Управление напоминаниями` lists pending reminders and provides a delete button for each one.
+- Fired reminders are sent only to `TELEGRAM_ADMIN_CHAT_ID` and are not voiced on Yandex Stations.
+- Reminder storage is persistent JSON at `REMINDERS_STATE_PATH`. Pending reminders are restored after
+  bot restart; overdue reminders are sent after startup.
+- Supported relative delays: `через X минут/минуту/минуты`, `через X часов/час/часа`,
+  `через час`, `через полчаса`, `через пол часа`.
+- Delay limits: minimum 1 minute, maximum 24 hours.
+- Home Assistant/Alice can create reminders through internal endpoint:
+  `POST http://telegram-bot:8088/internal/reminders/alice-create`.
+- The current `yandex_intent` event data does not include the source station. Voice replies for
+  reminders therefore use persistent bot settings instead of source auto-detection.
+- Default reminder voice settings: enabled, station `media_player.stantsiia_mini_zal`.
+- You can change reminder voice settings in Telegram: `Напоминания` -> `Настройки`.
+- Available reminder voice stations:
+  `Зал = media_player.stantsiia_mini_zal`,
+  `Спальня = media_player.stantsiia_mini_spalnia`.
+- Turn voice off in `Напоминания` -> `Настройки` if Alice should not speak reminder confirmations.
+
+Example internal request:
+
+```bash
+curl -X POST "http://telegram-bot:8088/internal/reminders/alice-create" \
+  -H "X-Internal-Secret: $INTERNAL_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"напомнить, что надо убрать посуду через 10 минут","dialog":"alice_reminder_create","intent":""}'
+```
+
+Successful internal response:
+
+```json
+{
+  "ok": true,
+  "message": "Поняла, отправлю напоминание через 10 минут",
+  "reminder_id": "abc123",
+  "delay_text": "10 минут",
+  "voice_enabled": true,
+  "voice_station_entity_id": "media_player.stantsiia_mini_zal"
+}
+```
+
 ### Tea And Kettle Workflow
 
 - Telegram ask-Sonya tea flow asks whether Sonya wants tea, then asks about keep-warm.
@@ -279,6 +326,7 @@ TELEGRAM_POLLING_TIMEOUT=30
 TELEGRAM_POLLING_MAX_ERRORS=10
 TELEGRAM_ENABLE_TEST_1_MIN_REMINDER=false
 APP_STATE_PATH=/app/data/state.json
+REMINDERS_STATE_PATH=/app/data/reminders.json
 
 # HTTP proxy for Telegram API requests only.
 TELEGRAM_PROXY=login:pass@host:port
@@ -310,6 +358,9 @@ TELEGRAM_SONYA_USER_IDS=222222222
 `APP_STATE_PATH` stores persistent bot UI settings. Currently it stores the separate coffee alert
 toggles from `Умные устройства` -> `Кофемашина` -> `Настройки`: 13-minute readiness and 1-hour
 overheat warnings. Mount `/app/data` as a Docker volume if the container is recreated, not only restarted.
+
+`REMINDERS_STATE_PATH` stores persistent user reminders. Pending reminders are restored after a
+telegram-bot container restart; overdue reminders are sent after startup.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
 values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is
@@ -382,11 +433,11 @@ The bot does not publish a host port. Caddy reaches it inside Docker network.
 
 ## Caddy
 
-Caddy should route `/tg/*` to the bot and everything else to Home Assistant:
+Caddy should expose only the public shortcut endpoint from the bot and route everything else to Home Assistant:
 
 ```caddyfile
 ha.myhomeassistantisverybest.art {
-	handle_path /tg/* {
+	handle /shortcut/espresso {
 		reverse_proxy telegram-bot:8088
 	}
 
@@ -396,7 +447,8 @@ ha.myhomeassistantisverybest.art {
 }
 ```
 
-`handle_path` strips `/tg`, so Telegram webhook URL `/tg/webhook` reaches the bot as `/webhook`.
+Do not proxy `/internal/*` or all bot paths to the public internet. Home Assistant should keep using
+the internal Docker URL `http://telegram-bot:8088/internal/...`.
 
 ## Set Telegram Webhook
 
@@ -742,6 +794,16 @@ rest_command:
       Content-Type: "application/json"
       X-Internal-Secret: !secret internal_webhook_secret
     payload: "{}"
+
+  tg_alice_reminder_create:
+    url: "http://telegram-bot:8088/internal/reminders/alice-create"
+    method: POST
+    content_type: "application/json"
+    headers:
+      Content-Type: "application/json"
+      X-Internal-Secret: !secret internal_webhook_secret
+    payload: >-
+      {"text": {{ text | to_json }}, "intent": {{ intent | to_json }}, "dialog": {{ dialog | to_json }}}
 ```
 
 ## Home Assistant automations.yaml
@@ -1659,6 +1721,58 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
           - input_boolean.tg_awaiting_sonya_water_comment
           - input_boolean.sonya_direct_awaiting_water_comment
     - action: rest_command.tg_sonya_direct_water_request
+
+- id: tg_alice_reminder_create
+  alias: "Telegram bot - создать напоминание через Алису"
+  mode: queued
+  trigger:
+    - platform: event
+      event_type: yandex_intent
+  condition:
+    - condition: template
+      value_template: >-
+        {% set text = trigger.event.data.text | default('') | lower %}
+        {% set session = trigger.event.data.session | default({}) %}
+        {% set dialog = session.dialog | default('') %}
+        {% set yandex_dialog_skill_name = 'домашний помощник' %}
+        {% set is_service_phrase = 'скажи навыку' in text or 'попроси ' ~ yandex_dialog_skill_name in text or yandex_dialog_skill_name in text %}
+        {{ is_service_phrase and 'напом' in text and 'через' in text and dialog not in [
+             'tg_ask_sonya_wants_coffee',
+             'tg_ask_sonya_coffee_temperature',
+             'tg_ask_sonya_coffee_syrup',
+             'tg_ask_sonya_coffee_comment',
+             'tg_ask_sonya_wants_tea',
+             'tg_ask_sonya_tea_keep_warm',
+             'tg_ask_sonya_tea_comment',
+             'tg_ask_sonya_wants_water',
+             'tg_ask_sonya_water_comment'
+           ] }}
+  action:
+    - variables:
+        text: "{{ trigger.event.data.text | default('') }}"
+        intent: "{{ trigger.event.data.intent | default('') }}"
+        session: "{{ trigger.event.data.session | default({}) }}"
+        dialog: "{{ session.dialog | default('alice_reminder_create') }}"
+    - action: rest_command.tg_alice_reminder_create
+      response_variable: reminder_response
+      data:
+        text: "{{ text }}"
+        intent: "{{ intent }}"
+        dialog: "{{ dialog }}"
+    - variables:
+        reminder_voice_enabled: "{{ reminder_response.content.voice_enabled | default(true) }}"
+        reminder_voice_station_entity: "{{ reminder_response.content.voice_station_entity_id | default('media_player.stantsiia_mini_zal') }}"
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ reminder_voice_enabled | bool }}"
+          sequence:
+            - action: media_player.play_media
+              target:
+                entity_id: "{{ reminder_voice_station_entity }}"
+              data:
+                media_content_id: "{{ reminder_response.content.message | default('Не поняла, через сколько напомнить') }}"
+                media_content_type: "text"
 ```
 
 ## Tea And Kettle Reference

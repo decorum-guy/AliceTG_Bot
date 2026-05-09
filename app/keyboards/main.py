@@ -8,6 +8,7 @@ def main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text="🏠 Умные устройства", callback_data="devices:menu")],
             [inline_button(text="🗣 Спросить Соню", callback_data="sonya:menu")],
+            [inline_button(text="⏰ Напоминания", callback_data="reminders:menu")],
             [
                 inline_button(text="🔊 Озвучить", callback_data="admin_mode:start:announce"),
                 inline_button(text="💬 Разговор", callback_data="admin_mode:start:talk"),

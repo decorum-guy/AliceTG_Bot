@@ -14,6 +14,7 @@ from app.services.app_state import AppStateStore
 from app.services.coffee_machine import set_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
+from app.workflows.reminders import ReminderWorkflow
 from app.workflows.tea import TeaAnswer, TeaWorkflow
 from app.workflows.water import WaterAnswer, WaterWorkflow
 
@@ -421,6 +422,48 @@ async def water_direct_request(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def alice_reminder_create(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    payload = await request.json()
+    text = str(payload.get("text") or payload.get("answer") or "")
+    LOGGER.info(
+        "Internal reminder create request received: source=alice dialog=%s intent=%s text_len=%s",
+        payload.get("dialog"),
+        payload.get("intent"),
+        len(text),
+    )
+    workflow: ReminderWorkflow = request.app["reminder_workflow"]
+    result = await workflow.create_from_text(text, source="alice")
+    if result is None:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": "parse_error",
+                "message": "Не поняла, через сколько напомнить",
+            },
+            status=400,
+        )
+    reminder, parsed = result
+    reminder_settings = await workflow.get_settings()
+    if reminder_settings.voice_enabled:
+        LOGGER.info(
+            "Reminder voice announcement will be sent by Home Assistant: voice_enabled=true voice_station_entity_id=%s",
+            reminder_settings.voice_station_entity_id,
+        )
+    else:
+        LOGGER.info("Reminder voice announcement skipped because voice_enabled=false")
+    return web.json_response(
+        {
+            "ok": True,
+            "message": f"Поняла, отправлю напоминание через {parsed.human_delay_text}",
+            "reminder_id": reminder.id,
+            "delay_text": parsed.human_delay_text,
+            "voice_enabled": reminder_settings.voice_enabled,
+            "voice_station_entity_id": reminder_settings.voice_station_entity_id,
+        }
+    )
+
+
 async def shortcut_espresso(request: web.Request) -> web.Response:
     LOGGER.info("Shortcut espresso request received")
     auth_error = _check_shortcuts_auth(request)
@@ -484,6 +527,7 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/water/sonya-wants-answer", water_wants_answer)
     app.router.add_post("/internal/water/sonya-comment-answer", water_comment_answer)
     app.router.add_post("/internal/water/sonya-direct-request", water_direct_request)
+    app.router.add_post("/internal/reminders/alice-create", alice_reminder_create)
 
 
 def _coffee_runtime_text(switch_state: dict) -> str:
