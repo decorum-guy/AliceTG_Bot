@@ -187,6 +187,9 @@ For a second shortcut named `turn off espresso machine`, use the same setup with
   `POST http://telegram-bot:8088/internal/reminders/alice-create`.
 - The current `yandex_intent` event data does not include the source station. Voice replies for
   reminders therefore use persistent bot settings instead of source auto-detection.
+- Home Assistant `yandex_intent` text already contains the cleaned command without invocation phrases
+  like `скажи навыку` or `попроси домашнего помощника`, so the reminder automation matches the actual
+  reminder text: `напом...` plus `через...`.
 - Default reminder voice settings: enabled, station `media_player.stantsiia_mini_zal`.
 - You can change reminder voice settings in Telegram: `Напоминания` -> `Настройки`.
 - Available reminder voice stations:
@@ -1714,9 +1717,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         {% set text = trigger.event.data.text | default('') | lower %}
         {% set session = trigger.event.data.session | default({}) %}
         {% set dialog = session.dialog | default('') %}
-        {% set yandex_dialog_skill_name = 'домашний помощник' %}
-        {% set is_service_phrase = 'скажи навыку' in text or 'попроси ' ~ yandex_dialog_skill_name in text or yandex_dialog_skill_name in text %}
-        {{ is_service_phrase and 'напом' in text and 'через' in text and dialog not in [
+        {{ 'напом' in text and 'через' in text and dialog not in [
              'tg_ask_sonya_wants_coffee',
              'tg_ask_sonya_coffee_temperature',
              'tg_ask_sonya_coffee_syrup',
