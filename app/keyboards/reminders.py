@@ -9,7 +9,7 @@ from app.services.reminder_store import ReminderRecord, ReminderSettings
 def reminders_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [inline_button(text="Управление напоминаниями", callback_data="reminders:list", style=BUTTON_PRIMARY)],
+            [inline_button(text="Управление напоминаниями", callback_data="reminders:list")],
             [inline_button(text="Создать напоминание", callback_data="reminders:create", style=BUTTON_SUCCESS)],
             [inline_button(text="⚙️ Настройки", callback_data="reminders:settings", style=BUTTON_PRIMARY)],
             [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
@@ -36,13 +36,11 @@ def reminders_list_menu(reminders: list[ReminderRecord]) -> InlineKeyboardMarkup
 
 def reminders_settings_menu(settings: ReminderSettings) -> InlineKeyboardMarkup:
     toggle_text = "Выключить озвучивание" if settings.voice_enabled else "Включить озвучивание"
+    station_text = "Колонка: Зал" if settings.voice_station_entity_id == "media_player.stantsiia_mini_zal" else "Колонка: Спальня"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [inline_button(text=toggle_text, callback_data="reminders:voice:toggle", style=BUTTON_PRIMARY)],
-            [
-                inline_button(text="Колонка: Зал", callback_data="reminders:voice_station:zal", style=BUTTON_PRIMARY),
-                inline_button(text="Колонка: Спальня", callback_data="reminders:voice_station:spalnia", style=BUTTON_PRIMARY),
-            ],
+            [inline_button(text=toggle_text, callback_data="reminders:voice:toggle")],
+            [inline_button(text=station_text, callback_data="reminders:voice_station:toggle")],
             [inline_button(text="⬅️ Назад", callback_data="reminders:menu", style=BUTTON_PRIMARY)],
         ]
     )

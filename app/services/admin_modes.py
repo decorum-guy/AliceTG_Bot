@@ -49,6 +49,7 @@ class AdminModeSession:
     selected_volume: float | None = None
     previous_volume: float | None = None
     pending_dialog: str | None = None
+    pending_stop_after_answer: bool = False
     active: bool = False
 
 
@@ -87,6 +88,11 @@ class AdminModeManager:
         session = self.get(user_id)
         if session is not None:
             session.pending_dialog = dialog
+
+    def set_pending_stop_after_answer(self, user_id: int, enabled: bool) -> None:
+        session = self.get(user_id)
+        if session is not None:
+            session.pending_stop_after_answer = enabled
 
     def find_by_pending_dialog(self, dialog: str) -> tuple[int, AdminModeSession] | None:
         for user_id, session in self._sessions.items():

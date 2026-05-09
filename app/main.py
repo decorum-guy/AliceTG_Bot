@@ -14,6 +14,7 @@ from app.config import Settings
 from app.handlers import admin_modes, coffee, common, reminders, start, tea, water
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
+from app.services.coffee_alerts import CoffeeAlertScheduler
 from app.services.home_assistant import HomeAssistantClient
 from app.services.reminder_store import ReminderStore
 from app.services.telegram_messages import TelegramMessages
@@ -65,6 +66,7 @@ async def create_app() -> web.Application:
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
     water_workflow = WaterWorkflow(settings, ha, storage, telegram_messages)
     reminder_workflow = ReminderWorkflow(reminder_store, telegram_messages, settings.telegram_admin_chat_id)
+    coffee_alert_scheduler = CoffeeAlertScheduler(settings, app_state, telegram_messages)
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
@@ -76,6 +78,7 @@ async def create_app() -> web.Application:
     dispatcher["tea_workflow"] = tea_workflow
     dispatcher["water_workflow"] = water_workflow
     dispatcher["reminder_workflow"] = reminder_workflow
+    dispatcher["coffee_alert_scheduler"] = coffee_alert_scheduler
 
     app = web.Application()
     app["settings"] = settings
@@ -88,11 +91,13 @@ async def create_app() -> web.Application:
     app["tea_workflow"] = tea_workflow
     app["water_workflow"] = water_workflow
     app["reminder_workflow"] = reminder_workflow
+    app["coffee_alert_scheduler"] = coffee_alert_scheduler
 
     if settings.telegram_mode == "webhook":
         setup_telegram_routes(app, settings.webhook_path)
     setup_internal_routes(app)
     await reminder_workflow.restore_pending()
+    await coffee_alert_scheduler.restore()
 
     async def close_resources(_: web.Application) -> None:
         await ha.close()

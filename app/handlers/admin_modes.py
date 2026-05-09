@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -23,6 +24,7 @@ router = Router()
 WHISPER_PREFIX = '<speaker is_whisper="true">'
 WHISPER_PATTERN = re.compile(r"^\s*/ш[её]пот/\s*", re.IGNORECASE)
 STOP_SUFFIX_PATTERN = re.compile(r"(?:^|\s)/stop\s*$", re.IGNORECASE)
+TALK_STOP_AFTER_ANSWER_TIMEOUT_SECONDS = 35
 
 MODE_TITLES = {
     "announce": "Озвучить",
@@ -267,10 +269,10 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
             await message.answer("Не удалось озвучить текст через Home Assistant.")
             return
         LOGGER.info("Admin announce sent: user_id=%s entity_id=%s whisper=%s", user_id, session.entity_id, voice_message.whisper)
+        await message.answer("Озвучила.")
         if stop_after_send:
             await _finish_admin_mode_after_send(message, admin_modes, ha, user_id, "announce")
             return
-        await message.answer("Озвучила.")
         return
 
     if not session.room:
@@ -288,8 +290,11 @@ async def admin_mode_message(message: Message, settings: Settings, admin_modes: 
     admin_modes.set_pending_dialog(user_id, dialog)
     LOGGER.info("Admin talk sent: user_id=%s entity_id=%s dialog=%s whisper=%s", user_id, session.entity_id, dialog, voice_message.whisper)
     if stop_after_send:
-        await _finish_admin_mode_after_send(message, admin_modes, ha, user_id, "talk")
+        admin_modes.set_pending_stop_after_answer(user_id, True)
+        asyncio.create_task(_finish_talk_mode_after_timeout(message, admin_modes, ha, user_id, dialog))
+        await message.answer("Отправила. Жду ответ Сони, потом завершу режим.")
         return
+    admin_modes.set_pending_stop_after_answer(user_id, False)
     await message.answer("Отправила.")
 
 
@@ -360,6 +365,29 @@ async def _finish_admin_mode_after_send(
         await _restore_volume(session, ha)
     LOGGER.info("Admin mode stopped after successful send: user_id=%s mode=%s", user_id, mode)
     await message.answer(admin_menu_text(), reply_markup=main_menu())
+
+
+async def _finish_talk_mode_after_timeout(
+    message: Message,
+    admin_modes: AdminModeManager,
+    ha: HomeAssistantClient,
+    user_id: int,
+    dialog: str,
+) -> None:
+    await asyncio.sleep(TALK_STOP_AFTER_ANSWER_TIMEOUT_SECONDS)
+    session = admin_modes.get(user_id)
+    if (
+        session is None
+        or session.mode != "talk"
+        or not session.pending_stop_after_answer
+        or session.pending_dialog != dialog
+    ):
+        return
+    session = admin_modes.clear(user_id)
+    if session is not None:
+        await _restore_volume(session, ha)
+    LOGGER.info("Admin talk mode stopped after answer timeout: user_id=%s dialog=%s", user_id, dialog)
+    await message.answer("Ответ не получен, режим разговора завершён.", reply_markup=main_menu())
 
 
 def split_stop_suffix(text: str) -> tuple[bool, str]:

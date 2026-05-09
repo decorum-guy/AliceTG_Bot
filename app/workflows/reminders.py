@@ -104,6 +104,15 @@ class ReminderWorkflow:
         _, entity_id = station
         return await self._store.update_settings(voice_station_entity_id=entity_id)
 
+    async def toggle_voice_station(self) -> ReminderSettings:
+        settings = await self._store.get_settings()
+        next_entity_id = (
+            "media_player.stantsiia_mini_spalnia"
+            if settings.voice_station_entity_id == "media_player.stantsiia_mini_zal"
+            else "media_player.stantsiia_mini_zal"
+        )
+        return await self._store.update_settings(voice_station_entity_id=next_entity_id)
+
     @staticmethod
     def station_label(entity_id: str) -> str:
         for label, station_entity_id in REMINDER_VOICE_STATIONS.values():

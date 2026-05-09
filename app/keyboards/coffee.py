@@ -11,20 +11,38 @@ def coffee_status(is_on: bool) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text=label, callback_data=action, style=action_style)],
             [inline_button(text="🔄 Обновить", callback_data="coffee:status", style=BUTTON_PRIMARY)],
-            [inline_button(text="⬅️ Назад", callback_data="devices:menu", style=BUTTON_PRIMARY)],
             [inline_button(text="⚙️ Настройки", callback_data="coffee:settings", style=BUTTON_PRIMARY)],
+            [inline_button(text="⬅️ Назад", callback_data="devices:menu", style=BUTTON_PRIMARY)],
         ]
     )
 
 
-def coffee_settings(*, warmed_up_enabled: bool, long_running_enabled: bool) -> InlineKeyboardMarkup:
-    warmed_up_text = "Выключить готовность 13 мин" if warmed_up_enabled else "Включить готовность 13 мин"
-    long_running_text = "Выключить перегрев 1 час" if long_running_enabled else "Включить перегрев 1 час"
+def coffee_settings() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [inline_button(text=warmed_up_text, callback_data="coffee:toggle_warmed_up_alert", style=BUTTON_PRIMARY)],
-            [inline_button(text=long_running_text, callback_data="coffee:toggle_long_running_alert", style=BUTTON_PRIMARY)],
+            [inline_button(text="Разогрев", callback_data="coffee_alert_settings:warmed_up")],
+            [inline_button(text="Перегрев", callback_data="coffee_alert_settings:long_running")],
             [inline_button(text="⬅️ Назад", callback_data="coffee:status", style=BUTTON_PRIMARY)],
+        ]
+    )
+
+
+def coffee_alert_settings(*, alert: str, enabled: bool) -> InlineKeyboardMarkup:
+    toggle_text = "Выключить" if enabled else "Включить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text=toggle_text, callback_data=f"coffee_alert_toggle:{alert}")],
+            [inline_button(text="Настроить время", callback_data=f"coffee_alert_time:{alert}")],
+            [inline_button(text="⬅️ Назад", callback_data="coffee:settings", style=BUTTON_PRIMARY)],
+        ]
+    )
+
+
+def coffee_alert_time_confirm(*, alert: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text="✅ Подтвердить", callback_data=f"coffee_alert_time_confirm:{alert}", style=BUTTON_SUCCESS)],
+            [inline_button(text="Изменить", callback_data=f"coffee_alert_time_change:{alert}")],
         ]
     )
 

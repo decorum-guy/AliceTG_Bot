@@ -77,12 +77,14 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 
 ### Coffee Alerts
 
-- If `switch.kofemashina` stays on continuously for 13 minutes, Telegram receives a warmed-up alert with a `Выключить` button.
-- If `switch.kofemashina` turns off before 13 minutes, the warmed-up alert is not sent.
-- If `switch.kofemashina` stays on continuously for 1 hour, Telegram receives a warning alert with a `Выключить` button.
-- In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to enable or disable coffee alerts separately:
-  `Уведомление о готовности 13 мин` and `Уведомление о перегреве 1 час`.
-- The alert settings are stored in `APP_STATE_PATH` and survive bot container restarts.
+- Home Assistant only reports `switch.kofemashina` state changes to the bot: `on` and `off`.
+- The bot owns the warm-up and long-running timers. HA does not wait 13 minutes or 1 hour anymore.
+- Defaults: warm-up alert enabled after 13 minutes; long-running/overheat alert enabled after 60 minutes.
+- In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to configure each alert separately:
+  enable/disable it and change its delay.
+- The alert settings and current coffee cycle state are stored in `APP_STATE_PATH` and survive bot container restarts.
+- If the bot restarts while the stored coffee state is `on`, it restores timers using elapsed time; due unsent alerts are sent immediately.
+- If the coffee machine turns off, active coffee alert timers are cancelled and no alert is sent.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
 
 ### Siri And Telegram Coffee Control
@@ -355,9 +357,10 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 TELEGRAM_SONYA_USER_IDS=222222222
 ```
 
-`APP_STATE_PATH` stores persistent bot UI settings. Currently it stores the separate coffee alert
-toggles from `Умные устройства` -> `Кофемашина` -> `Настройки`: 13-minute readiness and 1-hour
-overheat warnings. Mount `/app/data` as a Docker volume if the container is recreated, not only restarted.
+`APP_STATE_PATH` stores persistent bot UI settings. Currently it stores coffee alert toggles,
+coffee alert delays, and the current coffee notification cycle state (`coffee_on_since`, sent flags)
+from `Умные устройства` -> `Кофемашина` -> `Настройки`. Mount `/app/data` as a Docker volume if the
+container is recreated, not only restarted.
 
 `REMINDERS_STATE_PATH` stores persistent user reminders. Pending reminders are restored after a
 telegram-bot container restart; overdue reminders are sent after startup.
@@ -529,8 +532,7 @@ The active automation IDs are:
 - `tg_sonya_direct_coffee_request`
 - `tg_sonya_direct_temperature_answer`
 - `tg_sonya_direct_syrup_answer`
-- `coffee_warmed_up_alert`
-- `coffee_long_running_alert`
+- `coffee_machine_state_to_telegram_bot`
 - `admin_talk_answer`
 - `ask_sonya_about_tea`
 - `tg_sonya_direct_tea_request`
@@ -671,23 +673,15 @@ rest_command:
       X-Internal-Secret: !secret internal_webhook_secret
     payload: "{}"
 
-  tg_coffee_warmed_up_alert:
-    url: "http://telegram-bot:8088/internal/coffee/warmed-up-alert"
+  tg_coffee_machine_state:
+    url: "http://telegram-bot:8088/internal/coffee-machine/state"
     method: POST
     content_type: "application/json"
     headers:
       Content-Type: "application/json"
       X-Internal-Secret: !secret internal_webhook_secret
-    payload: "{}"
-
-  tg_coffee_long_running_alert:
-    url: "http://telegram-bot:8088/internal/coffee/long-running-alert"
-    method: POST
-    content_type: "application/json"
-    headers:
-      Content-Type: "application/json"
-      X-Internal-Secret: !secret internal_webhook_secret
-    payload: "{}"
+    payload: >-
+      {"entity_id": {{ entity_id | to_json }}, "state": {{ state | to_json }}, "changed_at": {{ changed_at | to_json }}}
 
   tg_admin_talk_answer:
     url: "http://telegram-bot:8088/internal/admin/talk-answer"
@@ -1325,35 +1319,21 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         answer: "{{ answer }}"
         intent: "{{ intent }}"
         dialog: "{{ dialog }}"
-- id: coffee_warmed_up_alert
-  alias: "Telegram bot - кофемашина разогрета"
+- id: coffee_machine_state_to_telegram_bot
+  alias: "Telegram bot - состояние кофемашины"
   mode: single
   trigger:
     - platform: state
       entity_id: switch.kofemashina
-      to: "on"
-      for: "00:13:00"
-  condition:
-    - condition: state
-      entity_id: switch.kofemashina
-      state: "on"
+      to:
+        - "on"
+        - "off"
   action:
-    - action: rest_command.tg_coffee_warmed_up_alert
-
-- id: coffee_long_running_alert
-  alias: "Telegram bot - кофемашина работает 1 час"
-  mode: single
-  trigger:
-    - platform: state
-      entity_id: switch.kofemashina
-      to: "on"
-      for: "01:00:00"
-  condition:
-    - condition: state
-      entity_id: switch.kofemashina
-      state: "on"
-  action:
-    - action: rest_command.tg_coffee_long_running_alert
+    - action: rest_command.tg_coffee_machine_state
+      data:
+        entity_id: "{{ trigger.entity_id }}"
+        state: "{{ trigger.to_state.state }}"
+        changed_at: "{{ trigger.to_state.last_changed.isoformat() }}"
 
 - id: admin_talk_answer
   alias: "Telegram bot - ответ в режиме разговора"
@@ -1874,6 +1854,6 @@ If the bot container fails, Home Assistant should still be reachable through the
 
 Reminder tasks are stored in memory through `asyncio.create_task`. They are lost when the bot container restarts. The storage interface is intentionally separated so SQLite can replace in-memory storage later.
 
-Coffee alert settings are not reminder tasks. The 13-minute readiness toggle and the 1-hour
-overheat toggle are stored separately in the JSON file configured by `APP_STATE_PATH`, so normal
-container restarts keep both settings.
+Coffee alert settings are not reminder tasks. Coffee alert toggles, custom delays, and current
+coffee cycle state are stored separately in the JSON file configured by `APP_STATE_PATH`, so normal
+container restarts keep the settings and restore active alert timers when the stored state is `on`.

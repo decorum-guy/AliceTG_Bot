@@ -8,9 +8,12 @@ from aiohttp import web
 
 from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
+from app.keyboards.main import main_menu
 from app.messages import coffee as coffee_messages
-from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager
+from app.messages.common import admin_menu_text
+from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager, AdminModeSession
 from app.services.app_state import AppStateStore
+from app.services.coffee_alerts import CoffeeAlertScheduler
 from app.services.coffee_machine import set_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
@@ -238,6 +241,15 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
     if not switch_state or switch_state.get("state") != "on":
         LOGGER.info("Coffee warm-up alert skipped because coffee machine is not on")
         return web.json_response({"ok": True, "sent": False})
+    runtime_seconds = _coffee_runtime_seconds(switch_state)
+    if runtime_seconds < app_state.coffee_warmed_up_alert_delay_seconds:
+        LOGGER.info("Coffee warm-up legacy alert skipped because configured delay is not reached")
+        return web.json_response({"ok": True, "sent": False, "not_due": True})
+    if app_state.coffee_machine_state != "on":
+        await app_state.mark_coffee_machine_on(str(switch_state.get("last_changed") or datetime.now(timezone.utc).isoformat()))
+    if not await app_state.mark_coffee_warmed_up_alert_sent():
+        LOGGER.info("Coffee warm-up legacy alert skipped because it was already sent or inactive")
+        return web.json_response({"ok": True, "sent": False, "already_sent": True})
 
     await bot.send_message(
         settings.telegram_admin_chat_id,
@@ -262,6 +274,15 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     if not switch_state or switch_state.get("state") != "on":
         LOGGER.info("Coffee long-running alert skipped because coffee machine is not on")
         return web.json_response({"ok": True, "sent": False})
+    runtime_seconds = _coffee_runtime_seconds(switch_state)
+    if runtime_seconds < app_state.coffee_long_running_alert_delay_seconds:
+        LOGGER.info("Coffee long-running legacy alert skipped because configured delay is not reached")
+        return web.json_response({"ok": True, "sent": False, "not_due": True})
+    if app_state.coffee_machine_state != "on":
+        await app_state.mark_coffee_machine_on(str(switch_state.get("last_changed") or datetime.now(timezone.utc).isoformat()))
+    if not await app_state.mark_coffee_long_running_alert_sent():
+        LOGGER.info("Coffee long-running legacy alert skipped because it was already sent or inactive")
+        return web.json_response({"ok": True, "sent": False, "already_sent": True})
 
     runtime_text = _coffee_runtime_text(switch_state)
     await bot.send_message(
@@ -272,10 +293,33 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "sent": True})
 
 
+async def coffee_machine_state(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    state = str(payload.get("state") or "").strip().lower()
+    if state not in {"on", "off"}:
+        raise web.HTTPBadRequest(text="Unsupported state")
+
+    scheduler: CoffeeAlertScheduler = request.app["coffee_alert_scheduler"]
+    await scheduler.handle_state(state, changed_at=str(payload.get("changed_at") or "") or None)
+    LOGGER.info(
+        "Coffee machine state endpoint handled: entity_id=%s state=%s changed_at=%s",
+        payload.get("entity_id"),
+        state,
+        payload.get("changed_at"),
+    )
+    return web.json_response({"ok": True, "state": state})
+
+
 async def admin_talk_answer(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     settings: Settings = request.app["settings"]
     admin_modes: AdminModeManager = request.app["admin_modes"]
+    ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
 
     answer = await _parse_admin_talk_answer(request)
@@ -288,11 +332,29 @@ async def admin_talk_answer(request: web.Request) -> web.Response:
         LOGGER.info("Admin talk answer ignored without pending session: dialog=%s answer=%r", dialog, answer["answer"])
         return web.json_response({"ok": True, "sent": False})
 
-    user_id, _ = matched
+    user_id, session = matched
     admin_modes.set_pending_dialog(user_id, None)
     await bot.send_message(settings.telegram_admin_chat_id, f"Соня сказала: {answer['answer']}")
     LOGGER.info("Admin talk answer sent to Telegram: dialog=%s user_id=%s", dialog, user_id)
+    if session.pending_stop_after_answer:
+        stopped_session = admin_modes.clear(user_id)
+        if stopped_session is not None:
+            await _restore_admin_mode_volume(stopped_session, ha)
+        await bot.send_message(settings.telegram_admin_chat_id, admin_menu_text(), reply_markup=main_menu())
+        LOGGER.info("Admin talk mode stopped after answer: dialog=%s user_id=%s", dialog, user_id)
     return web.json_response({"ok": True, "sent": True})
+
+
+async def _restore_admin_mode_volume(session: AdminModeSession, ha: HomeAssistantClient) -> None:
+    if not session.entity_id or session.previous_volume is None:
+        LOGGER.info("Admin mode volume restore skipped: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
+        return
+    try:
+        await ha.set_volume(session.entity_id, session.previous_volume)
+    except HomeAssistantError:
+        LOGGER.exception("Cannot restore admin mode volume: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
+        return
+    LOGGER.info("Admin mode volume restored: entity_id=%s previous_volume=%s", session.entity_id, session.previous_volume)
 
 
 async def tea_wants_answer(request: web.Request) -> web.Response:
@@ -484,8 +546,10 @@ async def shortcut_espresso(request: web.Request) -> web.Response:
 
     settings: Settings = request.app["settings"]
     ha: HomeAssistantClient = request.app["ha"]
+    scheduler: CoffeeAlertScheduler = request.app["coffee_alert_scheduler"]
     try:
         await set_coffee_machine(ha, settings, action, source="shortcut:/shortcut/espresso")  # type: ignore[arg-type]
+        await scheduler.handle_state("on" if action == "turn_on" else "off")
     except HomeAssistantError:
         LOGGER.exception("Shortcut espresso coffee action failed: action=%s", action)
         return _shortcuts_json_error(
@@ -514,6 +578,7 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/coffee/sonya-comment-answer", sonya_coffee_comment_answer)
     app.router.add_post("/internal/coffee/sonya-auto-enabled", sonya_auto_enabled)
     app.router.add_post("/internal/coffee/sonya-hall-refused", sonya_hall_refused)
+    app.router.add_post("/internal/coffee-machine/state", coffee_machine_state)
     app.router.add_post("/internal/coffee/warmed-up-alert", coffee_warmed_up_alert)
     app.router.add_post("/internal/coffee/long-running-alert", coffee_long_running_alert)
     app.router.add_post("/internal/admin/talk-answer", admin_talk_answer)
@@ -535,7 +600,7 @@ def _coffee_runtime_text(switch_state: dict) -> str:
     if started_at is None:
         return "неизвестно"
 
-    total_minutes = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds() // 60))
+    total_minutes = _coffee_runtime_seconds(switch_state) // 60
     hours = total_minutes // 60
     minutes = total_minutes % 60
     if hours > 0:
@@ -549,3 +614,10 @@ def _parse_ha_datetime(value: str) -> datetime | None:
     except ValueError:
         LOGGER.warning("Cannot parse Home Assistant datetime: %s", value)
         return None
+
+
+def _coffee_runtime_seconds(switch_state: dict) -> int:
+    started_at = _parse_ha_datetime(str(switch_state.get("last_changed", "")))
+    if started_at is None:
+        return 0
+    return max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))

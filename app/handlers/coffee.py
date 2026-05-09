@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
+from dataclasses import dataclass
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app.config import Settings
-from app.keyboards.coffee import coffee_settings, coffee_status, coffee_turn_off_only, delete_only, later_options, sonya_menu
+from app.keyboards.coffee import (
+    coffee_alert_settings,
+    coffee_alert_time_confirm,
+    coffee_settings,
+    coffee_status,
+    coffee_turn_off_only,
+    delete_only,
+    later_options,
+    sonya_menu,
+)
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
+from app.services.coffee_alerts import CoffeeAlertScheduler
 from app.services.coffee_machine import turn_off_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
@@ -21,6 +34,17 @@ from app.workflows.coffee import minute_word
 
 router = Router()
 LOGGER = logging.getLogger(__name__)
+COFFEE_ALERTS = {"warmed_up", "long_running"}
+COFFEE_ALERT_TIME_RE = re.compile(r"^\s*(?P<value>\d{1,3})\s*(?P<unit>мин|минута|минуты|минут|ч|час|часа|часов)\s*$", re.IGNORECASE)
+
+
+@dataclass
+class CoffeeAlertTimeDraft:
+    alert: str
+    delay_seconds: int | None = None
+
+
+_coffee_alert_time_drafts: dict[int, CoffeeAlertTimeDraft] = {}
 
 
 @router.callback_query(F.data == "coffee:status")
@@ -53,16 +77,13 @@ async def show_coffee_settings(
     if callback.message:
         await callback.message.edit_text(
             _coffee_settings_text(app_state),
-            reply_markup=coffee_settings(
-                warmed_up_enabled=app_state.coffee_warmed_up_alert_enabled,
-                long_running_enabled=app_state.coffee_long_running_alert_enabled,
-            ),
+            reply_markup=coffee_settings(),
         )
     await callback.answer()
 
 
-@router.callback_query(F.data == "coffee:toggle_warmed_up_alert")
-async def toggle_coffee_warmed_up_alert(
+@router.callback_query(F.data.startswith("coffee_alert_settings:"))
+async def show_coffee_alert_settings(
     callback: CallbackQuery,
     settings: Settings,
     app_state: AppStateStore,
@@ -71,40 +92,126 @@ async def toggle_coffee_warmed_up_alert(
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    enabled = not app_state.coffee_warmed_up_alert_enabled
-    await app_state.set_coffee_warmed_up_alert_enabled(enabled)
+    alert = (callback.data or "").split(":", 1)[1]
+    if alert not in COFFEE_ALERTS:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
     if callback.message:
         await callback.message.edit_text(
-            _coffee_settings_text(app_state),
-            reply_markup=coffee_settings(
-                warmed_up_enabled=app_state.coffee_warmed_up_alert_enabled,
-                long_running_enabled=app_state.coffee_long_running_alert_enabled,
-            ),
+            _coffee_alert_settings_text(app_state, alert),
+            reply_markup=coffee_alert_settings(alert=alert, enabled=_coffee_alert_enabled(app_state, alert)),
         )
-    await callback.answer("Готовность включена" if enabled else "Готовность выключена")
+    await callback.answer()
 
 
-@router.callback_query(F.data == "coffee:toggle_long_running_alert")
-async def toggle_coffee_long_running_alert(
+@router.callback_query(F.data.startswith("coffee_alert_toggle:"))
+async def toggle_coffee_alert(
     callback: CallbackQuery,
     settings: Settings,
     app_state: AppStateStore,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    enabled = not app_state.coffee_long_running_alert_enabled
-    await app_state.set_coffee_long_running_alert_enabled(enabled)
+    alert = (callback.data or "").split(":", 1)[1]
+    if alert not in COFFEE_ALERTS:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+    enabled = not _coffee_alert_enabled(app_state, alert)
+    await _set_coffee_alert_enabled(app_state, alert, enabled)
+    coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
-            _coffee_settings_text(app_state),
-            reply_markup=coffee_settings(
-                warmed_up_enabled=app_state.coffee_warmed_up_alert_enabled,
-                long_running_enabled=app_state.coffee_long_running_alert_enabled,
-            ),
+            _coffee_alert_settings_text(app_state, alert),
+            reply_markup=coffee_alert_settings(alert=alert, enabled=enabled),
         )
-    await callback.answer("Перегрев включен" if enabled else "Перегрев выключен")
+    await callback.answer("Включено" if enabled else "Выключено")
+
+
+@router.callback_query(F.data.in_({"coffee:toggle_warmed_up_alert", "coffee:toggle_long_running_alert"}))
+async def toggle_legacy_coffee_alert(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
+) -> None:
+    legacy_alert = "warmed_up" if callback.data == "coffee:toggle_warmed_up_alert" else "long_running"
+    enabled = not _coffee_alert_enabled(app_state, legacy_alert)
+    await _set_coffee_alert_enabled(app_state, legacy_alert, enabled)
+    coffee_alert_scheduler.reschedule_active_alerts()
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_alert_settings_text(app_state, legacy_alert),
+            reply_markup=coffee_alert_settings(alert=legacy_alert, enabled=enabled),
+        )
+    await callback.answer("Включено" if enabled else "Выключено")
+
+
+@router.callback_query(F.data.startswith("coffee_alert_time:"))
+async def request_coffee_alert_time(
+    callback: CallbackQuery,
+    settings: Settings,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    alert = (callback.data or "").split(":", 1)[1]
+    if alert not in COFFEE_ALERTS:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+    _coffee_alert_time_drafts[callback.from_user.id] = CoffeeAlertTimeDraft(alert=alert)
+    if callback.message:
+        await callback.message.edit_text(_coffee_alert_time_prompt(alert))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("coffee_alert_time_change:"))
+async def change_coffee_alert_time(
+    callback: CallbackQuery,
+    settings: Settings,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    alert = (callback.data or "").split(":", 1)[1]
+    if alert not in COFFEE_ALERTS:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+    _coffee_alert_time_drafts[callback.from_user.id] = CoffeeAlertTimeDraft(alert=alert)
+    if callback.message:
+        await callback.message.edit_text(_coffee_alert_time_prompt(alert))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("coffee_alert_time_confirm:"))
+async def confirm_coffee_alert_time(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    alert = (callback.data or "").split(":", 1)[1]
+    draft = _coffee_alert_time_drafts.get(callback.from_user.id)
+    if alert not in COFFEE_ALERTS or draft is None or draft.alert != alert or draft.delay_seconds is None:
+        await callback.answer("Сначала введи время", show_alert=True)
+        return
+    await _set_coffee_alert_delay_seconds(app_state, alert, draft.delay_seconds)
+    coffee_alert_scheduler.reschedule_active_alerts()
+    _coffee_alert_time_drafts.pop(callback.from_user.id, None)
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_alert_settings_text(app_state, alert),
+            reply_markup=coffee_alert_settings(alert=alert, enabled=_coffee_alert_enabled(app_state, alert)),
+        )
+    await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data.in_({"coffee:turn_on", "coffee:turn_off"}))
@@ -113,6 +220,7 @@ async def toggle_coffee(
     settings: Settings,
     ha: HomeAssistantClient,
     telegram_messages: TelegramMessages,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -122,8 +230,10 @@ async def toggle_coffee(
     try:
         if turn_on:
             await turn_on_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_on")
+            await coffee_alert_scheduler.handle_state("on")
         else:
             await turn_off_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_off")
+            await coffee_alert_scheduler.handle_state("off")
     except HomeAssistantError:
         LOGGER.exception("Cannot toggle coffee machine")
         await callback.answer("Не получилось связаться с Home Assistant", show_alert=True)
@@ -151,13 +261,14 @@ async def toggle_coffee(
 
 
 @router.message(Command("coffee_on"))
-async def coffee_on_command(message: Message, settings: Settings, ha: HomeAssistantClient) -> None:
+async def coffee_on_command(message: Message, settings: Settings, ha: HomeAssistantClient, coffee_alert_scheduler: CoffeeAlertScheduler) -> None:
     if not settings.is_admin_user(message.from_user.id if message.from_user else None):
         await message.answer("Нет доступа")
         return
 
     try:
         await turn_on_coffee_machine(ha, settings, source="telegram_command:/coffee_on")
+        await coffee_alert_scheduler.handle_state("on")
     except HomeAssistantError:
         LOGGER.exception("Cannot turn on coffee machine from Telegram command")
         await message.answer("Не получилось включить кофемашину.")
@@ -166,18 +277,39 @@ async def coffee_on_command(message: Message, settings: Settings, ha: HomeAssist
 
 
 @router.message(Command("coffee_off"))
-async def coffee_off_command(message: Message, settings: Settings, ha: HomeAssistantClient) -> None:
+async def coffee_off_command(message: Message, settings: Settings, ha: HomeAssistantClient, coffee_alert_scheduler: CoffeeAlertScheduler) -> None:
     if not settings.is_admin_user(message.from_user.id if message.from_user else None):
         await message.answer("Нет доступа")
         return
 
     try:
         await turn_off_coffee_machine(ha, settings, source="telegram_command:/coffee_off")
+        await coffee_alert_scheduler.handle_state("off")
     except HomeAssistantError:
         LOGGER.exception("Cannot turn off coffee machine from Telegram command")
         await message.answer("Не получилось выключить кофемашину.")
         return
     await message.answer("☕ Кофемашина выключена.")
+
+
+@router.message(F.text)
+async def coffee_alert_time_text(message: Message, settings: Settings) -> None:
+    user_id = message.from_user.id if message.from_user else None
+    if user_id is None or not settings.is_admin_user(user_id):
+        raise SkipHandler()
+    draft = _coffee_alert_time_drafts.get(user_id)
+    if draft is None:
+        raise SkipHandler()
+
+    delay_seconds = parse_coffee_alert_delay_seconds(message.text or "")
+    if delay_seconds is None:
+        await message.answer("Не понял время. Напиши, например: 15 мин, 15 минут, 1 ч или 1 час.")
+        return
+    draft.delay_seconds = delay_seconds
+    await message.answer(
+        f"Новое время: {_format_delay(delay_seconds)}\n\nСохранить?",
+        reply_markup=coffee_alert_time_confirm(alert=draft.alert),
+    )
 
 
 @router.callback_query(F.data == "coffee_alert:turn_off")
@@ -186,6 +318,7 @@ async def turn_off_from_coffee_alert(
     settings: Settings,
     ha: HomeAssistantClient,
     telegram_messages: TelegramMessages,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -193,6 +326,7 @@ async def turn_off_from_coffee_alert(
 
     try:
         await turn_off_coffee_machine(ha, settings, source="telegram_callback:coffee_alert:turn_off")
+        await coffee_alert_scheduler.handle_state("off")
     except HomeAssistantError:
         LOGGER.exception("Cannot turn off coffee machine from alert")
         await callback.answer("Не получилось выключить кофемашину", show_alert=True)
@@ -450,7 +584,78 @@ def _coffee_settings_text(app_state: AppStateStore) -> str:
     long_running_state = "включено" if app_state.coffee_long_running_alert_enabled else "выключено"
     return (
         "⚙️ <b>Настройки кофемашины</b>\n\n"
-        f"Уведомление о готовности 13 мин: <b>{warmed_up_state}</b>\n"
-        f"Уведомление о перегреве 1 час: <b>{long_running_state}</b>\n\n"
+        f"Разогрев: <b>{warmed_up_state}</b>, {_format_delay(app_state.coffee_warmed_up_alert_delay_seconds)}\n"
+        f"Перегрев: <b>{long_running_state}</b>, {_format_delay(app_state.coffee_long_running_alert_delay_seconds)}\n\n"
         "Эти настройки управляют только Telegram-уведомлениями, не самой кофемашиной."
     )
+
+
+def _coffee_alert_settings_text(app_state: AppStateStore, alert: str) -> str:
+    title = "Уведомление о разогреве" if alert == "warmed_up" else "Уведомление о долгой работе"
+    state = "включено" if _coffee_alert_enabled(app_state, alert) else "выключено"
+    delay = _format_delay(_coffee_alert_delay_seconds(app_state, alert))
+    return f"⚙️ <b>{title}</b>\n\nСостояние: <b>{state}</b>\nВремя: <b>{delay}</b>"
+
+
+def _coffee_alert_time_prompt(alert: str) -> str:
+    title = "разогрева" if alert == "warmed_up" else "долгой работы"
+    return (
+        f"Настройка времени уведомления {title}.\n\n"
+        "Через сколько отправлять уведомление?\n"
+        "Например: 15 мин, 15 минут, 1 ч, 1 час."
+    )
+
+
+def _coffee_alert_enabled(app_state: AppStateStore, alert: str) -> bool:
+    return app_state.coffee_warmed_up_alert_enabled if alert == "warmed_up" else app_state.coffee_long_running_alert_enabled
+
+
+async def _set_coffee_alert_enabled(app_state: AppStateStore, alert: str, enabled: bool) -> None:
+    if alert == "warmed_up":
+        await app_state.set_coffee_warmed_up_alert_enabled(enabled)
+        return
+    await app_state.set_coffee_long_running_alert_enabled(enabled)
+
+
+def _coffee_alert_delay_seconds(app_state: AppStateStore, alert: str) -> int:
+    return app_state.coffee_warmed_up_alert_delay_seconds if alert == "warmed_up" else app_state.coffee_long_running_alert_delay_seconds
+
+
+async def _set_coffee_alert_delay_seconds(app_state: AppStateStore, alert: str, delay_seconds: int) -> None:
+    if alert == "warmed_up":
+        await app_state.set_coffee_warmed_up_alert_delay_seconds(delay_seconds)
+        return
+    await app_state.set_coffee_long_running_alert_delay_seconds(delay_seconds)
+
+
+def parse_coffee_alert_delay_seconds(text: str) -> int | None:
+    match = COFFEE_ALERT_TIME_RE.match(text)
+    if match is None:
+        return None
+    value = int(match.group("value"))
+    unit = match.group("unit").lower()
+    if value <= 0:
+        return None
+    return value * 3600 if unit.startswith("ч") else value * 60
+
+
+def _format_delay(delay_seconds: int) -> str:
+    minutes = max(1, delay_seconds // 60)
+    if minutes < 60:
+        return f"{minutes} {minute_word(minutes)}"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} {_hour_word(hours)}"
+    hours = minutes // 60
+    rest_minutes = minutes % 60
+    return f"{hours} {_hour_word(hours)} {rest_minutes} {minute_word(rest_minutes)}"
+
+
+def _hour_word(hours: int) -> str:
+    if 11 <= hours % 100 <= 14:
+        return "часов"
+    if hours % 10 == 1:
+        return "час"
+    if hours % 10 in {2, 3, 4}:
+        return "часа"
+    return "часов"

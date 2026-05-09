@@ -4,12 +4,15 @@ import logging
 
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
+from aiogram.types import InlineKeyboardMarkup, MaybeInaccessibleMessage
 
 from app.config import Settings
 from app.keyboards.reminders import reminders_back_menu, reminders_list_menu, reminders_menu, reminders_settings_menu
 from app.messages import reminders as reminder_messages
 from app.services.reminder_parser import parse_reminder_request
+from app.services.telegram_messages import is_message_not_modified_error
 from app.workflows.reminders import ReminderWorkflow
 
 router = Router()
@@ -22,7 +25,7 @@ async def reminders_menu_handler(callback: CallbackQuery, settings: Settings) ->
         await callback.answer("Нет доступа", show_alert=True)
         return
     if callback.message:
-        await callback.message.edit_text(reminder_messages.reminder_menu_text(), reply_markup=reminders_menu())
+        await _safe_edit_reminder_message(callback.message, reminder_messages.reminder_menu_text(), reminders_menu())
     await callback.answer()
 
 
@@ -33,7 +36,7 @@ async def reminders_create(callback: CallbackQuery, settings: Settings, reminder
         return
     reminder_workflow.start_draft(callback.from_user.id)
     if callback.message:
-        await callback.message.edit_text(reminder_messages.reminder_create_prompt(), reply_markup=reminders_back_menu())
+        await _safe_edit_reminder_message(callback.message, reminder_messages.reminder_create_prompt(), reminders_back_menu())
     await callback.answer()
 
 
@@ -45,9 +48,9 @@ async def reminders_list(callback: CallbackQuery, settings: Settings, reminder_w
     reminders = await reminder_workflow.list_pending()
     if callback.message:
         if reminders:
-            await callback.message.edit_text(reminder_messages.reminders_list(reminders), reply_markup=reminders_list_menu(reminders))
+            await _safe_edit_reminder_message(callback.message, reminder_messages.reminders_list(reminders), reminders_list_menu(reminders))
         else:
-            await callback.message.edit_text(reminder_messages.reminders_empty(), reply_markup=reminders_back_menu())
+            await _safe_edit_reminder_message(callback.message, reminder_messages.reminders_empty(), reminders_back_menu())
     await callback.answer()
 
 
@@ -58,9 +61,10 @@ async def reminders_settings(callback: CallbackQuery, settings: Settings, remind
         return
     reminder_settings = await reminder_workflow.get_settings()
     if callback.message:
-        await callback.message.edit_text(
+        await _safe_edit_reminder_message(
+            callback.message,
             reminder_messages.reminder_settings(reminder_settings),
-            reply_markup=reminders_settings_menu(reminder_settings),
+            reminders_settings_menu(reminder_settings),
         )
     await callback.answer()
 
@@ -72,9 +76,10 @@ async def reminders_voice_toggle(callback: CallbackQuery, settings: Settings, re
         return
     reminder_settings = await reminder_workflow.toggle_voice()
     if callback.message:
-        await callback.message.edit_text(
+        await _safe_edit_reminder_message(
+            callback.message,
             reminder_messages.reminder_settings(reminder_settings),
-            reply_markup=reminders_settings_menu(reminder_settings),
+            reminders_settings_menu(reminder_settings),
         )
     await callback.answer()
 
@@ -85,14 +90,18 @@ async def reminders_voice_station(callback: CallbackQuery, settings: Settings, r
         await callback.answer("Нет доступа", show_alert=True)
         return
     station_key = (callback.data or "").rsplit(":", 1)[-1]
-    reminder_settings = await reminder_workflow.set_voice_station(station_key)
-    if reminder_settings is None:
-        await callback.answer("Неизвестная колонка", show_alert=True)
-        return
+    if station_key == "toggle":
+        reminder_settings = await reminder_workflow.toggle_voice_station()
+    else:
+        reminder_settings = await reminder_workflow.set_voice_station(station_key)
+        if reminder_settings is None:
+            await callback.answer("Неизвестная колонка", show_alert=True)
+            return
     if callback.message:
-        await callback.message.edit_text(
+        await _safe_edit_reminder_message(
+            callback.message,
             reminder_messages.reminder_settings(reminder_settings),
-            reply_markup=reminders_settings_menu(reminder_settings),
+            reminders_settings_menu(reminder_settings),
         )
     await callback.answer()
 
@@ -107,9 +116,9 @@ async def reminders_cancel(callback: CallbackQuery, settings: Settings, reminder
     reminders = await reminder_workflow.list_pending()
     if callback.message:
         if reminders:
-            await callback.message.edit_text(reminder_messages.reminders_list(reminders), reply_markup=reminders_list_menu(reminders))
+            await _safe_edit_reminder_message(callback.message, reminder_messages.reminders_list(reminders), reminders_list_menu(reminders))
         else:
-            await callback.message.edit_text(reminder_messages.reminder_cancelled(), reply_markup=reminders_back_menu())
+            await _safe_edit_reminder_message(callback.message, reminder_messages.reminder_cancelled(), reminders_back_menu())
     await callback.answer("Напоминание удалено")
 
 
@@ -149,3 +158,18 @@ async def reminders_text(message: Message, settings: Settings, reminder_workflow
     _, human_delay_text = result
     reminder_workflow.clear_draft(user_id)
     await message.answer(reminder_messages.reminder_created(draft.text or "", human_delay_text), reply_markup=reminders_menu())
+
+
+async def _safe_edit_reminder_message(
+    message: MaybeInaccessibleMessage,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if is_message_not_modified_error(exc):
+            LOGGER.info("Reminder message is not modified, edit skipped: message_id=%s", message.message_id)
+            return
+        LOGGER.exception("Cannot edit reminder message: message_id=%s", message.message_id)
+        raise
