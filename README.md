@@ -1350,6 +1350,19 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
         state: "{{ trigger.to_state.state }}"
         changed_at: "{{ trigger.to_state.last_changed.isoformat() }}"
 
+- id: iphone_coffee_notification_turn_off
+  alias: "iPhone уведомление - выключить кофемашину"
+  mode: single
+  trigger:
+    - platform: event
+      event_type: mobile_app_notification_action
+      event_data:
+        action: "COFFEE_TURN_OFF"
+  action:
+    - service: switch.turn_off
+      target:
+        entity_id: switch.kofemashina
+
 - id: admin_talk_answer
   alias: "Telegram bot - ответ в режиме разговора"
   mode: queued

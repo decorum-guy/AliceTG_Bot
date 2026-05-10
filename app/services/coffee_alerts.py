@@ -141,6 +141,15 @@ class CoffeeAlertScheduler:
                                 self._settings.ha_mobile_notify_service,
                                 title=title,
                                 message=push_message,
+                                data={
+                                    "actions": [
+                                        {
+                                            "action": "COFFEE_TURN_OFF",
+                                            "title": "Выключить",
+                                            "destructive": True,
+                                        }
+                                    ]
+                                },
                             )
                         except HomeAssistantError as exc:
                             LOGGER.exception("Coffee mobile push failed alert=%s attempt=%s reason=%r", alert, attempt, exc)

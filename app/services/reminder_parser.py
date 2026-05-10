@@ -84,7 +84,7 @@ def _build_result(raw_text: str, delay_seconds: int, human_delay_text: str, matc
 def _cleanup_reminder_text(text: str) -> str:
     cleaned = text.strip(" ,.!?;:")
     cleaned = re.sub(r"^(пожалуйста\s+)?(напомнить мне|напомни мне|напомнить|напомни)[\s,.:;-]*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^что\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(что\s+надо|что|надо\s+что)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" ,.!?;:")
     return cleaned
 

@@ -47,7 +47,7 @@ def reminder_created(text: str, human_delay_text: str) -> str:
 
 
 def reminder_notification(text: str) -> str:
-    return render_message(MessageStyle(MessageKind.REMINDER, "reminder", "Напоминание"), body=[f"Напоминание: {h(text)}"])
+    return render_message(MessageStyle(MessageKind.REMINDER, "reminder", "Напоминание"), body=[h(text)])
 
 
 def reminders_empty() -> str:
