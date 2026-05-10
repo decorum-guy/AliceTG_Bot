@@ -27,12 +27,16 @@ def coffee_settings() -> InlineKeyboardMarkup:
     )
 
 
-def coffee_alert_settings(*, alert: str, enabled: bool) -> InlineKeyboardMarkup:
+def coffee_alert_settings(*, alert: str, enabled: bool, telegram_enabled: bool, iphone_enabled: bool) -> InlineKeyboardMarkup:
+    telegram_text = "Telegram: вкл" if telegram_enabled else "Telegram: выкл"
+    iphone_text = "iPhone: вкл" if iphone_enabled else "iPhone: выкл"
     toggle_text = "Выключить" if enabled else "Включить"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [inline_button(text=toggle_text, callback_data=f"coffee_alert_toggle:{alert}")],
             [inline_button(text="Настроить время", callback_data=f"coffee_alert_time:{alert}")],
+            [inline_button(text=telegram_text, callback_data=f"coffee_alert_channel_toggle:{alert}:telegram")],
+            [inline_button(text=iphone_text, callback_data=f"coffee_alert_channel_toggle:{alert}:iphone")],
             [inline_button(text="⬅️ Назад", callback_data="coffee:settings", style=BUTTON_PRIMARY)],
         ]
     )

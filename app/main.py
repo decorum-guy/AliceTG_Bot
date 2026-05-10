@@ -66,7 +66,7 @@ async def create_app() -> web.Application:
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
     water_workflow = WaterWorkflow(settings, ha, storage, telegram_messages)
     reminder_workflow = ReminderWorkflow(reminder_store, telegram_messages, settings.telegram_admin_chat_id)
-    coffee_alert_scheduler = CoffeeAlertScheduler(settings, app_state, telegram_messages)
+    coffee_alert_scheduler = CoffeeAlertScheduler(settings, app_state, telegram_messages, ha)
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha

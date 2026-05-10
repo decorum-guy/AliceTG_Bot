@@ -247,7 +247,7 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "sent": False, "not_due": True})
     if app_state.coffee_machine_state != "on":
         await app_state.mark_coffee_machine_on(str(switch_state.get("last_changed") or datetime.now(timezone.utc).isoformat()))
-    if app_state.coffee_warmed_up_alert_sent:
+    if app_state.coffee_warmed_up_alert_sent or app_state.coffee_warmed_up_alert_telegram_sent:
         LOGGER.info("Coffee warm-up legacy alert skipped because it was already sent or inactive")
         return web.json_response({"ok": True, "sent": False, "already_sent": True})
 
@@ -260,7 +260,7 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
     except Exception:
         LOGGER.exception("Coffee warm-up legacy alert send failed")
         return web.json_response({"ok": False, "sent": False, "error": "telegram_send_failed"}, status=502)
-    await app_state.mark_coffee_warmed_up_alert_sent()
+    await app_state.mark_coffee_warmed_up_alert_telegram_sent()
     LOGGER.info("Coffee warm-up legacy alert sent: message_id=%s", message.message_id)
     return web.json_response({"ok": True, "sent": True})
 
@@ -286,7 +286,7 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "sent": False, "not_due": True})
     if app_state.coffee_machine_state != "on":
         await app_state.mark_coffee_machine_on(str(switch_state.get("last_changed") or datetime.now(timezone.utc).isoformat()))
-    if app_state.coffee_long_running_alert_sent:
+    if app_state.coffee_long_running_alert_sent or app_state.coffee_long_running_alert_telegram_sent:
         LOGGER.info("Coffee long-running legacy alert skipped because it was already sent or inactive")
         return web.json_response({"ok": True, "sent": False, "already_sent": True})
 
@@ -300,7 +300,7 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     except Exception:
         LOGGER.exception("Coffee long-running legacy alert send failed")
         return web.json_response({"ok": False, "sent": False, "error": "telegram_send_failed"}, status=502)
-    await app_state.mark_coffee_long_running_alert_sent()
+    await app_state.mark_coffee_long_running_alert_telegram_sent()
     LOGGER.info("Coffee long-running legacy alert sent: message_id=%s", message.message_id)
     return web.json_response({"ok": True, "sent": True})
 

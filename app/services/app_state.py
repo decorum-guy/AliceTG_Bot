@@ -34,6 +34,22 @@ class AppStateStore:
     def coffee_long_running_alert_delay_seconds(self) -> int:
         return int(self._state.get("coffee_long_running_alert_delay_seconds", DEFAULT_COFFEE_LONG_RUNNING_ALERT_DELAY_SECONDS))
 
+    @property
+    def coffee_warmed_up_notify_telegram(self) -> bool:
+        return bool(self._state.get("coffee_warmed_up_notify_telegram", True))
+
+    @property
+    def coffee_warmed_up_notify_iphone(self) -> bool:
+        return bool(self._state.get("coffee_warmed_up_notify_iphone", True))
+
+    @property
+    def coffee_long_running_notify_telegram(self) -> bool:
+        return bool(self._state.get("coffee_long_running_notify_telegram", True))
+
+    @property
+    def coffee_long_running_notify_iphone(self) -> bool:
+        return bool(self._state.get("coffee_long_running_notify_iphone", True))
+
     async def set_coffee_warmed_up_alert_enabled(self, enabled: bool) -> None:
         async with self._lock:
             self._state["coffee_warmed_up_alert_enabled"] = enabled
@@ -54,6 +70,26 @@ class AppStateStore:
             self._state["coffee_long_running_alert_delay_seconds"] = delay_seconds
             await asyncio.to_thread(self._save)
 
+    async def set_coffee_warmed_up_notify_telegram(self, enabled: bool) -> None:
+        async with self._lock:
+            self._state["coffee_warmed_up_notify_telegram"] = enabled
+            await asyncio.to_thread(self._save)
+
+    async def set_coffee_warmed_up_notify_iphone(self, enabled: bool) -> None:
+        async with self._lock:
+            self._state["coffee_warmed_up_notify_iphone"] = enabled
+            await asyncio.to_thread(self._save)
+
+    async def set_coffee_long_running_notify_telegram(self, enabled: bool) -> None:
+        async with self._lock:
+            self._state["coffee_long_running_notify_telegram"] = enabled
+            await asyncio.to_thread(self._save)
+
+    async def set_coffee_long_running_notify_iphone(self, enabled: bool) -> None:
+        async with self._lock:
+            self._state["coffee_long_running_notify_iphone"] = enabled
+            await asyncio.to_thread(self._save)
+
     @property
     def coffee_machine_state(self) -> str:
         return str(self._state.get("coffee_machine_state") or "off")
@@ -71,12 +107,32 @@ class AppStateStore:
     def coffee_long_running_alert_sent(self) -> bool:
         return bool(self._state.get("coffee_long_running_alert_sent", False))
 
+    @property
+    def coffee_warmed_up_alert_telegram_sent(self) -> bool:
+        return bool(self._state.get("coffee_warmed_up_alert_telegram_sent", False))
+
+    @property
+    def coffee_warmed_up_alert_iphone_sent(self) -> bool:
+        return bool(self._state.get("coffee_warmed_up_alert_iphone_sent", False))
+
+    @property
+    def coffee_long_running_alert_telegram_sent(self) -> bool:
+        return bool(self._state.get("coffee_long_running_alert_telegram_sent", False))
+
+    @property
+    def coffee_long_running_alert_iphone_sent(self) -> bool:
+        return bool(self._state.get("coffee_long_running_alert_iphone_sent", False))
+
     async def mark_coffee_machine_on(self, on_since: str) -> None:
         async with self._lock:
             self._state["coffee_machine_state"] = "on"
             self._state["coffee_on_since"] = on_since
             self._state["coffee_warmed_up_alert_sent"] = False
             self._state["coffee_long_running_alert_sent"] = False
+            self._state["coffee_warmed_up_alert_telegram_sent"] = False
+            self._state["coffee_warmed_up_alert_iphone_sent"] = False
+            self._state["coffee_long_running_alert_telegram_sent"] = False
+            self._state["coffee_long_running_alert_iphone_sent"] = False
             await asyncio.to_thread(self._save)
 
     async def mark_coffee_machine_off(self) -> None:
@@ -85,6 +141,10 @@ class AppStateStore:
             self._state["coffee_on_since"] = None
             self._state["coffee_warmed_up_alert_sent"] = False
             self._state["coffee_long_running_alert_sent"] = False
+            self._state["coffee_warmed_up_alert_telegram_sent"] = False
+            self._state["coffee_warmed_up_alert_iphone_sent"] = False
+            self._state["coffee_long_running_alert_telegram_sent"] = False
+            self._state["coffee_long_running_alert_iphone_sent"] = False
             await asyncio.to_thread(self._save)
 
     async def mark_coffee_warmed_up_alert_sent(self) -> bool:
@@ -100,6 +160,38 @@ class AppStateStore:
             if self.coffee_machine_state != "on" or self.coffee_long_running_alert_sent:
                 return False
             self._state["coffee_long_running_alert_sent"] = True
+            await asyncio.to_thread(self._save)
+            return True
+
+    async def mark_coffee_warmed_up_alert_telegram_sent(self) -> bool:
+        async with self._lock:
+            if self.coffee_machine_state != "on" or self.coffee_warmed_up_alert_telegram_sent:
+                return False
+            self._state["coffee_warmed_up_alert_telegram_sent"] = True
+            await asyncio.to_thread(self._save)
+            return True
+
+    async def mark_coffee_warmed_up_alert_iphone_sent(self) -> bool:
+        async with self._lock:
+            if self.coffee_machine_state != "on" or self.coffee_warmed_up_alert_iphone_sent:
+                return False
+            self._state["coffee_warmed_up_alert_iphone_sent"] = True
+            await asyncio.to_thread(self._save)
+            return True
+
+    async def mark_coffee_long_running_alert_telegram_sent(self) -> bool:
+        async with self._lock:
+            if self.coffee_machine_state != "on" or self.coffee_long_running_alert_telegram_sent:
+                return False
+            self._state["coffee_long_running_alert_telegram_sent"] = True
+            await asyncio.to_thread(self._save)
+            return True
+
+    async def mark_coffee_long_running_alert_iphone_sent(self) -> bool:
+        async with self._lock:
+            if self.coffee_machine_state != "on" or self.coffee_long_running_alert_iphone_sent:
+                return False
+            self._state["coffee_long_running_alert_iphone_sent"] = True
             await asyncio.to_thread(self._save)
             return True
 

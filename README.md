@@ -79,6 +79,9 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 
 - Home Assistant only reports `switch.kofemashina` state changes to the bot: `on` and `off`.
 - The bot owns the warm-up and long-running timers. HA does not wait 13 minutes or 1 hour anymore.
+- Each coffee alert can be delivered through Telegram, iPhone push via Home Assistant, or both.
+- iPhone push uses `HA_MOBILE_NOTIFY_SERVICE` such as `notify.mobile_app_aaliv_iphone`.
+- Coffee alert channel settings and per-channel delivery flags are stored in `APP_STATE_PATH`.
 - Defaults: warm-up alert enabled after 13 minutes; long-running/overheat alert enabled after 60 minutes.
 - In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to configure each alert separately:
   enable/disable it and change its delay.
@@ -339,6 +342,7 @@ TELEGRAM_PROXY=login:pass@host:port
 # Home Assistant
 HA_URL=http://homeassistant:8123
 HA_LONG_LIVED_TOKEN=
+HA_MOBILE_NOTIFY_SERVICE=notify.mobile_app_aaliv_iphone
 YANDEX_DIALOG_SKILL_NAME=домашний помощник
 
 # Internal webhook security between Home Assistant and bot
@@ -367,6 +371,12 @@ container is recreated, not only restarted.
 
 `REMINDERS_STATE_PATH` stores persistent user reminders. Pending reminders are restored after a
 telegram-bot container restart; overdue reminders are sent after startup.
+
+`HA_MOBILE_NOTIFY_SERVICE` enables iPhone push notifications for coffee machine alerts through the
+Home Assistant Companion App. Find the service in Home Assistant under Developer Tools -> Actions,
+for example `notify.mobile_app_aaliv_iphone`. Coffee alert channels are configured in Telegram:
+`Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Перегрев` -> `Telegram` / `iPhone`.
+If `HA_MOBILE_NOTIFY_SERVICE` is empty, iPhone push is skipped and Telegram notifications keep working.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
 values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is

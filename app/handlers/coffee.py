@@ -98,8 +98,8 @@ async def show_coffee_alert_settings(
         return
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert),
-            reply_markup=coffee_alert_settings(alert=alert, enabled=_coffee_alert_enabled(app_state, alert)),
+            _coffee_alert_settings_text(app_state, alert, settings),
+            reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer()
 
@@ -124,8 +124,8 @@ async def toggle_coffee_alert(
     coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert),
-            reply_markup=coffee_alert_settings(alert=alert, enabled=enabled),
+            _coffee_alert_settings_text(app_state, alert, settings),
+            reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer("Включено" if enabled else "Выключено")
 
@@ -143,8 +143,39 @@ async def toggle_legacy_coffee_alert(
     coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, legacy_alert),
-            reply_markup=coffee_alert_settings(alert=legacy_alert, enabled=enabled),
+            _coffee_alert_settings_text(app_state, legacy_alert, settings),
+            reply_markup=_coffee_alert_settings_markup(app_state, legacy_alert),
+        )
+    await callback.answer("Включено" if enabled else "Выключено")
+
+
+@router.callback_query(F.data.startswith("coffee_alert_channel_toggle:"))
+async def toggle_coffee_alert_channel(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+    _, alert, channel = parts
+    if alert not in COFFEE_ALERTS or channel not in {"telegram", "iphone"}:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    enabled = not _coffee_alert_channel_enabled(app_state, alert, channel)
+    await _set_coffee_alert_channel_enabled(app_state, alert, channel, enabled)
+    coffee_alert_scheduler.reschedule_active_alerts()
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_alert_settings_text(app_state, alert, settings),
+            reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer("Включено" if enabled else "Выключено")
 
@@ -208,8 +239,8 @@ async def confirm_coffee_alert_time(
     _coffee_alert_time_drafts.pop(callback.from_user.id, None)
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert),
-            reply_markup=coffee_alert_settings(alert=alert, enabled=_coffee_alert_enabled(app_state, alert)),
+            _coffee_alert_settings_text(app_state, alert, settings),
+            reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer("Сохранено")
 
@@ -590,11 +621,22 @@ def _coffee_settings_text(app_state: AppStateStore) -> str:
     )
 
 
-def _coffee_alert_settings_text(app_state: AppStateStore, alert: str) -> str:
+def _coffee_alert_settings_text(app_state: AppStateStore, alert: str, settings: Settings) -> str:
     title = "Уведомление о разогреве" if alert == "warmed_up" else "Уведомление о долгой работе"
     state = "включено" if _coffee_alert_enabled(app_state, alert) else "выключено"
     delay = _format_delay(_coffee_alert_delay_seconds(app_state, alert))
-    return f"⚙️ <b>{title}</b>\n\nСостояние: <b>{state}</b>\nВремя: <b>{delay}</b>"
+    telegram_state = "включено" if _coffee_alert_channel_enabled(app_state, alert, "telegram") else "выключено"
+    iphone_state = "включено" if _coffee_alert_channel_enabled(app_state, alert, "iphone") else "выключено"
+    if _coffee_alert_channel_enabled(app_state, alert, "iphone") and not settings.ha_mobile_notify_service:
+        iphone_state = "включено, HA service не задан"
+    channels_warning = "\nКаналы: <b>отключены</b>" if not _coffee_alert_channel_enabled(app_state, alert, "telegram") and not _coffee_alert_channel_enabled(app_state, alert, "iphone") else ""
+    return (
+        f"⚙️ <b>{title}</b>\n\n"
+        f"Состояние: <b>{state}</b>\n"
+        f"Время: <b>{delay}</b>\n"
+        f"Каналы:\nTelegram: <b>{telegram_state}</b>\niPhone: <b>{iphone_state}</b>"
+        f"{channels_warning}"
+    )
 
 
 def _coffee_alert_time_prompt(alert: str) -> str:
@@ -608,6 +650,38 @@ def _coffee_alert_time_prompt(alert: str) -> str:
 
 def _coffee_alert_enabled(app_state: AppStateStore, alert: str) -> bool:
     return app_state.coffee_warmed_up_alert_enabled if alert == "warmed_up" else app_state.coffee_long_running_alert_enabled
+
+
+def _coffee_alert_settings_markup(app_state: AppStateStore, alert: str):
+    return coffee_alert_settings(
+        alert=alert,
+        enabled=_coffee_alert_enabled(app_state, alert),
+        telegram_enabled=_coffee_alert_channel_enabled(app_state, alert, "telegram"),
+        iphone_enabled=_coffee_alert_channel_enabled(app_state, alert, "iphone"),
+    )
+
+
+def _coffee_alert_channel_enabled(app_state: AppStateStore, alert: str, channel: str) -> bool:
+    if alert == "warmed_up" and channel == "telegram":
+        return app_state.coffee_warmed_up_notify_telegram
+    if alert == "warmed_up" and channel == "iphone":
+        return app_state.coffee_warmed_up_notify_iphone
+    if channel == "telegram":
+        return app_state.coffee_long_running_notify_telegram
+    return app_state.coffee_long_running_notify_iphone
+
+
+async def _set_coffee_alert_channel_enabled(app_state: AppStateStore, alert: str, channel: str, enabled: bool) -> None:
+    if alert == "warmed_up" and channel == "telegram":
+        await app_state.set_coffee_warmed_up_notify_telegram(enabled)
+        return
+    if alert == "warmed_up" and channel == "iphone":
+        await app_state.set_coffee_warmed_up_notify_iphone(enabled)
+        return
+    if channel == "telegram":
+        await app_state.set_coffee_long_running_notify_telegram(enabled)
+        return
+    await app_state.set_coffee_long_running_notify_iphone(enabled)
 
 
 async def _set_coffee_alert_enabled(app_state: AppStateStore, alert: str, enabled: bool) -> None:

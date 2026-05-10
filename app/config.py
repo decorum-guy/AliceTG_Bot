@@ -52,6 +52,7 @@ class Settings:
     telegram_proxy: str | None
     ha_url: str
     ha_long_lived_token: str
+    ha_mobile_notify_service: str
     internal_webhook_secret: str
     shortcuts_secret_token: str
     reminders_state_path: str = "/app/data/reminders.json"
@@ -93,6 +94,7 @@ class Settings:
             telegram_proxy=os.getenv("TELEGRAM_PROXY", ""),
             ha_url=os.getenv("HA_URL", "http://homeassistant:8123").rstrip("/"),
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
+            ha_mobile_notify_service=os.getenv("HA_MOBILE_NOTIFY_SERVICE", "").strip(),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
             shortcuts_secret_token=os.getenv("SHORTCUTS_SECRET_TOKEN", "").strip(),
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()

@@ -138,6 +138,7 @@ class ReminderStore:
 
     def _load(self) -> None:
         if not self._path.exists():
+            LOGGER.info("Reminder storage loaded: path=%s total=0 pending=0 missing=true", self._path)
             return
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
@@ -163,6 +164,13 @@ class ReminderStore:
                 voice_enabled=bool(settings.get("voice_enabled", True)),
                 voice_station_entity_id=str(settings.get("voice_station_entity_id") or DEFAULT_REMINDER_VOICE_STATION),
             )
+        pending_count = sum(1 for reminder in self._reminders.values() if reminder.status == "pending")
+        LOGGER.info(
+            "Reminder storage loaded: path=%s total=%s pending=%s",
+            self._path,
+            len(self._reminders),
+            pending_count,
+        )
 
     def _save(self) -> None:
         try:
@@ -174,6 +182,7 @@ class ReminderStore:
             }
             tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp_path.replace(self._path)
+            LOGGER.info("Reminder saved to storage: path=%s", self._path)
         except OSError:
             LOGGER.exception("Reminder storage save failed: path=%s", self._path)
             raise

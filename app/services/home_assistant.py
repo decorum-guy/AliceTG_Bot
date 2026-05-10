@@ -49,6 +49,13 @@ class HomeAssistantClient:
             payload=payload,
         )
 
+    async def notify(self, service_full_name: str, *, title: str, message: str) -> None:
+        service_full_name = service_full_name.strip()
+        if "." not in service_full_name:
+            raise HomeAssistantError("Home Assistant notify service must be in domain.service format")
+        domain, service = service_full_name.split(".", 1)
+        await self.call_service(domain, service, {"title": title, "message": message})
+
     async def switch_turn_on(self, entity_id: str) -> None:
         await self.call_service("switch", "turn_on", {"entity_id": entity_id})
 

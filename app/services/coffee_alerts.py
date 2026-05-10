@@ -8,6 +8,7 @@ from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
 from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 
 LOGGER = logging.getLogger(__name__)
@@ -15,10 +16,17 @@ COFFEE_ALERT_RETRY_DELAYS_SECONDS = (0, 30, 60, 180, 300)
 
 
 class CoffeeAlertScheduler:
-    def __init__(self, settings: Settings, app_state: AppStateStore, telegram_messages: TelegramMessages) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        app_state: AppStateStore,
+        telegram_messages: TelegramMessages,
+        ha: HomeAssistantClient,
+    ) -> None:
         self._settings = settings
         self._app_state = app_state
         self._telegram_messages = telegram_messages
+        self._ha = ha
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def restore(self) -> None:
@@ -52,9 +60,9 @@ class CoffeeAlertScheduler:
         self._schedule_active_alerts()
 
     def _schedule_active_alerts(self) -> None:
-        if self._app_state.coffee_warmed_up_alert_enabled and not self._app_state.coffee_warmed_up_alert_sent:
+        if self._app_state.coffee_warmed_up_alert_enabled and not self._is_alert_delivered("warmed_up"):
             self._schedule("warmed_up", self._app_state.coffee_warmed_up_alert_delay_seconds)
-        if self._app_state.coffee_long_running_alert_enabled and not self._app_state.coffee_long_running_alert_sent:
+        if self._app_state.coffee_long_running_alert_enabled and not self._is_alert_delivered("long_running"):
             self._schedule("long_running", self._app_state.coffee_long_running_alert_delay_seconds)
 
     def _schedule(self, alert: str, delay_seconds: int) -> None:
@@ -81,11 +89,12 @@ class CoffeeAlertScheduler:
             if self._app_state.coffee_machine_state != "on":
                 LOGGER.info("Coffee alert cancelled because coffee machine is off: alert=%s", alert)
                 return
-            if self._is_alert_sent(alert):
+            if self._is_alert_delivered(alert):
                 LOGGER.info("Coffee alert skipped because already sent or inactive: alert=%s", alert)
                 return
 
             text = self._alert_text(alert)
+            title, push_message = self._push_text(alert)
             for attempt, retry_delay in enumerate(COFFEE_ALERT_RETRY_DELAYS_SECONDS, start=1):
                 if retry_delay > 0:
                     LOGGER.info(
@@ -97,32 +106,55 @@ class CoffeeAlertScheduler:
                 if self._app_state.coffee_machine_state != "on":
                     LOGGER.info("Coffee alert cancelled because coffee machine is off: alert=%s", alert)
                     return
-                if self._is_alert_sent(alert):
+                if self._is_alert_delivered(alert):
                     LOGGER.info("Coffee alert skipped because already sent or inactive: alert=%s", alert)
                     return
 
-                LOGGER.info("Coffee alert send attempt: alert=%s attempt=%s", alert, attempt)
-                message_id = await self._telegram_messages.safe_send(
-                    self._settings.telegram_admin_chat_id,
-                    text,
-                    reply_markup=coffee_turn_off_only(),
-                )
-                if message_id is None:
-                    LOGGER.warning(
-                        "Coffee alert send failed: alert=%s attempt=%s reason=safe_send_returned_none",
-                        alert,
-                        attempt,
+                if self._telegram_channel_enabled(alert) and not self._telegram_channel_delivered(alert):
+                    LOGGER.info("Coffee alert send attempt: alert=%s channel=telegram attempt=%s", alert, attempt)
+                    message_id = await self._telegram_messages.safe_send(
+                        self._settings.telegram_admin_chat_id,
+                        text,
+                        reply_markup=coffee_turn_off_only(),
                     )
-                    continue
+                    if message_id is None:
+                        LOGGER.warning(
+                            "Coffee alert send failed: alert=%s channel=telegram attempt=%s reason=safe_send_returned_none",
+                            alert,
+                            attempt,
+                        )
+                    else:
+                        await self._mark_telegram_channel_delivered(alert)
+                        LOGGER.info(
+                            "Coffee alert sent: alert=%s channel=telegram message_id=%s",
+                            alert,
+                            message_id,
+                        )
 
-                if await self._mark_alert_sent(alert):
-                    LOGGER.info(
-                        "Coffee alert marked sent only after successful Telegram delivery: alert=%s message_id=%s",
-                        alert,
-                        message_id,
-                    )
-                LOGGER.info("Coffee alert sent: alert=%s message_id=%s", alert, message_id)
-                return
+                if self._iphone_channel_enabled(alert) and not self._iphone_channel_delivered(alert):
+                    if not self._settings.ha_mobile_notify_service:
+                        LOGGER.info("Coffee alert iPhone push skipped, HA_MOBILE_NOTIFY_SERVICE is not configured: alert=%s", alert)
+                    else:
+                        LOGGER.info("Coffee alert send attempt: alert=%s channel=iphone attempt=%s", alert, attempt)
+                        try:
+                            await self._ha.notify(
+                                self._settings.ha_mobile_notify_service,
+                                title=title,
+                                message=push_message,
+                            )
+                        except HomeAssistantError:
+                            LOGGER.exception("Coffee alert send failed: alert=%s channel=iphone attempt=%s", alert, attempt)
+                        else:
+                            await self._mark_iphone_channel_delivered(alert)
+                            LOGGER.info(
+                                "Coffee alert sent: alert=%s channel=iphone service=%s",
+                                alert,
+                                self._settings.ha_mobile_notify_service,
+                            )
+
+                if self._is_alert_delivered(alert):
+                    LOGGER.info("Coffee alert delivered through all enabled channels: alert=%s", alert)
+                    return
 
             LOGGER.error(
                 "Coffee alert remains pending after retry exhaustion: alert=%s attempts=%s",
@@ -145,20 +177,56 @@ class CoffeeAlertScheduler:
         if self._tasks.get(alert) is task:
             self._tasks.pop(alert, None)
 
-    def _is_alert_sent(self, alert: str) -> bool:
-        if alert == "warmed_up":
-            return self._app_state.coffee_warmed_up_alert_sent
-        return self._app_state.coffee_long_running_alert_sent
+    def _is_alert_delivered(self, alert: str) -> bool:
+        effective_channels = []
+        if self._telegram_channel_enabled(alert):
+            effective_channels.append(self._telegram_channel_delivered(alert))
+        if self._iphone_channel_enabled(alert) and self._settings.ha_mobile_notify_service:
+            effective_channels.append(self._iphone_channel_delivered(alert))
+        if not effective_channels:
+            LOGGER.info("Coffee alert has no effective delivery channels: alert=%s", alert)
+            return True
+        return all(effective_channels)
 
-    async def _mark_alert_sent(self, alert: str) -> bool:
+    def _telegram_channel_enabled(self, alert: str) -> bool:
         if alert == "warmed_up":
-            return await self._app_state.mark_coffee_warmed_up_alert_sent()
-        return await self._app_state.mark_coffee_long_running_alert_sent()
+            return self._app_state.coffee_warmed_up_notify_telegram
+        return self._app_state.coffee_long_running_notify_telegram
+
+    def _iphone_channel_enabled(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return self._app_state.coffee_warmed_up_notify_iphone
+        return self._app_state.coffee_long_running_notify_iphone
+
+    def _telegram_channel_delivered(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return self._app_state.coffee_warmed_up_alert_sent or self._app_state.coffee_warmed_up_alert_telegram_sent
+        return self._app_state.coffee_long_running_alert_sent or self._app_state.coffee_long_running_alert_telegram_sent
+
+    def _iphone_channel_delivered(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return self._app_state.coffee_warmed_up_alert_sent or self._app_state.coffee_warmed_up_alert_iphone_sent
+        return self._app_state.coffee_long_running_alert_sent or self._app_state.coffee_long_running_alert_iphone_sent
+
+    async def _mark_telegram_channel_delivered(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return await self._app_state.mark_coffee_warmed_up_alert_telegram_sent()
+        return await self._app_state.mark_coffee_long_running_alert_telegram_sent()
+
+    async def _mark_iphone_channel_delivered(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return await self._app_state.mark_coffee_warmed_up_alert_iphone_sent()
+        return await self._app_state.mark_coffee_long_running_alert_iphone_sent()
 
     def _alert_text(self, alert: str) -> str:
         if alert == "warmed_up":
             return coffee_messages.coffee_warmed_up()
         return coffee_messages.coffee_warning_long_running_text(_runtime_text(self._app_state.coffee_on_since))
+
+    def _push_text(self, alert: str) -> tuple[str, str]:
+        if alert == "warmed_up":
+            return "Кофемашина", "Кофемашина разогрета"
+        return "Кофемашина", "Кофемашина работает слишком долго"
 
 
 def _normalize_datetime(value: str | None) -> str | None:
