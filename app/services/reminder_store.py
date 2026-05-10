@@ -38,6 +38,8 @@ class ReminderRecord:
 class ReminderSettings:
     voice_enabled: bool = True
     voice_station_entity_id: str = DEFAULT_REMINDER_VOICE_STATION
+    notify_telegram_enabled: bool = True
+    notify_iphone_enabled: bool = False
 
 
 class ReminderStore:
@@ -112,6 +114,8 @@ class ReminderStore:
             return ReminderSettings(
                 voice_enabled=self._settings.voice_enabled,
                 voice_station_entity_id=self._settings.voice_station_entity_id,
+                notify_telegram_enabled=self._settings.notify_telegram_enabled,
+                notify_iphone_enabled=self._settings.notify_iphone_enabled,
             )
 
     async def update_settings(
@@ -119,21 +123,31 @@ class ReminderStore:
         *,
         voice_enabled: bool | None = None,
         voice_station_entity_id: str | None = None,
+        notify_telegram_enabled: bool | None = None,
+        notify_iphone_enabled: bool | None = None,
     ) -> ReminderSettings:
         async with self._lock:
             if voice_enabled is not None:
                 self._settings.voice_enabled = voice_enabled
             if voice_station_entity_id is not None:
                 self._settings.voice_station_entity_id = voice_station_entity_id
+            if notify_telegram_enabled is not None:
+                self._settings.notify_telegram_enabled = notify_telegram_enabled
+            if notify_iphone_enabled is not None:
+                self._settings.notify_iphone_enabled = notify_iphone_enabled
             await asyncio.to_thread(self._save)
             LOGGER.info(
-                "Reminder voice settings updated: voice_enabled=%s voice_station_entity_id=%s",
+                "Reminder voice settings updated: voice_enabled=%s voice_station_entity_id=%s notify_telegram_enabled=%s notify_iphone_enabled=%s",
                 self._settings.voice_enabled,
                 self._settings.voice_station_entity_id,
+                self._settings.notify_telegram_enabled,
+                self._settings.notify_iphone_enabled,
             )
             return ReminderSettings(
                 voice_enabled=self._settings.voice_enabled,
                 voice_station_entity_id=self._settings.voice_station_entity_id,
+                notify_telegram_enabled=self._settings.notify_telegram_enabled,
+                notify_iphone_enabled=self._settings.notify_iphone_enabled,
             )
 
     def _load(self) -> None:
@@ -163,6 +177,8 @@ class ReminderStore:
             self._settings = ReminderSettings(
                 voice_enabled=bool(settings.get("voice_enabled", True)),
                 voice_station_entity_id=str(settings.get("voice_station_entity_id") or DEFAULT_REMINDER_VOICE_STATION),
+                notify_telegram_enabled=bool(settings.get("notify_telegram_enabled", True)),
+                notify_iphone_enabled=bool(settings.get("notify_iphone_enabled", False)),
             )
         pending_count = sum(1 for reminder in self._reminders.values() if reminder.status == "pending")
         LOGGER.info(

@@ -74,15 +74,20 @@ def reminder_cancelled() -> str:
 def reminder_settings(settings: ReminderSettings) -> str:
     voice_status = "включено" if settings.voice_enabled else "выключено"
     station_label = _station_label(settings.voice_station_entity_id)
+    telegram_status = "включено" if settings.notify_telegram_enabled else "выключено"
+    iphone_status = "включено" if settings.notify_iphone_enabled else "выключено"
+    details = [
+        ("Озвучивание", voice_status, False),
+        ("Колонка", station_label, False),
+        ("Telegram", telegram_status, False),
+        ("iPhone", iphone_status, False),
+    ]
+    if not settings.notify_telegram_enabled and not settings.notify_iphone_enabled:
+        details.append(("Каналы уведомлений", "отключены", False))
     return render_message(
         MessageStyle(MessageKind.MENU, "settings", "Настройки напоминаний"),
-        details=[
-            ("Озвучивание", voice_status, False),
-            ("Колонка", station_label, False),
-        ],
+        details=details,
     )
-
-
 def _station_label(entity_id: str) -> str:
     labels = {
         "media_player.stantsiia_mini_zal": "Зал",

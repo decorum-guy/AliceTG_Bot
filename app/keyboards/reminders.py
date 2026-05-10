@@ -35,12 +35,16 @@ def reminders_list_menu(reminders: list[ReminderRecord]) -> InlineKeyboardMarkup
 
 
 def reminders_settings_menu(settings: ReminderSettings) -> InlineKeyboardMarkup:
+    telegram_text = "Telegram: вкл" if settings.notify_telegram_enabled else "Telegram: выкл"
+    iphone_text = "iPhone: вкл" if settings.notify_iphone_enabled else "iPhone: выкл"
     toggle_text = "Выключить озвучивание" if settings.voice_enabled else "Включить озвучивание"
     station_text = "Колонка: Зал" if settings.voice_station_entity_id == "media_player.stantsiia_mini_zal" else "Колонка: Спальня"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [inline_button(text=toggle_text, callback_data="reminders:voice:toggle")],
             [inline_button(text=station_text, callback_data="reminders:voice_station:toggle")],
+            [inline_button(text=telegram_text, callback_data="reminders:notify:telegram")],
+            [inline_button(text=iphone_text, callback_data="reminders:notify:iphone")],
             [inline_button(text="⬅️ Назад", callback_data="reminders:menu", style=BUTTON_PRIMARY)],
         ]
     )

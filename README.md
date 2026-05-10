@@ -376,6 +376,8 @@ telegram-bot container restart; overdue reminders are sent after startup.
 Home Assistant Companion App. Find the service in Home Assistant under Developer Tools -> Actions,
 for example `notify.mobile_app_aaliv_iphone`. Coffee alert channels are configured in Telegram:
 `Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Перегрев` -> `Telegram` / `iPhone`.
+Reminder notification channels are configured in Telegram: `Напоминания` -> `Настройки` -> `Telegram` / `iPhone`.
+Coffee push title is `Кофемашина`; reminder push title is `Напоминание`, and the push body is only the reminder text.
 If `HA_MOBILE_NOTIFY_SERVICE` is empty, iPhone push is skipped and Telegram notifications keep working.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`

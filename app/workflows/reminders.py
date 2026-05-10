@@ -5,10 +5,12 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from app.config import Settings
 from app.keyboards.coffee import delete_only
 from app.messages import reminders as reminder_messages
 from app.services.reminder_parser import ParsedReminder, parse_delay_only, parse_reminder_request
 from app.services.reminder_store import ReminderRecord, ReminderSettings, ReminderSource, ReminderStore
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
 
 LOGGER = logging.getLogger(__name__)
@@ -26,10 +28,19 @@ class ReminderDraft:
 
 
 class ReminderWorkflow:
-    def __init__(self, store: ReminderStore, telegram_messages: TelegramMessages, admin_chat_id: int) -> None:
+    def __init__(
+        self,
+        store: ReminderStore,
+        telegram_messages: TelegramMessages,
+        admin_chat_id: int,
+        settings: Settings,
+        ha: HomeAssistantClient,
+    ) -> None:
         self._store = store
         self._telegram_messages = telegram_messages
         self._admin_chat_id = admin_chat_id
+        self._settings = settings
+        self._ha = ha
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._drafts: dict[int, ReminderDraft] = {}
 
@@ -113,6 +124,14 @@ class ReminderWorkflow:
         )
         return await self._store.update_settings(voice_station_entity_id=next_entity_id)
 
+    async def toggle_notification_channel(self, channel: str) -> ReminderSettings | None:
+        settings = await self._store.get_settings()
+        if channel == "telegram":
+            return await self._store.update_settings(notify_telegram_enabled=not settings.notify_telegram_enabled)
+        if channel == "iphone":
+            return await self._store.update_settings(notify_iphone_enabled=not settings.notify_iphone_enabled)
+        return None
+
     @staticmethod
     def station_label(entity_id: str) -> str:
         for label, station_entity_id in REMINDER_VOICE_STATIONS.values():
@@ -175,19 +194,55 @@ class ReminderWorkflow:
             if reminder is None or reminder.status != "pending":
                 return
             LOGGER.info("Reminder fired: id=%s source=%s", reminder.id, reminder.source)
-            message_id = await self._telegram_messages.safe_send(
-                reminder.chat_id or self._admin_chat_id,
-                reminder_messages.reminder_notification(reminder.text),
-                reply_markup=delete_only(),
-            )
-            if message_id is None:
-                LOGGER.error("Reminder send Telegram failed: id=%s chat_id=%s", reminder.id, reminder.chat_id or self._admin_chat_id)
+            settings = await self._store.get_settings()
+            delivered = False
+            attempted = False
+
+            if settings.notify_telegram_enabled:
+                attempted = True
+                message_id = await self._telegram_messages.safe_send(
+                    reminder.chat_id or self._admin_chat_id,
+                    reminder_messages.reminder_notification(reminder.text),
+                    reply_markup=delete_only(),
+                )
+                if message_id is None:
+                    LOGGER.error("Reminder send Telegram failed: id=%s chat_id=%s", reminder.id, reminder.chat_id or self._admin_chat_id)
+                else:
+                    delivered = True
+                    LOGGER.info("Reminder sent to Telegram: id=%s chat_id=%s", reminder.id, reminder.chat_id or self._admin_chat_id)
+
+            if settings.notify_iphone_enabled:
+                attempted = True
+                if not self._settings.ha_mobile_notify_service:
+                    LOGGER.info("Reminder mobile push skipped, HA_MOBILE_NOTIFY_SERVICE is not configured: id=%s", reminder.id)
+                else:
+                    try:
+                        await self._ha.notify(
+                            self._settings.ha_mobile_notify_service,
+                            title="Напоминание",
+                            message=reminder.text,
+                        )
+                    except HomeAssistantError as exc:
+                        LOGGER.exception("Reminder mobile push failed id=%s reason=%r", reminder.id, exc)
+                    else:
+                        delivered = True
+                        LOGGER.info(
+                            "Reminder mobile push sent: id=%s service=%s",
+                            reminder.id,
+                            self._settings.ha_mobile_notify_service,
+                        )
+
+            if not attempted:
+                LOGGER.warning("Reminder fired but all notification channels are disabled: id=%s", reminder.id)
+                await self._store.mark_fired(reminder.id)
                 return
-            LOGGER.info("Reminder sent to Telegram: id=%s chat_id=%s", reminder.id, reminder.chat_id or self._admin_chat_id)
-            await self._store.mark_fired(reminder.id)
+            if delivered:
+                await self._store.mark_fired(reminder.id)
+                return
+            LOGGER.error("Reminder delivery failed through all enabled channels: id=%s", reminder.id)
         except asyncio.CancelledError:
             raise
         except Exception:
-            LOGGER.exception("Reminder send Telegram failed: id=%s", reminder_id)
+            LOGGER.exception("Reminder delivery failed: id=%s", reminder_id)
         finally:
             self._tasks.pop(reminder_id, None)

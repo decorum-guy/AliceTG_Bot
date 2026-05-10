@@ -106,6 +106,30 @@ async def reminders_voice_station(callback: CallbackQuery, settings: Settings, r
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("reminders:notify:"))
+async def reminders_notify_channel(callback: CallbackQuery, settings: Settings, reminder_workflow: ReminderWorkflow) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    channel = (callback.data or "").rsplit(":", 1)[-1]
+    if channel == "iphone":
+        current_settings = await reminder_workflow.get_settings()
+        if not current_settings.notify_iphone_enabled and not settings.ha_mobile_notify_service:
+            await callback.answer("iPhone-уведомления не настроены. Укажи HA_MOBILE_NOTIFY_SERVICE.", show_alert=True)
+            return
+    reminder_settings = await reminder_workflow.toggle_notification_channel(channel)
+    if reminder_settings is None:
+        await callback.answer("Неизвестный канал", show_alert=True)
+        return
+    if callback.message:
+        await _safe_edit_reminder_message(
+            callback.message,
+            reminder_messages.reminder_settings(reminder_settings),
+            reminders_settings_menu(reminder_settings),
+        )
+    await callback.answer("Включено" if _reminder_channel_enabled(reminder_settings, channel) else "Выключено")
+
+
 @router.callback_query(F.data.startswith("reminders:cancel:"))
 async def reminders_cancel(callback: CallbackQuery, settings: Settings, reminder_workflow: ReminderWorkflow) -> None:
     if not settings.is_admin_user(callback.from_user.id):
@@ -173,3 +197,11 @@ async def _safe_edit_reminder_message(
             return
         LOGGER.exception("Cannot edit reminder message: message_id=%s", message.message_id)
         raise
+
+
+def _reminder_channel_enabled(settings, channel: str) -> bool:
+    if channel == "telegram":
+        return settings.notify_telegram_enabled
+    if channel == "iphone":
+        return settings.notify_iphone_enabled
+    return False

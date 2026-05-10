@@ -142,8 +142,8 @@ class CoffeeAlertScheduler:
                                 title=title,
                                 message=push_message,
                             )
-                        except HomeAssistantError:
-                            LOGGER.exception("Coffee alert send failed: alert=%s channel=iphone attempt=%s", alert, attempt)
+                        except HomeAssistantError as exc:
+                            LOGGER.exception("Coffee mobile push failed alert=%s attempt=%s reason=%r", alert, attempt, exc)
                         else:
                             await self._mark_iphone_channel_delivered(alert)
                             LOGGER.info(
