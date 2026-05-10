@@ -11,6 +11,7 @@ from app.services.app_state import AppStateStore
 from app.services.telegram_messages import TelegramMessages
 
 LOGGER = logging.getLogger(__name__)
+COFFEE_ALERT_RETRY_DELAYS_SECONDS = (0, 30, 60, 180, 300)
 
 
 class CoffeeAlertScheduler:
@@ -38,7 +39,7 @@ class CoffeeAlertScheduler:
             return
         if normalized == "off":
             LOGGER.info("Coffee machine state received: state=off")
-            self._cancel_tasks()
+            self._cancel_tasks(reason="coffee_machine_off")
             await self._app_state.mark_coffee_machine_off()
             return
         raise ValueError(f"Unsupported coffee machine state: {state}")
@@ -78,36 +79,86 @@ class CoffeeAlertScheduler:
             if sleep_seconds > 0:
                 await asyncio.sleep(sleep_seconds)
             if self._app_state.coffee_machine_state != "on":
-                LOGGER.info("Coffee alert skipped because coffee machine is off: alert=%s", alert)
+                LOGGER.info("Coffee alert cancelled because coffee machine is off: alert=%s", alert)
                 return
-            if alert == "warmed_up":
-                should_send = await self._app_state.mark_coffee_warmed_up_alert_sent()
-                text = coffee_messages.coffee_warmed_up()
-            else:
-                should_send = await self._app_state.mark_coffee_long_running_alert_sent()
-                text = coffee_messages.coffee_warning_long_running_text(_runtime_text(self._app_state.coffee_on_since))
-            if not should_send:
+            if self._is_alert_sent(alert):
                 LOGGER.info("Coffee alert skipped because already sent or inactive: alert=%s", alert)
                 return
-            await self._telegram_messages.safe_send(
-                self._settings.telegram_admin_chat_id,
-                text,
-                reply_markup=coffee_turn_off_only(),
+
+            text = self._alert_text(alert)
+            for attempt, retry_delay in enumerate(COFFEE_ALERT_RETRY_DELAYS_SECONDS, start=1):
+                if retry_delay > 0:
+                    LOGGER.info(
+                        "Coffee alert retry scheduled: alert=%s retry_in_seconds=%s",
+                        alert,
+                        retry_delay,
+                    )
+                    await asyncio.sleep(retry_delay)
+                if self._app_state.coffee_machine_state != "on":
+                    LOGGER.info("Coffee alert cancelled because coffee machine is off: alert=%s", alert)
+                    return
+                if self._is_alert_sent(alert):
+                    LOGGER.info("Coffee alert skipped because already sent or inactive: alert=%s", alert)
+                    return
+
+                LOGGER.info("Coffee alert send attempt: alert=%s attempt=%s", alert, attempt)
+                message_id = await self._telegram_messages.safe_send(
+                    self._settings.telegram_admin_chat_id,
+                    text,
+                    reply_markup=coffee_turn_off_only(),
+                )
+                if message_id is None:
+                    LOGGER.warning(
+                        "Coffee alert send failed: alert=%s attempt=%s reason=safe_send_returned_none",
+                        alert,
+                        attempt,
+                    )
+                    continue
+
+                if await self._mark_alert_sent(alert):
+                    LOGGER.info(
+                        "Coffee alert marked sent only after successful Telegram delivery: alert=%s message_id=%s",
+                        alert,
+                        message_id,
+                    )
+                LOGGER.info("Coffee alert sent: alert=%s message_id=%s", alert, message_id)
+                return
+
+            LOGGER.error(
+                "Coffee alert remains pending after retry exhaustion: alert=%s attempts=%s",
+                alert,
+                len(COFFEE_ALERT_RETRY_DELAYS_SECONDS),
             )
-            LOGGER.info("Coffee alert sent: alert=%s", alert)
         except asyncio.CancelledError:
             raise
         except Exception:
             LOGGER.exception("Coffee alert task failed: alert=%s", alert)
 
-    def _cancel_tasks(self) -> None:
-        for task in self._tasks.values():
+    def _cancel_tasks(self, *, reason: str = "reschedule") -> None:
+        for alert, task in self._tasks.items():
+            if reason == "coffee_machine_off":
+                LOGGER.info("Coffee alert cancelled because coffee machine is off: alert=%s", alert)
             task.cancel()
         self._tasks.clear()
 
     def _drop_task(self, alert: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(alert) is task:
             self._tasks.pop(alert, None)
+
+    def _is_alert_sent(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return self._app_state.coffee_warmed_up_alert_sent
+        return self._app_state.coffee_long_running_alert_sent
+
+    async def _mark_alert_sent(self, alert: str) -> bool:
+        if alert == "warmed_up":
+            return await self._app_state.mark_coffee_warmed_up_alert_sent()
+        return await self._app_state.mark_coffee_long_running_alert_sent()
+
+    def _alert_text(self, alert: str) -> str:
+        if alert == "warmed_up":
+            return coffee_messages.coffee_warmed_up()
+        return coffee_messages.coffee_warning_long_running_text(_runtime_text(self._app_state.coffee_on_since))
 
 
 def _normalize_datetime(value: str | None) -> str | None:
