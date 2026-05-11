@@ -44,6 +44,15 @@ class CoffeeAlertScheduler:
     async def handle_state(self, state: str, *, changed_at: str | None = None) -> None:
         normalized = state.strip().lower()
         if normalized == "on":
+            if self._app_state.coffee_machine_state == "on" and self._app_state.coffee_on_since:
+                LOGGER.info(
+                    "Coffee machine duplicate state=on ignored: existing_on_since=%s changed_at=%s",
+                    self._app_state.coffee_on_since,
+                    changed_at,
+                )
+                if self._pushward_activity:
+                    await self._pushward_activity.start_or_restore()
+                return
             on_since = _normalize_datetime(changed_at) or datetime.now(timezone.utc).isoformat()
             await self._app_state.mark_coffee_machine_on(on_since)
             LOGGER.info("Coffee machine state received: state=on on_since=%s", on_since)
@@ -159,6 +168,7 @@ class CoffeeAlertScheduler:
                                 title=title,
                                 message=push_message,
                                 data={
+                                    "tag": "coffee_machine_alert",
                                     "actions": [
                                         {
                                             "action": "COFFEE_TURN_OFF",

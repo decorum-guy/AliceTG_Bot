@@ -11,7 +11,7 @@ from app.services.home_assistant import HomeAssistantClient
 
 LOGGER = logging.getLogger(__name__)
 WARMUP_UPDATE_INTERVAL_SECONDS = 30
-READY_UPDATE_INTERVAL_SECONDS = 5 * 60
+MINUTES_ONLY_UPDATE_INTERVAL_SECONDS = 60
 NEAR_LONG_RUNNING_SECONDS = 5 * 60
 WARMUP_COLOR_STEPS: tuple[tuple[float, str], ...] = (
     (0.40, "#0A84FF"),
@@ -40,8 +40,16 @@ class PushWardCoffeeActivity:
     def enabled(self) -> bool:
         return self._settings.pushward_coffee_activity_enabled
 
+    @property
+    def is_running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
     async def start_or_restore(self) -> None:
         if not self.enabled:
+            return
+        if self.is_running:
+            await self._update_from_state()
+            LOGGER.info("PushWard coffee activity refreshed: slug=%s", self._slug)
             return
         self.cancel_updates()
         await self._create_activity()
@@ -83,27 +91,41 @@ class PushWardCoffeeActivity:
 
     async def _update_from_state(self) -> int:
         if self._app_state.coffee_machine_state != "on":
-            return READY_UPDATE_INTERVAL_SECONDS
+            return self._regular_update_interval()
 
         elapsed_seconds = _elapsed_seconds(self._app_state.coffee_on_since)
         warmup_delay = max(1, self._app_state.coffee_warmed_up_alert_delay_seconds)
         long_delay = max(warmup_delay, self._app_state.coffee_long_running_alert_delay_seconds)
+        next_sleep = self._next_update_sleep(elapsed_seconds, warmup_delay, long_delay)
 
         if elapsed_seconds < warmup_delay:
             await self._update_warming_up(elapsed_seconds, warmup_delay)
-            return WARMUP_UPDATE_INTERVAL_SECONDS
+            return next_sleep
         if elapsed_seconds >= long_delay:
             await self._update_long_running()
-            return READY_UPDATE_INTERVAL_SECONDS
+            return next_sleep
 
         post_warmup_ratio = _post_warmup_ratio(elapsed_seconds, warmup_delay, long_delay)
         accent_color = _post_warmup_accent_color(post_warmup_ratio)
         if post_warmup_ratio >= 0.55 or long_delay - elapsed_seconds <= NEAR_LONG_RUNNING_SECONDS:
             await self._update_near_long_running(elapsed_seconds, accent_color=accent_color)
-            return WARMUP_UPDATE_INTERVAL_SECONDS
+            return next_sleep
 
         await self._update_ready(accent_color=accent_color)
-        return READY_UPDATE_INTERVAL_SECONDS
+        return next_sleep
+
+    def _regular_update_interval(self) -> int:
+        if self._app_state.coffee_pushward_show_seconds:
+            return WARMUP_UPDATE_INTERVAL_SECONDS
+        return MINUTES_ONLY_UPDATE_INTERVAL_SECONDS
+
+    def _next_update_sleep(self, elapsed_seconds: int, warmup_delay: int, long_delay: int) -> int:
+        candidates = [self._regular_update_interval()]
+        if elapsed_seconds < warmup_delay:
+            candidates.append(max(1, warmup_delay - elapsed_seconds))
+        if elapsed_seconds < long_delay:
+            candidates.append(max(1, long_delay - elapsed_seconds))
+        return max(1, min(candidates))
 
     async def _create_activity(self) -> None:
         await self._call(
@@ -178,6 +200,13 @@ class PushWardCoffeeActivity:
         accent_color: str,
         state: str,
     ) -> None:
+        LOGGER.info(
+            "PushWard coffee activity update: phase=%s elapsed_seconds=%s progress=%s color=%s",
+            state,
+            _elapsed_seconds(self._app_state.coffee_on_since),
+            round(max(0.0, min(1.0, progress)), 3),
+            accent_color,
+        )
         await self._call(
             "update_activity",
             {
@@ -201,6 +230,7 @@ class PushWardCoffeeActivity:
                 "completion_message": "Кофемашина выключена",
             },
         )
+        LOGGER.info("PushWard coffee activity ended: slug=%s", self._slug)
 
     async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> None:
         try:

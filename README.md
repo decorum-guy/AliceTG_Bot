@@ -397,6 +397,9 @@ for example `notify.mobile_app_aaliv_iphone`. Coffee alert channels are configur
 `Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Перегрев` -> `Telegram` / `iPhone`.
 Reminder notification channels are configured in Telegram: `Напоминания` -> `Настройки` -> `Telegram` / `iPhone`.
 Coffee push title is `Кофемашина`; reminder push title is `Напоминание`, and the push body is only the reminder text.
+Coffee iPhone alert pushes use tag `coffee_machine_alert` and include the `COFFEE_TURN_OFF`
+action. The HA automation for that action sends a separate short `Кофемашина выключена`
+notification with tag `coffee_machine_status_done`; normal Telegram/Siri/HA turn-off paths do not send it.
 If `HA_MOBILE_NOTIFY_SERVICE` is empty, iPhone push is skipped and Telegram notifications keep working.
 
 `PUSHWARD_COFFEE_ACTIVITY_ENABLED` controls the optional PushWard Live Activity for the coffee machine.
@@ -1379,7 +1382,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
 
 - id: iphone_coffee_notification_turn_off
   alias: "iPhone уведомление - выключить кофемашину"
-  mode: single
+  mode: restart
   trigger:
     - platform: event
       event_type: mobile_app_notification_action
@@ -1389,6 +1392,28 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
     - service: switch.turn_off
       target:
         entity_id: switch.kofemashina
+
+    - service: notify.mobile_app_aaliv_iphone
+      data:
+        message: "clear_notification"
+        data:
+          tag: "coffee_machine_alert"
+
+    - service: notify.mobile_app_aaliv_iphone
+      data:
+        title: "Кофемашина"
+        message: "Кофемашина выключена"
+        data:
+          tag: "coffee_machine_status_done"
+
+    - delay:
+        seconds: 4
+
+    - service: notify.mobile_app_aaliv_iphone
+      data:
+        message: "clear_notification"
+        data:
+          tag: "coffee_machine_status_done"
 
 - id: admin_talk_answer
   alias: "Telegram bot - ответ в режиме разговора"
