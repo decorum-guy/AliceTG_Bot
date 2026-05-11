@@ -362,6 +362,8 @@ HA_MOBILE_NOTIFY_SERVICE=notify.mobile_app_aaliv_iphone
 PUSHWARD_COFFEE_ACTIVITY_ENABLED=false
 PUSHWARD_COFFEE_ACTIVITY_SLUG=ha-coffee-machine
 PUSHWARD_ERROR_LOG_PATH=/app/data/pushward_errors.log
+PUSHWARD_COFFEE_ENDED_TTL_SECONDS=3
+PUSHWARD_COFFEE_OFF_HOLD_SECONDS=5
 YANDEX_DIALOG_SKILL_NAME=домашний помощник
 
 # Internal webhook security between Home Assistant and bot
@@ -409,6 +411,22 @@ and `pushward.end_activity` in Developer Tools -> Actions, then set
 `PUSHWARD_COFFEE_ACTIVITY_ENABLED=true`. The activity uses `PUSHWARD_COFFEE_ACTIVITY_SLUG`
 (`ha-coffee-machine` by default). PushWard service errors are written to
 `PUSHWARD_ERROR_LOG_PATH` and are intentionally not shown to Telegram or iPhone users.
+Coffee PushWard activities are created with `PUSHWARD_COFFEE_ENDED_TTL_SECONDS` (`3` by default).
+On coffee machine `off`, the bot first updates Live Activity to `Кофемашина выключена`, holds it for
+`PUSHWARD_COFFEE_OFF_HOLD_SECONDS` (`5` by default), then calls `pushward.end_activity`. A delayed
+`delete_activity` is only best-effort cleanup, not the main completion path.
+
+PushWard off cleanup timing can be tested without switching the real coffee machine:
+
+```bash
+python scripts/test_pushward_coffee_off_cleanup.py --hold-seconds 5 --ended-ttl 3
+python scripts/test_pushward_coffee_off_cleanup.py --hold-seconds 4 --ended-ttl 3
+python scripts/test_pushward_coffee_off_cleanup.py --hold-seconds 5 --ended-ttl 2
+```
+
+The script reads `HA_URL` and `HA_LONG_LIVED_TOKEN` from env, creates a test activity, shows
+`Кофемашина разогрета`, switches it to `Кофемашина выключена`, waits `hold_seconds`, then calls
+`end_activity`. Add `--cleanup` to send a best-effort `delete_activity` after the end.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
 values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is

@@ -60,6 +60,8 @@ class Settings:
     pushward_coffee_activity_enabled: bool = False
     pushward_coffee_activity_slug: str = "ha-coffee-machine"
     pushward_error_log_path: str = "/app/data/pushward_errors.log"
+    pushward_coffee_ended_ttl_seconds: int = 3
+    pushward_coffee_off_hold_seconds: int = 5
     webhook_path: str = "/webhook"
     listen_host: str = "0.0.0.0"
     listen_port: int = 8088
@@ -108,6 +110,8 @@ class Settings:
             or "ha-coffee-machine",
             pushward_error_log_path=os.getenv("PUSHWARD_ERROR_LOG_PATH", "/app/data/pushward_errors.log").strip()
             or "/app/data/pushward_errors.log",
+            pushward_coffee_ended_ttl_seconds=max(1, int(os.getenv("PUSHWARD_COFFEE_ENDED_TTL_SECONDS", "3"))),
+            pushward_coffee_off_hold_seconds=max(0, int(os.getenv("PUSHWARD_COFFEE_OFF_HOLD_SECONDS", "5"))),
             yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
             or "домашний помощник",
         )

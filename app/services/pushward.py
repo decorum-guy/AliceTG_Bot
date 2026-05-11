@@ -35,6 +35,9 @@ class PushWardCoffeeActivity:
         self._slug = settings.pushward_coffee_activity_slug
         self._error_log_path = Path(settings.pushward_error_log_path)
         self._task: asyncio.Task[None] | None = None
+        self._off_cleanup_task: asyncio.Task[None] | None = None
+        self._delete_cleanup_task: asyncio.Task[None] | None = None
+        self._activity_active = False
 
     @property
     def enabled(self) -> bool:
@@ -47,6 +50,9 @@ class PushWardCoffeeActivity:
     async def start_or_restore(self) -> None:
         if not self.enabled:
             return
+        self._cancel_off_cleanup()
+        self._cancel_delete_cleanup()
+        self._activity_active = True
         if self.is_running:
             await self._update_from_state()
             LOGGER.info("PushWard coffee activity refreshed: slug=%s", self._slug)
@@ -60,11 +66,22 @@ class PushWardCoffeeActivity:
     async def stop(self) -> None:
         if not self.enabled:
             return
+        if self._off_cleanup_task and not self._off_cleanup_task.done():
+            LOGGER.info("PushWard coffee activity off cleanup already running: slug=%s", self._slug)
+            return
+        if not self._activity_active:
+            LOGGER.info("PushWard coffee activity already ended, ignoring stop: slug=%s", self._slug)
+            return
         self.cancel_updates()
+        self._off_cleanup_task = asyncio.create_task(self._run_off_cleanup())
+        await self._off_cleanup_task
+
+    async def _run_off_cleanup(self) -> None:
         await self._update_off()
-        await asyncio.sleep(2)
+        await asyncio.sleep(self._settings.pushward_coffee_off_hold_seconds)
         await self._end_activity()
-        asyncio.create_task(self._delete_activity_later())
+        self._activity_active = False
+        self._delete_cleanup_task = asyncio.create_task(self._delete_activity_later())
 
     def cancel_updates(self) -> None:
         if self._task and not self._task.done():
@@ -81,6 +98,18 @@ class PushWardCoffeeActivity:
 
     async def close(self) -> None:
         self.cancel_updates()
+        self._cancel_off_cleanup()
+        self._cancel_delete_cleanup()
+
+    def _cancel_off_cleanup(self) -> None:
+        if self._off_cleanup_task and not self._off_cleanup_task.done():
+            self._off_cleanup_task.cancel()
+        self._off_cleanup_task = None
+
+    def _cancel_delete_cleanup(self) -> None:
+        if self._delete_cleanup_task and not self._delete_cleanup_task.done():
+            self._delete_cleanup_task.cancel()
+        self._delete_cleanup_task = None
 
     async def _run_updates(self) -> None:
         try:
@@ -138,7 +167,7 @@ class PushWardCoffeeActivity:
                 "name": "Кофемашина",
                 "priority": 5,
                 "stale_ttl": 300,
-                "ended_ttl": 60,
+                "ended_ttl": self._settings.pushward_coffee_ended_ttl_seconds,
             },
         )
 
