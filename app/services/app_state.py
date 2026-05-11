@@ -50,6 +50,10 @@ class AppStateStore:
     def coffee_long_running_notify_iphone(self) -> bool:
         return bool(self._state.get("coffee_long_running_notify_iphone", True))
 
+    @property
+    def coffee_pushward_show_seconds(self) -> bool:
+        return bool(self._state.get("coffee_pushward_show_seconds", True))
+
     async def set_coffee_warmed_up_alert_enabled(self, enabled: bool) -> None:
         async with self._lock:
             self._state["coffee_warmed_up_alert_enabled"] = enabled
@@ -88,6 +92,11 @@ class AppStateStore:
     async def set_coffee_long_running_notify_iphone(self, enabled: bool) -> None:
         async with self._lock:
             self._state["coffee_long_running_notify_iphone"] = enabled
+            await asyncio.to_thread(self._save)
+
+    async def set_coffee_pushward_show_seconds(self, enabled: bool) -> None:
+        async with self._lock:
+            self._state["coffee_pushward_show_seconds"] = enabled
             await asyncio.to_thread(self._save)
 
     @property

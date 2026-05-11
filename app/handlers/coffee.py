@@ -15,6 +15,7 @@ from app.config import Settings
 from app.keyboards.coffee import (
     coffee_alert_settings,
     coffee_alert_time_confirm,
+    coffee_pushward_settings,
     coffee_settings,
     coffee_status,
     coffee_turn_off_only,
@@ -102,6 +103,47 @@ async def show_coffee_alert_settings(
             reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer()
+
+
+@router.callback_query(F.data == "coffee:pushward_settings")
+async def show_coffee_pushward_settings(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_pushward_settings_text(app_state, settings),
+            reply_markup=coffee_pushward_settings(show_seconds=app_state.coffee_pushward_show_seconds),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "coffee:pushward_time_format:toggle")
+async def toggle_coffee_pushward_time_format(
+    callback: CallbackQuery,
+    settings: Settings,
+    app_state: AppStateStore,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
+) -> None:
+    if not settings.is_admin_user(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    show_seconds = not app_state.coffee_pushward_show_seconds
+    await app_state.set_coffee_pushward_show_seconds(show_seconds)
+    LOGGER.info("Coffee PushWard time display setting updated: show_seconds=%s", show_seconds)
+    coffee_alert_scheduler.reschedule_active_alerts()
+    if callback.message:
+        await callback.message.edit_text(
+            _coffee_pushward_settings_text(app_state, settings),
+            reply_markup=coffee_pushward_settings(show_seconds=show_seconds),
+        )
+    await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data.startswith("coffee_alert_toggle:"))
@@ -618,6 +660,17 @@ def _coffee_settings_text(app_state: AppStateStore) -> str:
         f"Разогрев: <b>{warmed_up_state}</b>, {_format_delay(app_state.coffee_warmed_up_alert_delay_seconds)}\n"
         f"Перегрев: <b>{long_running_state}</b>, {_format_delay(app_state.coffee_long_running_alert_delay_seconds)}\n\n"
         "Эти настройки управляют только Telegram-уведомлениями, не самой кофемашиной."
+    )
+
+
+def _coffee_pushward_settings_text(app_state: AppStateStore, settings: Settings) -> str:
+    live_activity_state = "включено" if settings.pushward_coffee_activity_enabled else "выключено"
+    time_state = "минуты и секунды" if app_state.coffee_pushward_show_seconds else "только минуты"
+    return (
+        "⚙️ <b>Настройки PushWard Live Activity</b>\n\n"
+        f"Live Activity: <b>{live_activity_state}</b>\n"
+        f"Время: <b>{time_state}</b>\n\n"
+        "Эта настройка влияет только на текст времени в Live Activity кофемашины."
     )
 
 

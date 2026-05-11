@@ -119,12 +119,16 @@ class PushWardCoffeeActivity:
 
     async def _update_warming_up(self, elapsed_seconds: int, warmup_delay: int) -> None:
         remaining_seconds = max(0, warmup_delay - elapsed_seconds)
+        show_seconds = self._app_state.coffee_pushward_show_seconds
         if elapsed_seconds <= 5:
             state_text = "Кофемашина включена"
-            subtitle = f"Разогрев начался · осталось {_duration_text(remaining_seconds)}"
+            subtitle = f"Разогрев начался · осталось {_remaining_duration_text(remaining_seconds, show_seconds=show_seconds)}"
         else:
-            state_text = f"Работает {_duration_text(elapsed_seconds)}"
-            subtitle = f"Разогрета через {_duration_text(remaining_seconds)}"
+            state_text = f"Работает {_elapsed_duration_text(elapsed_seconds, show_seconds=show_seconds)}"
+            if show_seconds or remaining_seconds >= 60:
+                subtitle = f"Разогрета через {_remaining_duration_text(remaining_seconds, show_seconds=show_seconds)}"
+            else:
+                subtitle = "Почти разогрета · осталось меньше 1 мин"
         await self._update_activity(
             state_text=state_text,
             subtitle=subtitle,
@@ -137,7 +141,7 @@ class PushWardCoffeeActivity:
     async def _update_ready(self, *, accent_color: str = "#34C759") -> None:
         await self._update_activity(
             state_text="Кофемашина разогрета",
-            subtitle=f"Работает {_duration_text(_elapsed_seconds(self._app_state.coffee_on_since))}",
+            subtitle=f"Работает {_elapsed_duration_text(_elapsed_seconds(self._app_state.coffee_on_since), show_seconds=self._app_state.coffee_pushward_show_seconds)}",
             progress=1.0,
             icon="cup.and.saucer",
             accent_color=accent_color,
@@ -147,7 +151,7 @@ class PushWardCoffeeActivity:
     async def _update_near_long_running(self, elapsed_seconds: int, *, accent_color: str) -> None:
         await self._update_activity(
             state_text="Кофемашина разогрета",
-            subtitle=f"Работает {_duration_text(elapsed_seconds)} · скоро напоминание",
+            subtitle=f"Работает {_elapsed_duration_text(elapsed_seconds, show_seconds=self._app_state.coffee_pushward_show_seconds)} · скоро напоминание",
             progress=1.0,
             icon="cup.and.saucer",
             accent_color=accent_color,
@@ -157,7 +161,7 @@ class PushWardCoffeeActivity:
     async def _update_long_running(self) -> None:
         await self._update_activity(
             state_text="Кофемашина работает слишком долго",
-            subtitle=f"Работает {_duration_text(_elapsed_seconds(self._app_state.coffee_on_since))} · лучше выключить",
+            subtitle=f"Работает {_elapsed_duration_text(_elapsed_seconds(self._app_state.coffee_on_since), show_seconds=self._app_state.coffee_pushward_show_seconds)} · лучше выключить",
             progress=1.0,
             icon="exclamationmark.triangle",
             accent_color="#FF3B30",
@@ -258,7 +262,35 @@ def _post_warmup_accent_color(ratio: float) -> str:
     return "#FF6B00"
 
 
-def _duration_text(total_seconds: int) -> str:
+def _elapsed_duration_text(total_seconds: int, *, show_seconds: bool) -> str:
+    if show_seconds:
+        return _duration_text(total_seconds, include_seconds=True)
+    total_minutes = max(0, int(total_seconds) // 60)
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{minutes} мин"
+
+
+def _remaining_duration_text(total_seconds: int, *, show_seconds: bool) -> str:
+    if show_seconds:
+        return _duration_text(total_seconds, include_seconds=True)
+    if total_seconds < 60:
+        return "меньше 1 мин"
+    total_minutes = (max(0, int(total_seconds)) + 59) // 60
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{minutes} мин"
+
+
+def _duration_text(total_seconds: int, *, include_seconds: bool) -> str:
     total_seconds = max(0, int(total_seconds))
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
@@ -268,7 +300,7 @@ def _duration_text(total_seconds: int) -> str:
         parts.append(f"{hours} ч")
     if minutes:
         parts.append(f"{minutes} мин")
-    if seconds and not hours:
+    if include_seconds and seconds:
         parts.append(f"{seconds} сек")
     if not parts:
         return "0 сек"

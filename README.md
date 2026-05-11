@@ -96,6 +96,9 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - PushWard progress is always `0.0`-`1.0`. During warm-up the color changes by steps:
   blue `#0A84FF`, cyan `#00AEEF`, teal `#00C7A3`, lime `#A6D94A`, then green `#34C759`
   only when warm-up reaches 100%.
+- PushWard time display is configured in Telegram: `Умные устройства` -> `Кофемашина` ->
+  `Настройки` -> `PushWard Live Activity`. Default is minutes and seconds. The `Только минуты`
+  mode rounds remaining warm-up time up and shows `меньше 1 мин` when less than a minute remains.
 - After warm-up the activity stays at progress `1.0` and the color moves by steps from
   green `#34C759` to yellow-green `#C9D94A`, orange `#FF9F0A`, red-orange `#FF6B00`,
   and red `#FF3B30` at the long-running threshold. The icon is `cup.and.saucer` before

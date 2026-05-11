@@ -22,7 +22,18 @@ def coffee_settings() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text="Разогрев", callback_data="coffee_alert_settings:warmed_up")],
             [inline_button(text="Перегрев", callback_data="coffee_alert_settings:long_running")],
+            [inline_button(text="PushWard Live Activity", callback_data="coffee:pushward_settings")],
             [inline_button(text="⬅️ Назад", callback_data="coffee:status", style=BUTTON_PRIMARY)],
+        ]
+    )
+
+
+def coffee_pushward_settings(*, show_seconds: bool) -> InlineKeyboardMarkup:
+    time_text = "Время: минуты и секунды" if show_seconds else "Время: только минуты"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [inline_button(text=time_text, callback_data="coffee:pushward_time_format:toggle")],
+            [inline_button(text="⬅️ Назад", callback_data="coffee:settings", style=BUTTON_PRIMARY)],
         ]
     )
 
