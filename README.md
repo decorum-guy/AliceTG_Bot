@@ -89,6 +89,19 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - If the bot restarts while the stored coffee state is `on`, it restores timers using elapsed time; due unsent alerts are sent immediately.
 - If the coffee machine turns off, active coffee alert timers are cancelled and no alert is sent.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
+- Optional PushWard Live Activity can mirror the coffee cycle on iPhone. Enable it with
+  `PUSHWARD_COFFEE_ACTIVITY_ENABLED=true` after installing and testing PushWard in Home Assistant.
+- PushWard uses slug `ha-coffee-machine` by default, updates every 30 seconds while warming up,
+  stays visible after warm-up, and is ended with `pushward.end_activity` when the coffee machine turns off.
+- PushWard progress is always `0.0`-`1.0`. During warm-up the color changes by steps:
+  blue `#0A84FF`, cyan `#00AEEF`, teal `#00C7A3`, lime `#A6D94A`, then green `#34C759`
+  only when warm-up reaches 100%.
+- After warm-up the activity stays at progress `1.0` and the color moves by steps from
+  green `#34C759` to yellow-green `#C9D94A`, orange `#FF9F0A`, red-orange `#FF6B00`,
+  and red `#FF3B30` at the long-running threshold. The icon is `cup.and.saucer` before
+  the threshold and `exclamationmark.triangle` when the coffee machine works too long.
+- PushWard errors never send Telegram/iPhone user notifications and do not block coffee alerts.
+  They are written to `PUSHWARD_ERROR_LOG_PATH`, default `/app/data/pushward_errors.log`.
 
 ### Siri And Telegram Coffee Control
 
@@ -343,6 +356,9 @@ TELEGRAM_PROXY=login:pass@host:port
 HA_URL=http://homeassistant:8123
 HA_LONG_LIVED_TOKEN=
 HA_MOBILE_NOTIFY_SERVICE=notify.mobile_app_aaliv_iphone
+PUSHWARD_COFFEE_ACTIVITY_ENABLED=false
+PUSHWARD_COFFEE_ACTIVITY_SLUG=ha-coffee-machine
+PUSHWARD_ERROR_LOG_PATH=/app/data/pushward_errors.log
 YANDEX_DIALOG_SKILL_NAME=домашний помощник
 
 # Internal webhook security between Home Assistant and bot
@@ -379,6 +395,14 @@ for example `notify.mobile_app_aaliv_iphone`. Coffee alert channels are configur
 Reminder notification channels are configured in Telegram: `Напоминания` -> `Настройки` -> `Telegram` / `iPhone`.
 Coffee push title is `Кофемашина`; reminder push title is `Напоминание`, and the push body is only the reminder text.
 If `HA_MOBILE_NOTIFY_SERVICE` is empty, iPhone push is skipped and Telegram notifications keep working.
+
+`PUSHWARD_COFFEE_ACTIVITY_ENABLED` controls the optional PushWard Live Activity for the coffee machine.
+Default is `false`, so installations without PushWard keep working unchanged. To enable it, install the
+PushWard HACS integration in Home Assistant, test `pushward.create_activity`, `pushward.update_activity`,
+and `pushward.end_activity` in Developer Tools -> Actions, then set
+`PUSHWARD_COFFEE_ACTIVITY_ENABLED=true`. The activity uses `PUSHWARD_COFFEE_ACTIVITY_SLUG`
+(`ha-coffee-machine` by default). PushWard service errors are written to
+`PUSHWARD_ERROR_LOG_PATH` and are intentionally not shown to Telegram or iPhone users.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
 values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is

@@ -57,6 +57,9 @@ class Settings:
     shortcuts_secret_token: str
     reminders_state_path: str = "/app/data/reminders.json"
     app_state_path: str = "/app/data/state.json"
+    pushward_coffee_activity_enabled: bool = False
+    pushward_coffee_activity_slug: str = "ha-coffee-machine"
+    pushward_error_log_path: str = "/app/data/pushward_errors.log"
     webhook_path: str = "/webhook"
     listen_host: str = "0.0.0.0"
     listen_port: int = 8088
@@ -100,6 +103,11 @@ class Settings:
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()
             or "/app/data/reminders.json",
             app_state_path=os.getenv("APP_STATE_PATH", "/app/data/state.json").strip() or "/app/data/state.json",
+            pushward_coffee_activity_enabled=_bool_env("PUSHWARD_COFFEE_ACTIVITY_ENABLED", False),
+            pushward_coffee_activity_slug=os.getenv("PUSHWARD_COFFEE_ACTIVITY_SLUG", "ha-coffee-machine").strip()
+            or "ha-coffee-machine",
+            pushward_error_log_path=os.getenv("PUSHWARD_ERROR_LOG_PATH", "/app/data/pushward_errors.log").strip()
+            or "/app/data/pushward_errors.log",
             yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
             or "домашний помощник",
         )
