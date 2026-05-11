@@ -21,7 +21,11 @@ async def main() -> None:
 
     ha = HomeAssistantClient(ha_url, token)
     try:
-        print(f"PushWard off cleanup test: slug={args.slug} hold_seconds={args.hold_seconds} ended_ttl={args.ended_ttl}")
+        print(
+            "PushWard off cleanup test: "
+            f"slug={args.slug} ready_hold_seconds={args.ready_hold_seconds} "
+            f"hold_seconds={args.hold_seconds} ended_ttl={args.ended_ttl}"
+        )
         await call_pushward(
             ha,
             "create_activity",
@@ -49,8 +53,8 @@ async def main() -> None:
                 "accent_color": "#34C759",
             },
         )
-        print("ready update_activity sent; check iPhone")
-        await asyncio.sleep(2)
+        print(f"ready state sent; waiting {args.ready_hold_seconds:g} seconds before off state")
+        await asyncio.sleep(args.ready_hold_seconds)
 
         await call_pushward(
             ha,
@@ -66,7 +70,7 @@ async def main() -> None:
                 "accent_color": "#8E8E93",
             },
         )
-        print(f"off update_activity sent; waiting {args.hold_seconds} seconds before end_activity")
+        print(f"off state sent; waiting {args.hold_seconds:g} seconds before end_activity")
         await asyncio.sleep(args.hold_seconds)
 
         await call_pushward(
@@ -77,7 +81,7 @@ async def main() -> None:
                 "completion_message": "Кофемашина выключена",
             },
         )
-        print("end_activity sent")
+        print(f"end_activity sent; expected auto-delete after {args.ended_ttl} seconds")
 
         if args.cleanup:
             await asyncio.sleep(args.ended_ttl + 2)
@@ -96,6 +100,7 @@ async def call_pushward(ha: HomeAssistantClient, service: str, payload: dict[str
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test PushWard coffee off cleanup timing.")
     parser.add_argument("--slug", default="ha-coffee-machine-off-test")
+    parser.add_argument("--ready-hold-seconds", type=float, default=7)
     parser.add_argument("--hold-seconds", type=float, default=5)
     parser.add_argument("--ended-ttl", type=int, default=3)
     parser.add_argument("--cleanup", action="store_true", help="Send best-effort delete_activity after end.")
