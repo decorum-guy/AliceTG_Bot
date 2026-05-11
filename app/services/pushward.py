@@ -61,7 +61,10 @@ class PushWardCoffeeActivity:
         if not self.enabled:
             return
         self.cancel_updates()
+        await self._update_off()
+        await asyncio.sleep(2)
         await self._end_activity()
+        asyncio.create_task(self._delete_activity_later())
 
     def cancel_updates(self) -> None:
         if self._task and not self._task.done():
@@ -231,6 +234,26 @@ class PushWardCoffeeActivity:
             },
         )
         LOGGER.info("PushWard coffee activity ended: slug=%s", self._slug)
+
+    async def _update_off(self) -> None:
+        await self._call(
+            "update_activity",
+            {
+                "slug": self._slug,
+                "state": "ONGOING",
+                "template": "generic",
+                "state_text": "Кофемашина выключена",
+                "subtitle": " ",
+                "progress": 0.0,
+                "icon": "power",
+                "accent_color": "#8E8E93",
+            },
+            state="off",
+        )
+
+    async def _delete_activity_later(self) -> None:
+        await asyncio.sleep(15)
+        await self._call("delete_activity", {"slug": self._slug}, state="cleanup")
 
     async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> None:
         try:
