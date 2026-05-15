@@ -62,6 +62,7 @@ class Settings:
     pushward_error_log_path: str = "/app/data/pushward_errors.log"
     pushward_coffee_ended_ttl_seconds: int = 3
     pushward_coffee_off_hold_seconds: int = 5
+    coffee_warmup_gif_url: str = ""
     webhook_path: str = "/webhook"
     listen_host: str = "0.0.0.0"
     listen_port: int = 8088
@@ -112,6 +113,7 @@ class Settings:
             or "/app/data/pushward_errors.log",
             pushward_coffee_ended_ttl_seconds=max(1, int(os.getenv("PUSHWARD_COFFEE_ENDED_TTL_SECONDS", "3"))),
             pushward_coffee_off_hold_seconds=max(0, int(os.getenv("PUSHWARD_COFFEE_OFF_HOLD_SECONDS", "5"))),
+            coffee_warmup_gif_url=os.getenv("COFFEE_WARMUP_GIF_URL", "").strip(),
             yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
             or "домашний помощник",
         )

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hmac
 import logging
+import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 from aiohttp import web
 
@@ -14,7 +16,7 @@ from app.messages.common import admin_menu_text
 from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager, AdminModeSession
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
-from app.services.coffee_machine import set_coffee_machine
+from app.services.coffee_machine import set_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.reminders import ReminderWorkflow
@@ -538,6 +540,51 @@ async def alice_reminder_create(request: web.Request) -> web.Response:
     )
 
 
+async def shortcut_coffee_gif(_: web.Request) -> web.FileResponse:
+    asset_path = Path(__file__).resolve().parents[2] / "notification-assets" / "coffee.gif"
+    if not asset_path.is_file():
+        LOGGER.warning("Coffee warmup GIF asset not found: path=%s", asset_path)
+        raise web.HTTPNotFound(text="coffee.gif not found")
+    return web.FileResponse(
+        asset_path,
+        headers={
+            "Content-Type": "image/gif",
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
+
+
+async def _send_shortcut_status_notification(settings: Settings, ha: HomeAssistantClient, message: str) -> None:
+    if not settings.ha_mobile_notify_service:
+        LOGGER.info("Shortcut coffee status push skipped because HA_MOBILE_NOTIFY_SERVICE is not configured")
+        return
+    tag = "coffee_machine_shortcut_status"
+    try:
+        await ha.notify(
+            settings.ha_mobile_notify_service,
+            title="\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430",
+            message=message,
+            data={"tag": tag},
+        )
+    except HomeAssistantError as exc:
+        LOGGER.exception("Shortcut coffee status push failed: reason=%r", exc)
+        return
+
+    async def clear_later() -> None:
+        await asyncio.sleep(4)
+        try:
+            await ha.notify(
+                settings.ha_mobile_notify_service,
+                title="\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430",
+                message="clear_notification",
+                data={"tag": tag},
+            )
+        except HomeAssistantError as exc:
+            LOGGER.exception("Shortcut coffee status push cleanup failed: reason=%r", exc)
+
+    asyncio.create_task(clear_later())
+
+
 async def shortcut_espresso(request: web.Request) -> web.Response:
     LOGGER.info("Shortcut espresso request received")
     auth_error = _check_shortcuts_auth(request)
@@ -560,8 +607,35 @@ async def shortcut_espresso(request: web.Request) -> web.Response:
     ha: HomeAssistantClient = request.app["ha"]
     scheduler: CoffeeAlertScheduler = request.app["coffee_alert_scheduler"]
     try:
-        await set_coffee_machine(ha, settings, action, source="shortcut:/shortcut/espresso")  # type: ignore[arg-type]
-        await scheduler.handle_state("on" if action == "turn_on" else "off")
+        if action == "turn_on":
+            result = await turn_on_coffee_machine(ha, settings, source="shortcut:/shortcut/espresso")
+            if result.already_on:
+                runtime_text = result.runtime_text or "00:00"
+                message = (
+                    "\u2615 \u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0443\u0436\u0435 "
+                    f"\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430. \u0412\u0440\u0435\u043c\u044f \u0440\u0430\u0431\u043e\u0442\u044b: {runtime_text}"
+                )
+                await _send_shortcut_status_notification(settings, ha, message)
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "action": action,
+                        "status": "already_on",
+                        "message": (
+                            "\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0443\u0436\u0435 "
+                            f"\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430. \u0412\u0440\u0435\u043c\u044f \u0440\u0430\u0431\u043e\u0442\u044b: {runtime_text}"
+                        ),
+                    }
+                )
+            await scheduler.handle_state("on")
+            await _send_shortcut_status_notification(
+                settings,
+                ha,
+                "\u2615 \u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430",
+            )
+        else:
+            await set_coffee_machine(ha, settings, action, source="shortcut:/shortcut/espresso")  # type: ignore[arg-type]
+            await scheduler.handle_state("off")
     except HomeAssistantError:
         LOGGER.exception("Shortcut espresso coffee action failed: action=%s", action)
         return _shortcuts_json_error(
@@ -582,6 +656,7 @@ async def shortcut_espresso(request: web.Request) -> web.Response:
 def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health", health)
     app.router.add_post("/shortcut/espresso", shortcut_espresso)
+    app.router.add_get("/shortcut/assets/coffee.gif", shortcut_coffee_gif)
     app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)
     app.router.add_post("/internal/coffee/sonya-type-answer", sonya_type_answer)
     app.router.add_post("/internal/coffee/sonya-direct-type-answer", sonya_direct_type_answer)

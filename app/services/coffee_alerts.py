@@ -169,6 +169,7 @@ class CoffeeAlertScheduler:
                                 message=push_message,
                                 data={
                                     "tag": "coffee_machine_alert",
+                                    **self._warmup_gif_data(alert),
                                     "actions": [
                                         {
                                             "action": "COFFEE_TURN_OFF",
@@ -261,8 +262,16 @@ class CoffeeAlertScheduler:
 
     def _push_text(self, alert: str) -> tuple[str, str]:
         if alert == "warmed_up":
-            return "Кофемашина", "Кофемашина разогрета"
-        return "Кофемашина", "Кофемашина работает слишком долго"
+            return "\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430", "\u2615 \u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0440\u0430\u0437\u043e\u0433\u0440\u0435\u0442\u0430"
+        return "\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430", "\u26a0\ufe0f \u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0434\u043e\u043b\u0433\u043e"
+
+    def _warmup_gif_data(self, alert: str) -> dict[str, str]:
+        if alert != "warmed_up":
+            return {}
+        if not self._settings.coffee_warmup_gif_url:
+            LOGGER.info("Coffee warmup gif skipped because COFFEE_WARMUP_GIF_URL is not set")
+            return {}
+        return {"image": self._settings.coffee_warmup_gif_url}
 
 
 def _normalize_datetime(value: str | None) -> str | None:

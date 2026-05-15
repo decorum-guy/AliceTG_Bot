@@ -156,6 +156,18 @@ Successful `turn_off` response:
 }
 ```
 
+If `turn_on` is called while the coffee machine is already on, the endpoint does not call
+`switch.turn_on`, does not restart PushWard or coffee timers, and returns:
+
+```json
+{
+  "ok": true,
+  "action": "turn_on",
+  "status": "already_on",
+  "message": "РљРѕС„РµРјР°С€РёРЅР° СѓР¶Рµ РІРєР»СЋС‡РµРЅР°. Р’СЂРµРјСЏ СЂР°Р±РѕС‚С‹: 05:23"
+}
+```
+
 Shortcut-safe error responses:
 
 ```json
@@ -359,6 +371,7 @@ TELEGRAM_PROXY=login:pass@host:port
 HA_URL=http://homeassistant:8123
 HA_LONG_LIVED_TOKEN=
 HA_MOBILE_NOTIFY_SERVICE=notify.mobile_app_aaliv_iphone
+COFFEE_WARMUP_GIF_URL=https://ha.myhomeassistantisverybest.art/shortcut/assets/coffee.gif
 PUSHWARD_COFFEE_ACTIVITY_ENABLED=false
 PUSHWARD_COFFEE_ACTIVITY_SLUG=ha-coffee-machine
 PUSHWARD_ERROR_LOG_PATH=/app/data/pushward_errors.log
@@ -402,6 +415,13 @@ Coffee push title is `Кофемашина`; reminder push title is `Напом�
 Coffee iPhone alert pushes use tag `coffee_machine_alert` and include the `COFFEE_TURN_OFF`
 action. The HA automation for that action sends a separate short `Кофемашина выключена`
 notification with tag `coffee_machine_status_done`; normal Telegram/Siri/HA turn-off paths do not send it.
+Shortcut `turn_on` sends a short HA Mobile App status push with tag `coffee_machine_shortcut_status`:
+`\u2615 РљРѕС„РµРјР°С€РёРЅР° РІРєР»СЋС‡РµРЅР°`, or `\u2615 РљРѕС„РµРјР°С€РёРЅР° СѓР¶Рµ РІРєР»СЋС‡РµРЅР°. Р’СЂРµРјСЏ СЂР°Р±РѕС‚С‹: MM:SS`
+when the switch is already on. The bot clears this status notification after 4 seconds.
+The warm-up iPhone alert can include `notification-assets/coffee.gif`. Expose it as
+`/shortcut/assets/coffee.gif` and set `COFFEE_WARMUP_GIF_URL` to the public URL. If the variable
+is empty, the warm-up push is sent without GIF. Coffee pushes use only standard Unicode emoji;
+custom Telegram emoji are not used in Home Assistant notifications.
 If `HA_MOBILE_NOTIFY_SERVICE` is empty, iPhone push is skipped and Telegram notifications keep working.
 
 `PUSHWARD_COFFEE_ACTIVITY_ENABLED` controls the optional PushWard Live Activity for the coffee machine.
@@ -504,6 +524,10 @@ Caddy should expose only the public shortcut endpoint from the bot and route eve
 ```caddyfile
 ha.myhomeassistantisverybest.art {
 	handle /shortcut/espresso {
+		reverse_proxy telegram-bot:8088
+	}
+
+	handle /shortcut/assets/coffee.gif {
 		reverse_proxy telegram-bot:8088
 	}
 
@@ -1420,7 +1444,7 @@ Use this as the full ready-to-copy content of `config/automations.yaml`. Going f
     - service: notify.mobile_app_aaliv_iphone
       data:
         title: "Кофемашина"
-        message: "Кофемашина выключена"
+        message: "✅ Кофемашина выключена"
         data:
           tag: "coffee_machine_status_done"
 

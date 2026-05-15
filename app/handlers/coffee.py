@@ -300,10 +300,14 @@ async def toggle_coffee(
         return
 
     turn_on = callback.data == "coffee:turn_on"
+    callback_text = "\u0413\u043e\u0442\u043e\u0432\u043e"
     try:
         if turn_on:
-            await turn_on_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_on")
-            await coffee_alert_scheduler.handle_state("on")
+            result = await turn_on_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_on")
+            if result.already_on:
+                callback_text = "\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0443\u0436\u0435 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442"
+            else:
+                await coffee_alert_scheduler.handle_state("on")
         else:
             await turn_off_coffee_machine(ha, settings, source="telegram_callback:coffee:turn_off")
             await coffee_alert_scheduler.handle_state("off")
@@ -330,17 +334,31 @@ async def toggle_coffee(
                     telegram_messages,
                 )
             )
-    await callback.answer("Готово")
+    await callback.answer(callback_text)
 
 
 @router.message(Command("coffee_on"))
-async def coffee_on_command(message: Message, settings: Settings, ha: HomeAssistantClient, coffee_alert_scheduler: CoffeeAlertScheduler) -> None:
+async def coffee_on_command(
+    message: Message,
+    settings: Settings,
+    ha: HomeAssistantClient,
+    coffee_alert_scheduler: CoffeeAlertScheduler,
+    telegram_messages: TelegramMessages,
+) -> None:
     if not settings.is_admin_user(message.from_user.id if message.from_user else None):
         await message.answer("Нет доступа")
         return
 
     try:
-        await turn_on_coffee_machine(ha, settings, source="telegram_command:/coffee_on")
+        result = await turn_on_coffee_machine(ha, settings, source="telegram_command:/coffee_on")
+        if result.already_on:
+            runtime_text = result.runtime_text or "00:00"
+            sent = await message.answer(
+                "\u2615 \u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430 \u0443\u0436\u0435 "
+                f"\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430. \u0412\u0440\u0435\u043c\u044f \u0440\u0430\u0431\u043e\u0442\u044b: {runtime_text}"
+            )
+            asyncio.create_task(_delete_later(telegram_messages, sent.chat.id, sent.message_id, 4))
+            return
         await coffee_alert_scheduler.handle_state("on")
     except HomeAssistantError:
         LOGGER.exception("Cannot turn on coffee machine from Telegram command")
@@ -627,6 +645,11 @@ async def _refresh_later(
             await telegram_messages.safe_edit(chat_id, message_id, text, coffee_status(is_on))
         except Exception:
             LOGGER.exception("Cannot refresh coffee status after delay=%s", delay_seconds)
+
+
+async def _delete_later(telegram_messages: TelegramMessages, chat_id: int, message_id: int, delay_seconds: int) -> None:
+    await asyncio.sleep(delay_seconds)
+    await telegram_messages.safe_delete(chat_id, message_id)
 
 
 def _coffee_uptime_minutes_text(switch_state: dict | None, is_on: bool) -> str:
