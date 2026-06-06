@@ -41,12 +41,13 @@ class HomeAssistantClient:
             not_found_none=True,
         )
 
-    async def call_service(self, domain: str, service: str, payload: dict[str, Any]) -> None:
+    async def call_service(self, domain: str, service: str, payload: dict[str, Any], *, timeout_seconds: float | None = None) -> None:
         await self._request(
             "POST",
             f"/api/services/{domain}/{service}",
             error_message=f"Cannot call {domain}.{service}",
             payload=payload,
+            timeout_seconds=timeout_seconds,
         )
 
     async def notify(self, service_full_name: str, *, title: str, message: str, data: dict[str, Any] | None = None) -> None:
@@ -111,13 +112,15 @@ class HomeAssistantClient:
         payload: dict[str, Any] | None = None,
         json_response: bool = False,
         not_found_none: bool = False,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         url = f"{self._base_url}{path}"
+        request_timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds is not None else None
         for attempt in range(2):
             try:
                 if self._session.closed:
                     raise RuntimeError("Home Assistant aiohttp session is closed")
-                async with self._session.request(method, url, json=payload) as response:
+                async with self._session.request(method, url, json=payload, timeout=request_timeout) as response:
                     if not_found_none and response.status == 404:
                         return None
                     await self._raise_for_response(response)
@@ -151,6 +154,7 @@ class HomeAssistantClient:
         try:
             if not old_session.closed:
                 await old_session.close()
+                await asyncio.sleep(0)
         except Exception:
             LOGGER.exception("Cannot close stale Home Assistant aiohttp session")
         self._session = self._create_session()

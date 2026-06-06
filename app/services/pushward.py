@@ -13,6 +13,9 @@ LOGGER = logging.getLogger(__name__)
 WARMUP_UPDATE_INTERVAL_SECONDS = 30
 MINUTES_ONLY_UPDATE_INTERVAL_SECONDS = 60
 NEAR_LONG_RUNNING_SECONDS = 5 * 60
+PUSHWARD_CALL_TIMEOUT_SECONDS = 5
+PUSHWARD_MAX_CONSECUTIVE_FAILURES = 3
+PUSHWARD_DEGRADED_BACKOFF_SECONDS = 5 * 60
 WARMUP_COLOR_STEPS: tuple[tuple[float, str], ...] = (
     (0.40, "#0A84FF"),
     (0.70, "#00AEEF"),
@@ -38,6 +41,9 @@ class PushWardCoffeeActivity:
         self._off_cleanup_task: asyncio.Task[None] | None = None
         self._delete_cleanup_task: asyncio.Task[None] | None = None
         self._activity_active = False
+        self._cycle_id: str | None = None
+        self._degraded = False
+        self._consecutive_failures = 0
 
     @property
     def enabled(self) -> bool:
@@ -50,18 +56,17 @@ class PushWardCoffeeActivity:
     async def start_or_restore(self) -> None:
         if not self.enabled:
             return
+        self._reset_cycle_state_if_needed()
         self._cancel_off_cleanup()
         self._cancel_delete_cleanup()
-        self._activity_active = True
         if self.is_running:
-            await self._update_from_state()
-            LOGGER.info("PushWard coffee activity refreshed: slug=%s", self._slug)
+            LOGGER.info("PushWard loop already running, skip start: slug=%s", self._slug)
             return
-        self.cancel_updates()
-        await self._create_activity()
-        await self._update_from_state()
+        if self._degraded:
+            LOGGER.info("PushWard coffee activity start skipped because current cycle is degraded: slug=%s", self._slug)
+            return
         self._task = asyncio.create_task(self._run_updates())
-        LOGGER.info("PushWard coffee activity started: slug=%s", self._slug)
+        LOGGER.info("PushWard loop started: slug=%s", self._slug)
 
     async def stop(self) -> None:
         if not self.enabled:
@@ -69,32 +74,35 @@ class PushWardCoffeeActivity:
         if self._off_cleanup_task and not self._off_cleanup_task.done():
             LOGGER.info("PushWard coffee activity off cleanup already running: slug=%s", self._slug)
             return
-        if not self._activity_active:
-            LOGGER.info("PushWard coffee activity already ended, ignoring stop: slug=%s", self._slug)
-            return
         self.cancel_updates()
         self._off_cleanup_task = asyncio.create_task(self._run_off_cleanup())
-        await self._off_cleanup_task
 
     async def _run_off_cleanup(self) -> None:
+        was_active = self._activity_active
+        LOGGER.info("PushWard coffee activity off cleanup started: slug=%s active=%s", self._slug, was_active)
         await self._update_off()
         await asyncio.sleep(self._settings.pushward_coffee_off_hold_seconds)
-        await self._end_activity()
+        if was_active:
+            await self._end_activity()
+        else:
+            LOGGER.info("PushWard end_activity skipped because activity was not marked active: slug=%s", self._slug)
         self._activity_active = False
-        self._delete_cleanup_task = asyncio.create_task(self._delete_activity_later())
+        if was_active:
+            self._delete_cleanup_task = asyncio.create_task(self._delete_activity_later())
 
     def cancel_updates(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
+            LOGGER.info("PushWard loop cancelled: slug=%s", self._slug)
         self._task = None
 
     async def mark_warmed_up(self) -> None:
-        if self.enabled:
-            await self._update_ready()
+        if self.enabled and not self._degraded:
+            asyncio.create_task(self._safe_one_shot_update(self._update_ready(), "warmed_up"))
 
     async def mark_long_running(self) -> None:
-        if self.enabled:
-            await self._update_long_running()
+        if self.enabled and not self._degraded:
+            asyncio.create_task(self._safe_one_shot_update(self._update_long_running(), "long_running"))
 
     async def close(self) -> None:
         self.cancel_updates()
@@ -114,12 +122,34 @@ class PushWardCoffeeActivity:
     async def _run_updates(self) -> None:
         try:
             while self._app_state.coffee_machine_state == "on":
+                if self._degraded:
+                    LOGGER.info(
+                        "PushWard coffee activity disabled for current cycle after consecutive failures: slug=%s",
+                        self._slug,
+                    )
+                    return
+                if not self._activity_active:
+                    created = await self._create_activity()
+                    if not created:
+                        if self._degraded:
+                            return
+                        LOGGER.info(
+                            "PushWard coffee activity backoff started: seconds=%s slug=%s",
+                            PUSHWARD_DEGRADED_BACKOFF_SECONDS,
+                            self._slug,
+                        )
+                        await asyncio.sleep(PUSHWARD_DEGRADED_BACKOFF_SECONDS)
+                        continue
+                    self._activity_active = True
                 sleep_seconds = await self._update_from_state()
                 await asyncio.sleep(sleep_seconds)
         except asyncio.CancelledError:
+            LOGGER.info("PushWard loop cancelled: slug=%s", self._slug)
             raise
         except Exception as exc:
             await self._log_error("update_activity", exc, state="background_task")
+        finally:
+            LOGGER.info("PushWard loop stopped: slug=%s", self._slug)
 
     async def _update_from_state(self) -> int:
         if self._app_state.coffee_machine_state != "on":
@@ -159,8 +189,8 @@ class PushWardCoffeeActivity:
             candidates.append(max(1, long_delay - elapsed_seconds))
         return max(1, min(candidates))
 
-    async def _create_activity(self) -> None:
-        await self._call(
+    async def _create_activity(self) -> bool:
+        return await self._call(
             "create_activity",
             {
                 "slug": self._slug,
@@ -284,11 +314,56 @@ class PushWardCoffeeActivity:
         await asyncio.sleep(15)
         await self._call("delete_activity", {"slug": self._slug}, state="cleanup")
 
-    async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> None:
+    async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> bool:
         try:
-            await self._ha.call_service("pushward", service, payload)
+            await self._ha.call_service(
+                "pushward",
+                service,
+                payload,
+                timeout_seconds=PUSHWARD_CALL_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
             await self._log_error(service, exc, state=state)
+            self._record_failure(service, exc, state=state)
+            return False
+        self._consecutive_failures = 0
+        return True
+
+    async def _safe_one_shot_update(self, update_coro, state: str) -> None:
+        try:
+            await update_coro
+        except Exception as exc:
+            await self._log_error("update_activity", exc, state=state)
+
+    def _reset_cycle_state_if_needed(self) -> None:
+        cycle_id = self._app_state.coffee_on_since
+        if cycle_id == self._cycle_id:
+            return
+        self._cycle_id = cycle_id
+        self._degraded = False
+        self._consecutive_failures = 0
+        self._activity_active = False
+
+    def _record_failure(self, action: str, exc: Exception, *, state: str | None = None) -> None:
+        self._consecutive_failures += 1
+        if _is_rate_limit_error(exc):
+            self._degraded = True
+            LOGGER.warning(
+                "PushWard coffee activity disabled for current cycle after rate limit: action=%s slug=%s state=%s",
+                action,
+                self._slug,
+                state,
+            )
+            return
+        if self._consecutive_failures >= PUSHWARD_MAX_CONSECUTIVE_FAILURES:
+            self._degraded = True
+            LOGGER.warning(
+                "PushWard coffee activity disabled for current cycle after consecutive failures: action=%s slug=%s state=%s failures=%s",
+                action,
+                self._slug,
+                state,
+                self._consecutive_failures,
+            )
 
     async def _log_error(self, action: str, exc: Exception, *, state: str | None = None) -> None:
         LOGGER.warning(
@@ -387,3 +462,8 @@ def _duration_text(total_seconds: int, *, include_seconds: bool) -> str:
     if not parts:
         return "0 сек"
     return " ".join(parts)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    message = repr(exc).lower()
+    return "rate limit" in message or "rate limited" in message or "retrying in" in message
