@@ -377,6 +377,11 @@ PUSHWARD_COFFEE_ACTIVITY_SLUG=ha-coffee-machine
 PUSHWARD_ERROR_LOG_PATH=/app/data/pushward_errors.log
 PUSHWARD_COFFEE_ENDED_TTL_SECONDS=3
 PUSHWARD_COFFEE_OFF_HOLD_SECONDS=5
+PUSHWARD_COFFEE_WIDGET_ENABLED=false
+PUSHWARD_INTEGRATION_KEY=
+PUSHWARD_COFFEE_WIDGET_SLUG=ha-coffee-machine-widget
+PUSHWARD_COFFEE_WIDGET_NAME=Кофемашина
+PUSHWARD_COFFEE_WIDGET_UPDATE_INTERVAL_SECONDS=60
 YANDEX_DIALOG_SKILL_NAME=домашний помощник
 
 # Internal webhook security between Home Assistant and bot
@@ -447,6 +452,36 @@ python scripts/test_pushward_coffee_off_cleanup.py --hold-seconds 5 --ended-ttl 
 The script reads `HA_URL` and `HA_LONG_LIVED_TOKEN` from env, creates a test activity, shows
 `Кофемашина разогрета`, switches it to `Кофемашина выключена`, waits `hold_seconds`, then calls
 `end_activity`. Add `--cleanup` to send a best-effort `delete_activity` after the end.
+
+### PushWard Coffee Widget
+
+The coffee widget is optional and uses the direct PushWard API, not Home Assistant
+`pushward.widget_refresh`. It is disabled by default:
+
+```env
+PUSHWARD_COFFEE_WIDGET_ENABLED=true
+PUSHWARD_INTEGRATION_KEY=<integration key>
+PUSHWARD_COFFEE_WIDGET_SLUG=ha-coffee-machine-widget
+PUSHWARD_COFFEE_WIDGET_NAME=Кофемашина
+PUSHWARD_COFFEE_WIDGET_UPDATE_INTERVAL_SECONDS=60
+```
+
+The bot updates `PATCH https://api.pushward.app/widgets/{slug}` with template `stat_list`.
+If PATCH returns `404`, the bot bootstraps the widget once with `POST /widgets` using the same
+content. The integration key is read only from env and is never logged.
+
+Widget content has two rows: `Статус` (`Вкл` / `Выкл`) and `Работает` (`—`, `меньше 1 мин`,
+`7 мин`, or `1 ч 07 мин`). It updates immediately on coffee machine `on`/`off` and then every
+`PUSHWARD_COFFEE_WIDGET_UPDATE_INTERVAL_SECONDS` while the coffee machine is on. Repeated
+`state=on` events do not create parallel loops.
+
+Colors: off `#8E8E93`, warming `#0A84FF` -> `#00AEEF` -> `#00C7A3`, ready `#34C759`,
+almost long-running `#FF9F0A`, too long `#FF3B30`.
+
+After bootstrap, add the widget in PushWard by slug `ha-coffee-machine-widget`. Recommended
+placements: Lock Screen Rectangular, or Home Screen Medium/Large. Widget errors are written to
+`PUSHWARD_ERROR_LOG_PATH` and do not block `/internal/coffee-machine/state`, Live Activity,
+Telegram alerts, HA Mobile pushes, or coffee timers.
 
 `YANDEX_DIALOG_SKILL_NAME` is the Yandex Dialog skill name used in station `media_content_type`
 values like `dialog:домашний помощник:tg_ask_sonya_wants_coffee`. The default is

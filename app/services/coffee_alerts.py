@@ -10,6 +10,7 @@ from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
+from app.services.pushward_widgets import PushWardCoffeeWidget
 from app.services.telegram_messages import TelegramMessages
 
 LOGGER = logging.getLogger(__name__)
@@ -24,12 +25,14 @@ class CoffeeAlertScheduler:
         telegram_messages: TelegramMessages,
         ha: HomeAssistantClient,
         pushward_activity: PushWardCoffeeActivity | None = None,
+        pushward_widget: PushWardCoffeeWidget | None = None,
     ) -> None:
         self._settings = settings
         self._app_state = app_state
         self._telegram_messages = telegram_messages
         self._ha = ha
         self._pushward_activity = pushward_activity
+        self._pushward_widget = pushward_widget
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def restore(self) -> None:
@@ -39,6 +42,8 @@ class CoffeeAlertScheduler:
         LOGGER.info("Coffee alert restore started: on_since=%s", self._app_state.coffee_on_since)
         if self._pushward_activity:
             await self._pushward_activity.start_or_restore()
+        if self._pushward_widget:
+            self._pushward_widget.start()
         self._schedule_active_alerts()
 
     async def handle_state(self, state: str, *, changed_at: str | None = None) -> None:
@@ -52,6 +57,8 @@ class CoffeeAlertScheduler:
                 )
                 if self._pushward_activity:
                     await self._pushward_activity.start_or_restore()
+                if self._pushward_widget:
+                    self._pushward_widget.start()
                 return
             on_since = _normalize_datetime(changed_at) or datetime.now(timezone.utc).isoformat()
             await self._app_state.mark_coffee_machine_on(on_since)
@@ -59,6 +66,8 @@ class CoffeeAlertScheduler:
             self._cancel_tasks()
             if self._pushward_activity:
                 await self._pushward_activity.start_or_restore()
+            if self._pushward_widget:
+                self._pushward_widget.start()
             self._schedule_active_alerts()
             return
         if normalized == "off":
@@ -67,6 +76,8 @@ class CoffeeAlertScheduler:
             if self._pushward_activity:
                 await self._pushward_activity.stop()
             await self._app_state.mark_coffee_machine_off()
+            if self._pushward_widget:
+                self._pushward_widget.stop()
             return
         raise ValueError(f"Unsupported coffee machine state: {state}")
 

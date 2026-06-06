@@ -63,6 +63,11 @@ class Settings:
     pushward_coffee_ended_ttl_seconds: int = 3
     pushward_coffee_off_hold_seconds: int = 5
     coffee_warmup_gif_url: str = ""
+    pushward_coffee_widget_enabled: bool = False
+    pushward_integration_key: str = ""
+    pushward_coffee_widget_slug: str = "ha-coffee-machine-widget"
+    pushward_coffee_widget_name: str = "Кофемашина"
+    pushward_coffee_widget_update_interval_seconds: int = 60
     webhook_path: str = "/webhook"
     listen_host: str = "0.0.0.0"
     listen_port: int = 8088
@@ -114,6 +119,19 @@ class Settings:
             pushward_coffee_ended_ttl_seconds=max(1, int(os.getenv("PUSHWARD_COFFEE_ENDED_TTL_SECONDS", "3"))),
             pushward_coffee_off_hold_seconds=max(0, int(os.getenv("PUSHWARD_COFFEE_OFF_HOLD_SECONDS", "5"))),
             coffee_warmup_gif_url=os.getenv("COFFEE_WARMUP_GIF_URL", "").strip(),
+            pushward_coffee_widget_enabled=_bool_env("PUSHWARD_COFFEE_WIDGET_ENABLED", False),
+            pushward_integration_key=os.getenv("PUSHWARD_INTEGRATION_KEY", "").strip(),
+            pushward_coffee_widget_slug=os.getenv(
+                "PUSHWARD_COFFEE_WIDGET_SLUG",
+                "ha-coffee-machine-widget",
+            ).strip()
+            or "ha-coffee-machine-widget",
+            pushward_coffee_widget_name=os.getenv("PUSHWARD_COFFEE_WIDGET_NAME", "Кофемашина").strip()
+            or "Кофемашина",
+            pushward_coffee_widget_update_interval_seconds=max(
+                10,
+                int(os.getenv("PUSHWARD_COFFEE_WIDGET_UPDATE_INTERVAL_SECONDS", "60")),
+            ),
             yandex_dialog_skill_name=os.getenv("YANDEX_DIALOG_SKILL_NAME", "домашний помощник").strip()
             or "домашний помощник",
         )
