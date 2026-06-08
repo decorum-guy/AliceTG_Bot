@@ -30,6 +30,13 @@ POST_WARMUP_COLOR_STEPS: tuple[tuple[float, str], ...] = (
 )
 
 
+def _normalize_update_activity_payload(payload: dict[str, object]) -> dict[str, object]:
+    activity_state = payload.get("state")
+    if isinstance(activity_state, str):
+        return {**payload, "state": activity_state.lower()}
+    return payload
+
+
 class PushWardCoffeeActivity:
     def __init__(self, settings: Settings, ha: HomeAssistantClient, app_state: AppStateStore) -> None:
         self._settings = settings
@@ -273,7 +280,7 @@ class PushWardCoffeeActivity:
             "update_activity",
             {
                 "slug": self._slug,
-                "state": "ONGOING",
+                "state": "ongoing",
                 "template": "generic",
                 "state_text": state_text,
                 "subtitle": subtitle,
@@ -299,7 +306,7 @@ class PushWardCoffeeActivity:
             "update_activity",
             {
                 "slug": self._slug,
-                "state": "ONGOING",
+                "state": "ongoing",
                 "template": "generic",
                 "state_text": "Кофемашина выключена",
                 "subtitle": " ",
@@ -315,6 +322,8 @@ class PushWardCoffeeActivity:
         await self._call("delete_activity", {"slug": self._slug}, state="cleanup")
 
     async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> bool:
+        if service == "update_activity":
+            payload = _normalize_update_activity_payload(payload)
         try:
             await self._ha.call_service(
                 "pushward",

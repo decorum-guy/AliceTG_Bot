@@ -44,7 +44,7 @@ async def main() -> None:
             "update_activity",
             {
                 "slug": args.slug,
-                "state": "ONGOING",
+                "state": "ongoing",
                 "template": "generic",
                 "state_text": "Кофемашина разогрета",
                 "subtitle": "Работает 21 мин",
@@ -61,7 +61,7 @@ async def main() -> None:
             "update_activity",
             {
                 "slug": args.slug,
-                "state": "ONGOING",
+                "state": "ongoing",
                 "template": "generic",
                 "state_text": "Кофемашина выключена",
                 "subtitle": " ",
