@@ -79,8 +79,10 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 
 - Home Assistant only reports `switch.kofemashina` state changes to the bot: `on` and `off`.
 - The bot owns the warm-up and long-running timers. HA does not wait 13 minutes or 1 hour anymore.
-- Each coffee alert can be delivered through Telegram, iPhone push via Home Assistant, or both.
-- iPhone push uses `HA_MOBILE_NOTIFY_SERVICE` such as `notify.mobile_app_aaliv_iphone`.
+- Each coffee alert can be delivered through Telegram, HA Mobile App push via Home Assistant, or both.
+- HA Mobile push uses `HA_MOBILE_NOTIFY_SERVICES` such as
+  `notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook`. If it is empty, the bot falls back to
+  `HA_MOBILE_NOTIFY_SERVICE` for backward compatibility.
 - Coffee alert channel settings and per-channel delivery flags are stored in `APP_STATE_PATH`.
 - Defaults: warm-up alert enabled after 13 minutes; long-running/overheat alert enabled after 60 minutes.
 - In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to configure each alert separately:
@@ -370,6 +372,7 @@ TELEGRAM_PROXY=login:pass@host:port
 # Home Assistant
 HA_URL=http://homeassistant:8123
 HA_LONG_LIVED_TOKEN=
+HA_MOBILE_NOTIFY_SERVICES=notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook
 HA_MOBILE_NOTIFY_SERVICE=notify.mobile_app_aaliv_iphone
 COFFEE_WARMUP_GIF_URL=https://ha.myhomeassistantisverybest.art/shortcut/assets/coffee.gif
 PUSHWARD_COFFEE_ACTIVITY_ENABLED=false
@@ -411,31 +414,37 @@ container is recreated, not only restarted.
 `REMINDERS_STATE_PATH` stores persistent user reminders. Pending reminders are restored after a
 telegram-bot container restart; overdue reminders are sent after startup.
 
-`HA_MOBILE_NOTIFY_SERVICE` enables iPhone push notifications for coffee machine alerts through the
-Home Assistant Companion App. Find the service in Home Assistant under Developer Tools -> Actions,
-for example `notify.mobile_app_aaliv_iphone`. Coffee alert channels are configured in Telegram:
+`HA_MOBILE_NOTIFY_SERVICES` enables HA Mobile App push notifications for coffee machine alerts through
+the Home Assistant Companion App. Set it to a comma-separated list, for example
+`notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook`. If it is empty, the bot uses
+`HA_MOBILE_NOTIFY_SERVICE` as a backward-compatible fallback. Find services in Home Assistant under
+Developer Tools -> Actions. Coffee alert channels are configured in Telegram:
 `Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Перегрев` -> `Telegram` / `iPhone`.
 Reminder notification channels are configured in Telegram: `Напоминания` -> `Настройки` -> `Telegram` / `iPhone`.
 Coffee push title is `Кофемашина`; reminder push title is `Напоминание`, and the push body is only the reminder text.
-Coffee iPhone alert pushes use tag `coffee_machine_alert` and include the `COFFEE_TURN_OFF`
+Coffee HA Mobile alert pushes use tag `coffee_machine_alert` and include the `COFFEE_TURN_OFF`
 action. The HA automation for that action sends a separate short `Кофемашина выключена`
 notification with tag `coffee_machine_status_done`; normal Telegram/Siri/HA turn-off paths do not send it.
 Shortcut `turn_on` sends a short HA Mobile App status push with tag `coffee_machine_shortcut_status`:
-`\u2615 РљРѕС„РµРјР°С€РёРЅР° РІРєР»СЋС‡РµРЅР°`, or `\u2615 РљРѕС„РµРјР°С€РёРЅР° СѓР¶Рµ РІРєР»СЋС‡РµРЅР°. Р’СЂРµРјСЏ СЂР°Р±РѕС‚С‹: MM:SS`
+`☕ Кофемашина включена`, or `☕ Кофемашина уже включена. Время работы: MM:SS`
 when the switch is already on. The bot clears this status notification after 4 seconds.
 The warm-up iPhone alert can include `notification-assets/coffee.gif`. Expose it as
 `/shortcut/assets/coffee.gif` and set `COFFEE_WARMUP_GIF_URL` to the public URL. If the variable
 is empty, the warm-up push is sent without GIF. Coffee pushes use only standard Unicode emoji;
 custom Telegram emoji are not used in Home Assistant notifications.
-If `HA_MOBILE_NOTIFY_SERVICE` is empty, iPhone push is skipped and Telegram notifications keep working.
+If both `HA_MOBILE_NOTIFY_SERVICES` and `HA_MOBILE_NOTIFY_SERVICE` are empty, HA Mobile push is skipped
+and Telegram notifications keep working.
 
 `PUSHWARD_COFFEE_ACTIVITY_ENABLED` controls the optional PushWard Live Activity for the coffee machine.
 Default is `false`, so installations without PushWard keep working unchanged. To enable it, install the
-PushWard HACS integration in Home Assistant, test `pushward.create_activity`, `pushward.update_activity`,
-and `pushward.end_activity` in Developer Tools -> Actions, then set
+PushWard HACS integration in Home Assistant, test `pushward.create_activity`, `pushward.update_activity_generic`
+or `pushward.update_activity`, and `pushward.end_activity` in Developer Tools -> Actions, then set
 `PUSHWARD_COFFEE_ACTIVITY_ENABLED=true`. The activity uses `PUSHWARD_COFFEE_ACTIVITY_SLUG`
 (`ha-coffee-machine` by default). PushWard service errors are written to
 `PUSHWARD_ERROR_LOG_PATH` and are intentionally not shown to Telegram or iPhone users.
+For updates, the bot prefers `pushward.update_activity_generic` when Home Assistant advertises it;
+otherwise it falls back to deprecated `pushward.update_activity` with `template: generic`. The top-level
+PushWard activity `state` sent through Home Assistant is always lowercase: `ongoing`.
 Coffee PushWard activities are created with `PUSHWARD_COFFEE_ENDED_TTL_SECONDS` (`3` by default).
 On coffee machine `off`, the bot first updates Live Activity to `Кофемашина выключена`, holds it for
 `PUSHWARD_COFFEE_OFF_HOLD_SECONDS` (`5` by default), then calls `pushward.end_activity`. A delayed

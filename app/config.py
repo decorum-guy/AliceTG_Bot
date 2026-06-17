@@ -37,6 +37,10 @@ def _bool_env(name: str, default: bool) -> bool:
     return value in {"1", "true", "yes", "y", "on"}
 
 
+def _split_csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
@@ -53,6 +57,7 @@ class Settings:
     ha_url: str
     ha_long_lived_token: str
     ha_mobile_notify_service: str
+    ha_mobile_notify_services: tuple[str, ...]
     internal_webhook_secret: str
     shortcuts_secret_token: str
     reminders_state_path: str = "/app/data/reminders.json"
@@ -106,6 +111,7 @@ class Settings:
             ha_url=os.getenv("HA_URL", "http://homeassistant:8123").rstrip("/"),
             ha_long_lived_token=_required("HA_LONG_LIVED_TOKEN"),
             ha_mobile_notify_service=os.getenv("HA_MOBILE_NOTIFY_SERVICE", "").strip(),
+            ha_mobile_notify_services=_ha_mobile_notify_services_from_env(),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
             shortcuts_secret_token=os.getenv("SHORTCUTS_SECRET_TOKEN", "").strip(),
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()
@@ -151,3 +157,11 @@ def _required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Environment variable {name} is required")
     return value
+
+
+def _ha_mobile_notify_services_from_env() -> tuple[str, ...]:
+    services = _split_csv(os.getenv("HA_MOBILE_NOTIFY_SERVICES", ""))
+    if services:
+        return services
+    fallback = os.getenv("HA_MOBILE_NOTIFY_SERVICE", "").strip()
+    return (fallback,) if fallback else ()

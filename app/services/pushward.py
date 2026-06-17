@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.config import Settings
 from app.services.app_state import AppStateStore
-from app.services.home_assistant import HomeAssistantClient
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 
 LOGGER = logging.getLogger(__name__)
 WARMUP_UPDATE_INTERVAL_SECONDS = 30
@@ -51,6 +51,7 @@ class PushWardCoffeeActivity:
         self._cycle_id: str | None = None
         self._degraded = False
         self._consecutive_failures = 0
+        self._update_service: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -281,7 +282,6 @@ class PushWardCoffeeActivity:
             {
                 "slug": self._slug,
                 "state": "ongoing",
-                "template": "generic",
                 "state_text": state_text,
                 "subtitle": subtitle,
                 "progress": round(max(0.0, min(1.0, progress)), 3),
@@ -307,7 +307,6 @@ class PushWardCoffeeActivity:
             {
                 "slug": self._slug,
                 "state": "ongoing",
-                "template": "generic",
                 "state_text": "Кофемашина выключена",
                 "subtitle": " ",
                 "progress": 0.0,
@@ -324,6 +323,7 @@ class PushWardCoffeeActivity:
     async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> bool:
         if service == "update_activity":
             payload = _normalize_update_activity_payload(payload)
+            return await self._call_update_activity(payload, state=state)
         try:
             await self._ha.call_service(
                 "pushward",
@@ -332,11 +332,67 @@ class PushWardCoffeeActivity:
                 timeout_seconds=PUSHWARD_CALL_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            await self._log_error(service, exc, state=state)
+            await self._log_error(service, exc, state=state, payload=payload)
             self._record_failure(service, exc, state=state)
             return False
         self._consecutive_failures = 0
         return True
+
+    async def _call_update_activity(self, payload: dict[str, object], *, state: str | None = None) -> bool:
+        service = await self._select_update_service()
+        service_payload = self._payload_for_update_service(service, payload)
+        try:
+            await self._ha.call_service(
+                "pushward",
+                service,
+                service_payload,
+                timeout_seconds=PUSHWARD_CALL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            if service == "update_activity_generic" and _is_missing_service_error(exc):
+                LOGGER.warning(
+                    "PushWard activity update service unavailable, falling back: selected=pushward.%s fallback=pushward.update_activity slug=%s",
+                    service,
+                    self._slug,
+                )
+                self._update_service = "update_activity"
+                return await self._call_update_activity(payload, state=state)
+            await self._log_error(service, exc, state=state, payload=service_payload)
+            self._record_failure(service, exc, state=state)
+            return False
+        self._consecutive_failures = 0
+        return True
+
+    async def _select_update_service(self) -> str:
+        if self._update_service:
+            return self._update_service
+        selected = "update_activity"
+        try:
+            services = await self._ha.get_services()
+        except Exception as exc:
+            LOGGER.warning(
+                "Cannot resolve PushWard activity update services, using fallback: fallback=pushward.update_activity slug=%s error=%r",
+                self._slug,
+                exc,
+            )
+        else:
+            pushward_services = services.get("pushward", set())
+            if "update_activity_generic" in pushward_services:
+                selected = "update_activity_generic"
+            elif "update_activity" not in pushward_services:
+                LOGGER.warning(
+                    "PushWard activity update service not advertised by Home Assistant: slug=%s services=%s",
+                    self._slug,
+                    ",".join(sorted(pushward_services)),
+                )
+        self._update_service = selected
+        LOGGER.info("PushWard activity update service selected: pushward.%s", selected)
+        return selected
+
+    def _payload_for_update_service(self, service: str, payload: dict[str, object]) -> dict[str, object]:
+        if service == "update_activity_generic":
+            return {key: value for key, value in payload.items() if key != "template"}
+        return {**payload, "template": "generic"}
 
     async def _safe_one_shot_update(self, update_coro, state: str) -> None:
         try:
@@ -374,18 +430,37 @@ class PushWardCoffeeActivity:
                 self._consecutive_failures,
             )
 
-    async def _log_error(self, action: str, exc: Exception, *, state: str | None = None) -> None:
+    async def _log_error(
+        self,
+        action: str,
+        exc: Exception,
+        *,
+        state: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        status = exc.status if isinstance(exc, HomeAssistantError) else None
+        body = exc.body if isinstance(exc, HomeAssistantError) else None
+        safe_payload = _sanitize_payload(payload)
         LOGGER.warning(
-            "PushWard coffee activity failed: action=%s slug=%s state=%s error=%r",
+            "PushWard coffee activity failed: service=pushward.%s slug=%s state=%s payload=%s response_status=%s response_body=%s error=%r",
             action,
             self._slug,
             state,
+            safe_payload,
+            status,
+            _sanitize_response_body(body),
             exc,
         )
         safe_error = str(exc).replace("\n", " ")[:500]
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         state_part = f" state={state}" if state else ""
-        line = f"[{timestamp}] action={action} slug={self._slug}{state_part} error={safe_error}\n"
+        status_part = f" response_status={status}" if status is not None else ""
+        body_part = f" response_body={_sanitize_response_body(body)}" if body else ""
+        payload_part = f" payload={safe_payload}" if safe_payload is not None else ""
+        line = (
+            f"[{timestamp}] service=pushward.{action} slug={self._slug}{state_part}"
+            f"{payload_part}{status_part}{body_part} error={safe_error}\n"
+        )
         try:
             await asyncio.to_thread(self._append_error_log, line)
         except Exception:
@@ -418,6 +493,35 @@ def _warmup_accent_color(progress: float) -> str:
 def _post_warmup_ratio(elapsed_seconds: int, warmup_delay: int, long_delay: int) -> float:
     interval = max(1, long_delay - warmup_delay)
     return max(0.0, min(1.0, (elapsed_seconds - warmup_delay) / interval))
+
+
+def _sanitize_payload(payload: dict[str, object] | None) -> dict[str, object] | None:
+    if payload is None:
+        return None
+    sensitive_parts = ("token", "secret", "key", "password", "authorization")
+    safe: dict[str, object] = {}
+    for key, value in payload.items():
+        if any(part in key.lower() for part in sensitive_parts):
+            safe[key] = "<redacted>"
+        else:
+            safe[key] = value
+    return safe
+
+
+def _sanitize_response_body(body: str | None) -> str | None:
+    if body is None:
+        return None
+    return body.replace("\n", " ")[:1000]
+
+
+def _is_missing_service_error(exc: Exception) -> bool:
+    if not isinstance(exc, HomeAssistantError):
+        return False
+    if exc.status == 404:
+        return True
+    body = (exc.body or "").lower()
+    message = str(exc).lower()
+    return "service not found" in body or "service not found" in message
 
 
 def _post_warmup_accent_color(ratio: float) -> str:

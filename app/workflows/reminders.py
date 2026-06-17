@@ -213,24 +213,25 @@ class ReminderWorkflow:
 
             if settings.notify_iphone_enabled:
                 attempted = True
-                if not self._settings.ha_mobile_notify_service:
-                    LOGGER.info("Reminder mobile push skipped, HA_MOBILE_NOTIFY_SERVICE is not configured: id=%s", reminder.id)
+                if not self._settings.ha_mobile_notify_services:
+                    LOGGER.info("Reminder mobile push skipped, HA mobile notify services are not configured: id=%s", reminder.id)
                 else:
-                    try:
-                        await self._ha.notify(
-                            self._settings.ha_mobile_notify_service,
-                            title="Напоминание",
-                            message=reminder.text,
-                        )
-                    except HomeAssistantError as exc:
-                        LOGGER.exception("Reminder mobile push failed id=%s reason=%r", reminder.id, exc)
-                    else:
-                        delivered = True
-                        LOGGER.info(
-                            "Reminder mobile push sent: id=%s service=%s",
-                            reminder.id,
-                            self._settings.ha_mobile_notify_service,
-                        )
+                    for service in self._settings.ha_mobile_notify_services:
+                        try:
+                            await self._ha.notify(
+                                service,
+                                title="Напоминание",
+                                message=reminder.text,
+                            )
+                        except HomeAssistantError as exc:
+                            LOGGER.exception("Reminder mobile push failed id=%s service=%s reason=%r", reminder.id, service, exc)
+                        else:
+                            delivered = True
+                            LOGGER.info(
+                                "Reminder mobile push sent: id=%s service=%s",
+                                reminder.id,
+                                service,
+                            )
 
             if not attempted:
                 LOGGER.warning("Reminder fired but all notification channels are disabled: id=%s", reminder.id)

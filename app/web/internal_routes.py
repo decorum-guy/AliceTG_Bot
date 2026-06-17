@@ -555,32 +555,35 @@ async def shortcut_coffee_gif(_: web.Request) -> web.FileResponse:
 
 
 async def _send_shortcut_status_notification(settings: Settings, ha: HomeAssistantClient, message: str) -> None:
-    if not settings.ha_mobile_notify_service:
-        LOGGER.info("Shortcut coffee status push skipped because HA_MOBILE_NOTIFY_SERVICE is not configured")
+    if not settings.ha_mobile_notify_services:
+        LOGGER.warning("Shortcut coffee status push skipped because HA mobile notify services are not configured")
         return
     tag = "coffee_machine_shortcut_status"
-    try:
-        await ha.notify(
-            settings.ha_mobile_notify_service,
-            title="\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430",
-            message=message,
-            data={"tag": tag},
-        )
-    except HomeAssistantError as exc:
-        LOGGER.exception("Shortcut coffee status push failed: reason=%r", exc)
-        return
-
-    async def clear_later() -> None:
-        await asyncio.sleep(4)
+    for service in settings.ha_mobile_notify_services:
         try:
             await ha.notify(
-                settings.ha_mobile_notify_service,
+                service,
                 title="\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430",
-                message="clear_notification",
+                message=message,
                 data={"tag": tag},
             )
         except HomeAssistantError as exc:
-            LOGGER.exception("Shortcut coffee status push cleanup failed: reason=%r", exc)
+            LOGGER.exception("Shortcut coffee status push failed: service=%s reason=%r", service, exc)
+        else:
+            LOGGER.info("Shortcut coffee status push sent: service=%s", service)
+
+    async def clear_later() -> None:
+        await asyncio.sleep(4)
+        for service in settings.ha_mobile_notify_services:
+            try:
+                await ha.notify(
+                    service,
+                    title="\u041a\u043e\u0444\u0435\u043c\u0430\u0448\u0438\u043d\u0430",
+                    message="clear_notification",
+                    data={"tag": tag},
+                )
+            except HomeAssistantError as exc:
+                LOGGER.exception("Shortcut coffee status push cleanup failed: service=%s reason=%r", service, exc)
 
     asyncio.create_task(clear_later())
 

@@ -42,6 +42,14 @@ async def create_app() -> web.Application:
     else:
         LOGGER.info("Telegram API proxy is disabled")
     LOGGER.info("Telegram mode: %s", settings.telegram_mode)
+    if settings.ha_mobile_notify_services:
+        LOGGER.info(
+            "HA mobile notify services resolved: count=%s services=%s",
+            len(settings.ha_mobile_notify_services),
+            ",".join(settings.ha_mobile_notify_services),
+        )
+    else:
+        LOGGER.warning("HA mobile notify services resolved: count=0 services=")
 
     session = AiohttpSession(proxy=settings.telegram_proxy_url) if settings.telegram_proxy_url else AiohttpSession()
     bot = Bot(

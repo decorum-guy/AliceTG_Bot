@@ -703,7 +703,7 @@ def _coffee_alert_settings_text(app_state: AppStateStore, alert: str, settings: 
     delay = _format_delay(_coffee_alert_delay_seconds(app_state, alert))
     telegram_state = "включено" if _coffee_alert_channel_enabled(app_state, alert, "telegram") else "выключено"
     iphone_state = "включено" if _coffee_alert_channel_enabled(app_state, alert, "iphone") else "выключено"
-    if _coffee_alert_channel_enabled(app_state, alert, "iphone") and not settings.ha_mobile_notify_service:
+    if _coffee_alert_channel_enabled(app_state, alert, "iphone") and not settings.ha_mobile_notify_services:
         iphone_state = "включено, HA service не задан"
     channels_warning = "\nКаналы: <b>отключены</b>" if not _coffee_alert_channel_enabled(app_state, alert, "telegram") and not _coffee_alert_channel_enabled(app_state, alert, "iphone") else ""
     return (

@@ -114,8 +114,8 @@ async def reminders_notify_channel(callback: CallbackQuery, settings: Settings, 
     channel = (callback.data or "").rsplit(":", 1)[-1]
     if channel == "iphone":
         current_settings = await reminder_workflow.get_settings()
-        if not current_settings.notify_iphone_enabled and not settings.ha_mobile_notify_service:
-            await callback.answer("iPhone-уведомления не настроены. Укажи HA_MOBILE_NOTIFY_SERVICE.", show_alert=True)
+        if not current_settings.notify_iphone_enabled and not settings.ha_mobile_notify_services:
+            await callback.answer("iPhone-уведомления не настроены. Укажи HA_MOBILE_NOTIFY_SERVICES.", show_alert=True)
             return
     reminder_settings = await reminder_workflow.toggle_notification_channel(channel)
     if reminder_settings is None:

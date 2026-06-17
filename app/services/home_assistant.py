@@ -10,7 +10,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 class HomeAssistantError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int | None = None, body: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
 
 
 class HomeAssistantClient:
@@ -49,6 +52,25 @@ class HomeAssistantClient:
             payload=payload,
             timeout_seconds=timeout_seconds,
         )
+
+    async def get_services(self) -> dict[str, set[str]]:
+        response = await self._request(
+            "GET",
+            "/api/services",
+            error_message="Cannot read Home Assistant services",
+            json_response=True,
+        )
+        services: dict[str, set[str]] = {}
+        if not isinstance(response, list):
+            return services
+        for domain_info in response:
+            if not isinstance(domain_info, dict):
+                continue
+            domain = str(domain_info.get("domain", "")).strip()
+            service_map = domain_info.get("services")
+            if domain and isinstance(service_map, dict):
+                services[domain] = {str(name) for name in service_map}
+        return services
 
     async def notify(self, service_full_name: str, *, title: str, message: str, data: dict[str, Any] | None = None) -> None:
         service_full_name = service_full_name.strip()
@@ -113,7 +135,7 @@ class HomeAssistantClient:
         json_response: bool = False,
         not_found_none: bool = False,
         timeout_seconds: float | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> Any:
         url = f"{self._base_url}{path}"
         request_timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds is not None else None
         for attempt in range(2):
@@ -123,10 +145,12 @@ class HomeAssistantClient:
                 async with self._session.request(method, url, json=payload, timeout=request_timeout) as response:
                     if not_found_none and response.status == 404:
                         return None
-                    await self._raise_for_response(response)
+                    await self._raise_for_response(response, error_message=error_message)
                     if json_response:
                         return await response.json()
                     return None
+            except HomeAssistantError:
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
                 if isinstance(exc, RuntimeError) and not self._is_retryable_runtime_error(exc):
                     raise HomeAssistantError(error_message) from exc
@@ -142,12 +166,16 @@ class HomeAssistantClient:
                 raise HomeAssistantError(error_message) from exc
         raise HomeAssistantError(error_message)
 
-    async def _raise_for_response(self, response: aiohttp.ClientResponse) -> None:
+    async def _raise_for_response(self, response: aiohttp.ClientResponse, *, error_message: str) -> None:
         if response.status < 400:
             return
         body = await response.text()
         LOGGER.warning("Home Assistant API error: status=%s body=%s", response.status, body[:500])
-        raise HomeAssistantError(f"Home Assistant API returned HTTP {response.status}")
+        raise HomeAssistantError(
+            f"{error_message}: Home Assistant API returned HTTP {response.status}",
+            status=response.status,
+            body=body,
+        )
 
     async def _recreate_session(self) -> None:
         old_session = self._session

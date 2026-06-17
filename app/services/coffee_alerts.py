@@ -169,36 +169,8 @@ class CoffeeAlertScheduler:
                         )
 
                 if self._iphone_channel_enabled(alert) and not self._iphone_channel_delivered(alert):
-                    if not self._settings.ha_mobile_notify_service:
-                        LOGGER.info("Coffee alert iPhone push skipped, HA_MOBILE_NOTIFY_SERVICE is not configured: alert=%s", alert)
-                    else:
-                        LOGGER.info("Coffee alert send attempt: alert=%s channel=iphone attempt=%s", alert, attempt)
-                        try:
-                            await self._ha.notify(
-                                self._settings.ha_mobile_notify_service,
-                                title=title,
-                                message=push_message,
-                                data={
-                                    "tag": "coffee_machine_alert",
-                                    **self._warmup_gif_data(alert),
-                                    "actions": [
-                                        {
-                                            "action": "COFFEE_TURN_OFF",
-                                            "title": "Выключить",
-                                            "destructive": True,
-                                        }
-                                    ]
-                                },
-                            )
-                        except HomeAssistantError as exc:
-                            LOGGER.exception("Coffee mobile push failed alert=%s attempt=%s reason=%r", alert, attempt, exc)
-                        else:
-                            await self._mark_iphone_channel_delivered(alert)
-                            LOGGER.info(
-                                "Coffee alert sent: alert=%s channel=iphone service=%s",
-                                alert,
-                                self._settings.ha_mobile_notify_service,
-                            )
+                    if await self._send_mobile_alert(alert, title=title, message=push_message, attempt=attempt):
+                        await self._mark_iphone_channel_delivered(alert)
 
                 if self._is_alert_delivered(alert):
                     LOGGER.info("Coffee alert delivered through all enabled channels: alert=%s", alert)
@@ -229,7 +201,7 @@ class CoffeeAlertScheduler:
         effective_channels = []
         if self._telegram_channel_enabled(alert):
             effective_channels.append(self._telegram_channel_delivered(alert))
-        if self._iphone_channel_enabled(alert) and self._settings.ha_mobile_notify_service:
+        if self._iphone_channel_enabled(alert) and self._settings.ha_mobile_notify_services:
             effective_channels.append(self._iphone_channel_delivered(alert))
         if not effective_channels:
             LOGGER.info("Coffee alert has no effective delivery channels: alert=%s", alert)
@@ -283,6 +255,39 @@ class CoffeeAlertScheduler:
             LOGGER.info("Coffee warmup gif skipped because COFFEE_WARMUP_GIF_URL is not set")
             return {}
         return {"image": self._settings.coffee_warmup_gif_url}
+
+    async def _send_mobile_alert(self, alert: str, *, title: str, message: str, attempt: int) -> bool:
+        services = self._settings.ha_mobile_notify_services
+        if not services:
+            LOGGER.warning("Coffee alert iPhone push skipped, HA mobile notify services are not configured: alert=%s", alert)
+            return False
+
+        sent = False
+        for service in services:
+            LOGGER.info("Coffee alert send attempt: alert=%s service=%s attempt=%s", alert, service, attempt)
+            try:
+                await self._ha.notify(
+                    service,
+                    title=title,
+                    message=message,
+                    data={
+                        "tag": "coffee_machine_alert",
+                        **self._warmup_gif_data(alert),
+                        "actions": [
+                            {
+                                "action": "COFFEE_TURN_OFF",
+                                "title": "Выключить",
+                                "destructive": True,
+                            }
+                        ],
+                    },
+                )
+            except HomeAssistantError as exc:
+                LOGGER.exception("Coffee alert failed: alert=%s service=%s error=%r", alert, service, exc)
+            else:
+                sent = True
+                LOGGER.info("Coffee alert sent: alert=%s service=%s", alert, service)
+        return sent
 
 
 def _normalize_datetime(value: str | None) -> str | None:
