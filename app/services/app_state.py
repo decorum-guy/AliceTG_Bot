@@ -35,6 +35,18 @@ class AppStateStore:
         return int(self._state.get("coffee_long_running_alert_delay_seconds", DEFAULT_COFFEE_LONG_RUNNING_ALERT_DELAY_SECONDS))
 
     @property
+    def legacy_coffee_warmup_seconds(self) -> int:
+        return self.coffee_warmed_up_alert_delay_seconds
+
+    @property
+    def legacy_coffee_long_running_seconds(self) -> int:
+        return self.coffee_long_running_alert_delay_seconds
+
+    @property
+    def coffee_timing_migrated_to_ha(self) -> bool:
+        return bool(self._state.get("coffee_timing_migrated_to_ha", False))
+
+    @property
     def coffee_warmed_up_notify_telegram(self) -> bool:
         return bool(self._state.get("coffee_warmed_up_notify_telegram", True))
 
@@ -72,6 +84,11 @@ class AppStateStore:
     async def set_coffee_long_running_alert_delay_seconds(self, delay_seconds: int) -> None:
         async with self._lock:
             self._state["coffee_long_running_alert_delay_seconds"] = delay_seconds
+            await asyncio.to_thread(self._save)
+
+    async def mark_coffee_timing_migrated_to_ha(self) -> None:
+        async with self._lock:
+            self._state["coffee_timing_migrated_to_ha"] = True
             await asyncio.to_thread(self._save)
 
     async def set_coffee_warmed_up_notify_telegram(self, enabled: bool) -> None:

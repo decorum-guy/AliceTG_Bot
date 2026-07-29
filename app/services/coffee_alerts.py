@@ -8,6 +8,7 @@ from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
 from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
+from app.services.coffee_timing_policy import CoffeeTimingPolicyService
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
@@ -24,6 +25,7 @@ class CoffeeAlertScheduler:
         app_state: AppStateStore,
         telegram_messages: TelegramMessages,
         ha: HomeAssistantClient,
+        timing_policy: CoffeeTimingPolicyService,
         pushward_activity: PushWardCoffeeActivity | None = None,
         pushward_widget: PushWardCoffeeWidget | None = None,
     ) -> None:
@@ -31,6 +33,7 @@ class CoffeeAlertScheduler:
         self._app_state = app_state
         self._telegram_messages = telegram_messages
         self._ha = ha
+        self._timing_policy = timing_policy
         self._pushward_activity = pushward_activity
         self._pushward_widget = pushward_widget
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -91,10 +94,15 @@ class CoffeeAlertScheduler:
         self._schedule_active_alerts()
 
     def _schedule_active_alerts(self) -> None:
+        warmup_seconds = self._timing_policy.warmup_duration_seconds
+        long_running_seconds = self._timing_policy.long_running_threshold_seconds
+        if warmup_seconds is None or long_running_seconds is None:
+            LOGGER.warning("Coffee alerts not scheduled: canonical HA timing policy is unavailable")
+            return
         if self._app_state.coffee_warmed_up_alert_enabled and not self._is_alert_delivered("warmed_up"):
-            self._schedule("warmed_up", self._app_state.coffee_warmed_up_alert_delay_seconds)
+            self._schedule("warmed_up", warmup_seconds)
         if self._app_state.coffee_long_running_alert_enabled and not self._is_alert_delivered("long_running"):
-            self._schedule("long_running", self._app_state.coffee_long_running_alert_delay_seconds)
+            self._schedule("long_running", long_running_seconds)
 
     def _schedule(self, alert: str, delay_seconds: int) -> None:
         on_since = self._app_state.coffee_on_since

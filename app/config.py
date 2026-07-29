@@ -60,6 +60,8 @@ class Settings:
     ha_mobile_notify_services: tuple[str, ...]
     internal_webhook_secret: str
     shortcuts_secret_token: str
+    app_version: str = "unknown"
+    app_commit: str = "unknown"
     reminders_state_path: str = "/app/data/reminders.json"
     app_state_path: str = "/app/data/state.json"
     pushward_coffee_activity_enabled: bool = False
@@ -114,6 +116,8 @@ class Settings:
             ha_mobile_notify_services=_ha_mobile_notify_services_from_env(),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
             shortcuts_secret_token=os.getenv("SHORTCUTS_SECRET_TOKEN", "").strip(),
+            app_version=os.getenv("APP_VERSION", "unknown").strip() or "unknown",
+            app_commit=os.getenv("APP_COMMIT", "unknown").strip() or "unknown",
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()
             or "/app/data/reminders.json",
             app_state_path=os.getenv("APP_STATE_PATH", "/app/data/state.json").strip() or "/app/data/state.json",

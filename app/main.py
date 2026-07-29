@@ -15,7 +15,8 @@ from app.handlers import admin_modes, coffee, common, reminders, start, tea, wat
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
-from app.services.home_assistant import HomeAssistantClient
+from app.services.coffee_timing_policy import CoffeeTimingPolicyService, TimingPolicyError
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
 from app.services.reminder_store import ReminderStore
@@ -69,6 +70,14 @@ async def create_app() -> web.Application:
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
     storage = MemoryStorage()
     app_state = AppStateStore(settings.app_state_path)
+    coffee_timing_policy = CoffeeTimingPolicyService(ha)
+    try:
+        await coffee_timing_policy.refresh()
+        LOGGER.info("Canonical coffee timing policy loaded from Home Assistant")
+    except (HomeAssistantError, TimingPolicyError):
+        LOGGER.warning(
+            "Canonical coffee timing policy is unavailable; timing-dependent alerts are paused"
+        )
     reminder_store = ReminderStore(settings.reminders_state_path)
     admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
@@ -76,13 +85,23 @@ async def create_app() -> web.Application:
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
     water_workflow = WaterWorkflow(settings, ha, storage, telegram_messages)
     reminder_workflow = ReminderWorkflow(reminder_store, telegram_messages, settings.telegram_admin_chat_id, settings, ha)
-    pushward_coffee_activity = PushWardCoffeeActivity(settings, ha, app_state)
-    pushward_coffee_widget = PushWardCoffeeWidget(settings, app_state)
+    pushward_coffee_activity = PushWardCoffeeActivity(
+        settings,
+        ha,
+        app_state,
+        coffee_timing_policy,
+    )
+    pushward_coffee_widget = PushWardCoffeeWidget(
+        settings,
+        app_state,
+        coffee_timing_policy,
+    )
     coffee_alert_scheduler = CoffeeAlertScheduler(
         settings,
         app_state,
         telegram_messages,
         ha,
+        coffee_timing_policy,
         pushward_coffee_activity,
         pushward_coffee_widget,
     )
@@ -91,6 +110,7 @@ async def create_app() -> web.Application:
     dispatcher["ha"] = ha
     dispatcher["storage"] = storage
     dispatcher["app_state"] = app_state
+    dispatcher["coffee_timing_policy"] = coffee_timing_policy
     dispatcher["admin_modes"] = admin_mode_manager
     dispatcher["telegram_messages"] = telegram_messages
     dispatcher["coffee_workflow"] = coffee_workflow
@@ -107,6 +127,7 @@ async def create_app() -> web.Application:
     app["dispatcher"] = dispatcher
     app["ha"] = ha
     app["app_state"] = app_state
+    app["coffee_timing_policy"] = coffee_timing_policy
     app["admin_modes"] = admin_mode_manager
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow

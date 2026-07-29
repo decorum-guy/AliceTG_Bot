@@ -16,6 +16,7 @@ from app.messages.common import admin_menu_text
 from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager, AdminModeSession
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
+from app.services.coffee_timing_policy import CoffeeTimingPolicyService, TimingPolicyError
 from app.services.coffee_machine import set_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
@@ -26,8 +27,79 @@ from app.workflows.water import WaterAnswer, WaterWorkflow
 LOGGER = logging.getLogger(__name__)
 
 
-async def health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True})
+async def health_live(_: web.Request) -> web.Response:
+    return web.json_response(
+        {"status": "live", "observed_at": datetime.now(timezone.utc).isoformat()}
+    )
+
+
+async def health_ready(request: web.Request) -> web.Response:
+    settings: Settings = request.app["settings"]
+    ha: HomeAssistantClient = request.app["ha"]
+    timing_policy: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
+    bot = request.app["bot"]
+    try:
+        coffee_state = await ha.get_state(settings.coffee_switch_entity)
+        await timing_policy.refresh()
+        ha_ready = coffee_state is not None
+        timing_ready = True
+    except (HomeAssistantError, TimingPolicyError):
+        ha_ready = False
+        timing_ready = False
+    telegram_ready = _telegram_transport_ready(bot)
+    ready = ha_ready and telegram_ready
+    return web.json_response(
+        {
+            "status": "ready" if ready else "not_ready",
+            "telegram": "ready" if telegram_ready else "not_ready",
+            "home_assistant": "ready" if ha_ready else "not_ready",
+            "timing_helpers": "ready" if timing_ready else "not_ready",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        status=200 if ready else 503,
+    )
+
+
+async def health_details(request: web.Request) -> web.Response:
+    _check_internal_secret(request)
+    settings: Settings = request.app["settings"]
+    timing_policy: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
+    policy = timing_policy.policy
+    bot = request.app["bot"]
+    timing_status = (
+        "stale"
+        if policy is not None and timing_policy.last_error_at is not None
+        else "ready"
+        if policy is not None
+        else "unavailable"
+    )
+    return web.json_response(
+        {
+            "status": "running",
+            "telegram_transport": "ready" if _telegram_transport_ready(bot) else "not_ready",
+            "home_assistant": "ready" if timing_status == "ready" else "unknown",
+            "timing_helpers": timing_status,
+            "timing_policy_fetched_at": policy.fetched_at if policy else None,
+            "version": settings.app_version,
+            "commit": settings.app_commit,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+async def health(request: web.Request) -> web.Response:
+    return await health_live(request)
+
+
+def _telegram_transport_ready(bot: object) -> bool:
+    session = getattr(bot, "session", None)
+    if session is None:
+        return False
+    closed = getattr(session, "closed", None)
+    if isinstance(closed, bool):
+        return not closed
+    aiohttp_session = getattr(session, "_session", None)
+    return aiohttp_session is None or not bool(getattr(aiohttp_session, "closed", False))
 
 
 def _check_internal_secret(request: web.Request) -> None:
@@ -232,6 +304,7 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     settings: Settings = request.app["settings"]
     app_state: AppStateStore = request.app["app_state"]
+    timing_policy: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
     ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
 
@@ -244,7 +317,13 @@ async def coffee_warmed_up_alert(request: web.Request) -> web.Response:
         LOGGER.info("Coffee warm-up alert skipped because coffee machine is not on")
         return web.json_response({"ok": True, "sent": False})
     runtime_seconds = _coffee_runtime_seconds(switch_state)
-    if runtime_seconds < app_state.coffee_warmed_up_alert_delay_seconds:
+    delay_seconds = timing_policy.warmup_duration_seconds
+    if delay_seconds is None:
+        return web.json_response(
+            {"ok": False, "sent": False, "error": "timing_policy_unavailable"},
+            status=503,
+        )
+    if runtime_seconds < delay_seconds:
         LOGGER.info("Coffee warm-up legacy alert skipped because configured delay is not reached")
         return web.json_response({"ok": True, "sent": False, "not_due": True})
     if app_state.coffee_machine_state != "on":
@@ -271,6 +350,7 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
     _check_internal_secret(request)
     settings: Settings = request.app["settings"]
     app_state: AppStateStore = request.app["app_state"]
+    timing_policy: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
     ha: HomeAssistantClient = request.app["ha"]
     bot = request.app["bot"]
 
@@ -283,7 +363,13 @@ async def coffee_long_running_alert(request: web.Request) -> web.Response:
         LOGGER.info("Coffee long-running alert skipped because coffee machine is not on")
         return web.json_response({"ok": True, "sent": False})
     runtime_seconds = _coffee_runtime_seconds(switch_state)
-    if runtime_seconds < app_state.coffee_long_running_alert_delay_seconds:
+    delay_seconds = timing_policy.long_running_threshold_seconds
+    if delay_seconds is None:
+        return web.json_response(
+            {"ok": False, "sent": False, "error": "timing_policy_unavailable"},
+            status=503,
+        )
+    if runtime_seconds < delay_seconds:
         LOGGER.info("Coffee long-running legacy alert skipped because configured delay is not reached")
         return web.json_response({"ok": True, "sent": False, "not_due": True})
     if app_state.coffee_machine_state != "on":
@@ -658,6 +744,9 @@ async def shortcut_espresso(request: web.Request) -> web.Response:
 
 def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health", health)
+    app.router.add_get("/health/live", health_live)
+    app.router.add_get("/health/ready", health_ready)
+    app.router.add_get("/health/details", health_details)
     app.router.add_post("/shortcut/espresso", shortcut_espresso)
     app.router.add_get("/shortcut/assets/coffee.gif", shortcut_coffee_gif)
     app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)

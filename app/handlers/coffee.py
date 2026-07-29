@@ -27,6 +27,7 @@ from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya
 from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
+from app.services.coffee_timing_policy import CoffeeTimingPolicyService, TimingPolicyError
 from app.services.coffee_machine import turn_off_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
@@ -70,6 +71,7 @@ async def show_coffee_settings(
     callback: CallbackQuery,
     settings: Settings,
     app_state: AppStateStore,
+    coffee_timing_policy: CoffeeTimingPolicyService,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -77,7 +79,7 @@ async def show_coffee_settings(
 
     if callback.message:
         await callback.message.edit_text(
-            _coffee_settings_text(app_state),
+            _coffee_settings_text(app_state, coffee_timing_policy),
             reply_markup=coffee_settings(),
         )
     await callback.answer()
@@ -88,6 +90,7 @@ async def show_coffee_alert_settings(
     callback: CallbackQuery,
     settings: Settings,
     app_state: AppStateStore,
+    coffee_timing_policy: CoffeeTimingPolicyService,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -99,7 +102,7 @@ async def show_coffee_alert_settings(
         return
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert, settings),
+            _coffee_alert_settings_text(app_state, coffee_timing_policy, alert, settings),
             reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer()
@@ -152,6 +155,7 @@ async def toggle_coffee_alert(
     settings: Settings,
     app_state: AppStateStore,
     coffee_alert_scheduler: CoffeeAlertScheduler,
+    coffee_timing_policy: CoffeeTimingPolicyService,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -166,7 +170,7 @@ async def toggle_coffee_alert(
     coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert, settings),
+            _coffee_alert_settings_text(app_state, coffee_timing_policy, alert, settings),
             reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer("Включено" if enabled else "Выключено")
@@ -178,6 +182,7 @@ async def toggle_legacy_coffee_alert(
     settings: Settings,
     app_state: AppStateStore,
     coffee_alert_scheduler: CoffeeAlertScheduler,
+    coffee_timing_policy: CoffeeTimingPolicyService,
 ) -> None:
     legacy_alert = "warmed_up" if callback.data == "coffee:toggle_warmed_up_alert" else "long_running"
     enabled = not _coffee_alert_enabled(app_state, legacy_alert)
@@ -185,7 +190,7 @@ async def toggle_legacy_coffee_alert(
     coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, legacy_alert, settings),
+            _coffee_alert_settings_text(app_state, coffee_timing_policy, legacy_alert, settings),
             reply_markup=_coffee_alert_settings_markup(app_state, legacy_alert),
         )
     await callback.answer("Включено" if enabled else "Выключено")
@@ -197,6 +202,7 @@ async def toggle_coffee_alert_channel(
     settings: Settings,
     app_state: AppStateStore,
     coffee_alert_scheduler: CoffeeAlertScheduler,
+    coffee_timing_policy: CoffeeTimingPolicyService,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -216,7 +222,7 @@ async def toggle_coffee_alert_channel(
     coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert, settings),
+            _coffee_alert_settings_text(app_state, coffee_timing_policy, alert, settings),
             reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer("Включено" if enabled else "Выключено")
@@ -266,6 +272,7 @@ async def confirm_coffee_alert_time(
     settings: Settings,
     app_state: AppStateStore,
     coffee_alert_scheduler: CoffeeAlertScheduler,
+    coffee_timing_policy: CoffeeTimingPolicyService,
 ) -> None:
     if not settings.is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -276,12 +283,24 @@ async def confirm_coffee_alert_time(
     if alert not in COFFEE_ALERTS or draft is None or draft.alert != alert or draft.delay_seconds is None:
         await callback.answer("Сначала введи время", show_alert=True)
         return
-    await _set_coffee_alert_delay_seconds(app_state, alert, draft.delay_seconds)
+    try:
+        await _set_coffee_alert_delay_seconds(
+            coffee_timing_policy,
+            alert,
+            draft.delay_seconds,
+        )
+    except (HomeAssistantError, TimingPolicyError):
+        LOGGER.exception("Cannot update canonical coffee timing helper in Home Assistant")
+        await callback.answer(
+            "Home Assistant недоступен — значение не изменено",
+            show_alert=True,
+        )
+        return
     coffee_alert_scheduler.reschedule_active_alerts()
     _coffee_alert_time_drafts.pop(callback.from_user.id, None)
     if callback.message:
         await callback.message.edit_text(
-            _coffee_alert_settings_text(app_state, alert, settings),
+            _coffee_alert_settings_text(app_state, coffee_timing_policy, alert, settings),
             reply_markup=_coffee_alert_settings_markup(app_state, alert),
         )
     await callback.answer("Сохранено")
@@ -675,14 +694,25 @@ def _parse_ha_datetime(value: str | None) -> datetime | None:
         return None
 
 
-def _coffee_settings_text(app_state: AppStateStore) -> str:
+def _coffee_settings_text(
+    app_state: AppStateStore,
+    timing_policy: CoffeeTimingPolicyService,
+) -> str:
     warmed_up_state = "включено" if app_state.coffee_warmed_up_alert_enabled else "выключено"
     long_running_state = "включено" if app_state.coffee_long_running_alert_enabled else "выключено"
+    warmup = timing_policy.warmup_duration_seconds
+    long_running = timing_policy.long_running_threshold_seconds
+    timing_state = (
+        f"{_format_delay(warmup)} / {_format_delay(long_running)}"
+        if warmup is not None and long_running is not None
+        else "временно недоступны"
+    )
     return (
         "⚙️ <b>Настройки кофемашины</b>\n\n"
-        f"Разогрев: <b>{warmed_up_state}</b>, {_format_delay(app_state.coffee_warmed_up_alert_delay_seconds)}\n"
-        f"Перегрев: <b>{long_running_state}</b>, {_format_delay(app_state.coffee_long_running_alert_delay_seconds)}\n\n"
-        "Эти настройки управляют только Telegram-уведомлениями, не самой кофемашиной."
+        f"Разогрев: <b>{warmed_up_state}</b>\n"
+        f"Долгая работа: <b>{long_running_state}</b>\n"
+        f"Пороговые значения HA: <b>{timing_state}</b>\n\n"
+        "Время хранится в Home Assistant; Telegram изменяет канонические helpers."
     )
 
 
@@ -697,10 +727,16 @@ def _coffee_pushward_settings_text(app_state: AppStateStore, settings: Settings)
     )
 
 
-def _coffee_alert_settings_text(app_state: AppStateStore, alert: str, settings: Settings) -> str:
+def _coffee_alert_settings_text(
+    app_state: AppStateStore,
+    timing_policy: CoffeeTimingPolicyService,
+    alert: str,
+    settings: Settings,
+) -> str:
     title = "Уведомление о разогреве" if alert == "warmed_up" else "Уведомление о долгой работе"
     state = "включено" if _coffee_alert_enabled(app_state, alert) else "выключено"
-    delay = _format_delay(_coffee_alert_delay_seconds(app_state, alert))
+    delay_seconds = _coffee_alert_delay_seconds(timing_policy, alert)
+    delay = _format_delay(delay_seconds) if delay_seconds is not None else "недоступно в Home Assistant"
     telegram_state = "включено" if _coffee_alert_channel_enabled(app_state, alert, "telegram") else "выключено"
     iphone_state = "включено" if _coffee_alert_channel_enabled(app_state, alert, "iphone") else "выключено"
     if _coffee_alert_channel_enabled(app_state, alert, "iphone") and not settings.ha_mobile_notify_services:
@@ -767,15 +803,26 @@ async def _set_coffee_alert_enabled(app_state: AppStateStore, alert: str, enable
     await app_state.set_coffee_long_running_alert_enabled(enabled)
 
 
-def _coffee_alert_delay_seconds(app_state: AppStateStore, alert: str) -> int:
-    return app_state.coffee_warmed_up_alert_delay_seconds if alert == "warmed_up" else app_state.coffee_long_running_alert_delay_seconds
+def _coffee_alert_delay_seconds(
+    timing_policy: CoffeeTimingPolicyService,
+    alert: str,
+) -> int | None:
+    return (
+        timing_policy.warmup_duration_seconds
+        if alert == "warmed_up"
+        else timing_policy.long_running_threshold_seconds
+    )
 
 
-async def _set_coffee_alert_delay_seconds(app_state: AppStateStore, alert: str, delay_seconds: int) -> None:
+async def _set_coffee_alert_delay_seconds(
+    timing_policy: CoffeeTimingPolicyService,
+    alert: str,
+    delay_seconds: int,
+) -> None:
     if alert == "warmed_up":
-        await app_state.set_coffee_warmed_up_alert_delay_seconds(delay_seconds)
+        await timing_policy.set_warmup_duration_seconds(delay_seconds)
         return
-    await app_state.set_coffee_long_running_alert_delay_seconds(delay_seconds)
+    await timing_policy.set_long_running_threshold_seconds(delay_seconds)
 
 
 def parse_coffee_alert_delay_seconds(text: str) -> int | None:
