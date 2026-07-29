@@ -25,7 +25,7 @@ from app.keyboards.coffee import (
 )
 from app.keyboards.main import sonya_order_confirm_menu, sonya_order_menu, sonya_syrup_menu, sonya_temperature_menu
 from app.messages import coffee as coffee_messages
-from app.services.app_state import AppStateStore
+from app.services.app_state import AppStatePersistenceError, AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
 from app.services.coffee_timing_policy import CoffeeTimingPolicyService, TimingPolicyError
 from app.services.coffee_machine import turn_off_coffee_machine, turn_on_coffee_machine
@@ -166,8 +166,14 @@ async def toggle_coffee_alert(
         await callback.answer("Неизвестная настройка", show_alert=True)
         return
     enabled = not _coffee_alert_enabled(app_state, alert)
-    await _set_coffee_alert_enabled(app_state, alert, enabled)
-    coffee_alert_scheduler.reschedule_active_alerts()
+    try:
+        changed = await _set_coffee_alert_enabled(app_state, alert, enabled)
+    except AppStatePersistenceError:
+        LOGGER.warning("Cannot persist coffee notification setting")
+        await callback.answer("Не удалось сохранить настройку", show_alert=True)
+        return
+    if changed:
+        coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
             _coffee_alert_settings_text(app_state, coffee_timing_policy, alert, settings),
@@ -186,8 +192,18 @@ async def toggle_legacy_coffee_alert(
 ) -> None:
     legacy_alert = "warmed_up" if callback.data == "coffee:toggle_warmed_up_alert" else "long_running"
     enabled = not _coffee_alert_enabled(app_state, legacy_alert)
-    await _set_coffee_alert_enabled(app_state, legacy_alert, enabled)
-    coffee_alert_scheduler.reschedule_active_alerts()
+    try:
+        changed = await _set_coffee_alert_enabled(
+            app_state,
+            legacy_alert,
+            enabled,
+        )
+    except AppStatePersistenceError:
+        LOGGER.warning("Cannot persist coffee notification setting")
+        await callback.answer("Не удалось сохранить настройку", show_alert=True)
+        return
+    if changed:
+        coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
             _coffee_alert_settings_text(app_state, coffee_timing_policy, legacy_alert, settings),
@@ -218,8 +234,19 @@ async def toggle_coffee_alert_channel(
         return
 
     enabled = not _coffee_alert_channel_enabled(app_state, alert, channel)
-    await _set_coffee_alert_channel_enabled(app_state, alert, channel, enabled)
-    coffee_alert_scheduler.reschedule_active_alerts()
+    try:
+        changed = await _set_coffee_alert_channel_enabled(
+            app_state,
+            alert,
+            channel,
+            enabled,
+        )
+    except AppStatePersistenceError:
+        LOGGER.warning("Cannot persist coffee notification setting")
+        await callback.answer("Не удалось сохранить настройку", show_alert=True)
+        return
+    if changed:
+        coffee_alert_scheduler.reschedule_active_alerts()
     if callback.message:
         await callback.message.edit_text(
             _coffee_alert_settings_text(app_state, coffee_timing_policy, alert, settings),
@@ -783,24 +810,29 @@ def _coffee_alert_channel_enabled(app_state: AppStateStore, alert: str, channel:
     return app_state.coffee_long_running_notify_iphone
 
 
-async def _set_coffee_alert_channel_enabled(app_state: AppStateStore, alert: str, channel: str, enabled: bool) -> None:
+async def _set_coffee_alert_channel_enabled(
+    app_state: AppStateStore,
+    alert: str,
+    channel: str,
+    enabled: bool,
+) -> bool:
     if alert == "warmed_up" and channel == "telegram":
-        await app_state.set_coffee_warmed_up_notify_telegram(enabled)
-        return
+        return await app_state.set_coffee_warmed_up_notify_telegram(enabled)
     if alert == "warmed_up" and channel == "iphone":
-        await app_state.set_coffee_warmed_up_notify_iphone(enabled)
-        return
+        return await app_state.set_coffee_warmed_up_notify_iphone(enabled)
     if channel == "telegram":
-        await app_state.set_coffee_long_running_notify_telegram(enabled)
-        return
-    await app_state.set_coffee_long_running_notify_iphone(enabled)
+        return await app_state.set_coffee_long_running_notify_telegram(enabled)
+    return await app_state.set_coffee_long_running_notify_iphone(enabled)
 
 
-async def _set_coffee_alert_enabled(app_state: AppStateStore, alert: str, enabled: bool) -> None:
+async def _set_coffee_alert_enabled(
+    app_state: AppStateStore,
+    alert: str,
+    enabled: bool,
+) -> bool:
     if alert == "warmed_up":
-        await app_state.set_coffee_warmed_up_alert_enabled(enabled)
-        return
-    await app_state.set_coffee_long_running_alert_enabled(enabled)
+        return await app_state.set_coffee_warmed_up_alert_enabled(enabled)
+    return await app_state.set_coffee_long_running_alert_enabled(enabled)
 
 
 def _coffee_alert_delay_seconds(

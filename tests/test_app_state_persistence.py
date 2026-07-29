@@ -63,6 +63,40 @@ class AppStatePersistenceTests(unittest.IsolatedAsyncioTestCase):
             updated_at,
         )
 
+    async def test_telegram_setters_share_durable_revision_and_aba_semantics(
+        self,
+    ) -> None:
+        revision_a = self.store.coffee_notification_revision()
+        updated_a = self.store.coffee_notification_settings_updated_at
+
+        changed = await self.store.set_coffee_warmed_up_alert_enabled(False)
+        revision_b = self.store.coffee_notification_revision()
+        updated_b = self.store.coffee_notification_settings_updated_at
+        self.assertTrue(changed)
+        self.assertNotEqual(revision_b, revision_a)
+        self.assertNotEqual(updated_b, updated_a)
+
+        changed = await self.store.set_coffee_warmed_up_alert_enabled(False)
+        self.assertFalse(changed)
+        self.assertEqual(self.store.coffee_notification_revision(), revision_b)
+        self.assertEqual(
+            self.store.coffee_notification_settings_updated_at,
+            updated_b,
+        )
+
+        changed = await self.store.set_coffee_warmed_up_alert_enabled(True)
+        revision_c = self.store.coffee_notification_revision()
+        self.assertTrue(changed)
+        self.assertNotIn(revision_c, {revision_a, revision_b})
+
+        channel_revision = revision_c
+        changed = await self.store.set_coffee_long_running_notify_iphone(False)
+        self.assertTrue(changed)
+        self.assertNotEqual(
+            self.store.coffee_notification_revision(),
+            channel_revision,
+        )
+
     async def test_legacy_state_gets_metadata_without_changing_values(self) -> None:
         legacy_path = Path(self.temp.name) / "legacy.json"
         legacy_path.write_text(
@@ -121,3 +155,26 @@ class AppStatePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store._state, original_memory)
         self.assertEqual(self.path.read_bytes(), original_file)
         self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
+
+    async def test_telegram_setter_failure_keeps_metadata_memory_and_file(
+        self,
+    ) -> None:
+        original_memory = dict(self.store._state)
+        original_file = self.path.read_bytes()
+        revision = self.store.coffee_notification_revision()
+        updated_at = self.store.coffee_notification_settings_updated_at
+
+        with patch(
+            "app.services.app_state.os.replace",
+            side_effect=OSError("private path omitted"),
+        ):
+            with self.assertRaises(AppStatePersistenceError):
+                await self.store.set_coffee_long_running_notify_telegram(False)
+
+        self.assertEqual(self.store._state, original_memory)
+        self.assertEqual(self.path.read_bytes(), original_file)
+        self.assertEqual(self.store.coffee_notification_revision(), revision)
+        self.assertEqual(
+            self.store.coffee_notification_settings_updated_at,
+            updated_at,
+        )

@@ -225,6 +225,30 @@ class ControlCenterApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.state.coffee_warmed_up_notify_telegram)
         self.assertEqual(self.scheduler.reschedules, 0)
 
+    async def test_telegram_mutation_invalidates_control_center_revision(self) -> None:
+        response = await self.client.get(
+            "/internal/notification-settings/coffee",
+            headers=self.auth,
+        )
+        current = await response.json()
+
+        changed = await self.state.set_coffee_warmed_up_notify_telegram(False)
+        self.assertTrue(changed)
+        self.assertNotEqual(
+            self.state.coffee_notification_revision(),
+            current["revision"],
+        )
+
+        stale = await self.client.patch(
+            "/internal/notification-settings/coffee",
+            headers=self.auth,
+            json={
+                "expectedRevision": current["revision"],
+                "longRunning": {"enabled": False},
+            },
+        )
+        self.assertEqual(stale.status, 409)
+
     async def test_timing_get_patch_readback_conflict_bounds_and_outage(self) -> None:
         response = await self.client.get(
             "/internal/control-center/coffee/timing",

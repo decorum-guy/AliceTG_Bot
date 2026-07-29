@@ -33,12 +33,20 @@ Notification settings contain only warm-up/long-running enable flags and their
 Telegram/iPhone channel flags. Timing and delivery receipts are excluded.
 PATCH is partial, uses `expectedRevision`, persists atomically and reschedules
 active alerts exactly once only when the effective settings changed.
+Telegram handlers and Control Center PATCH call the same
+`AppStateStore.mutate_coffee_notification_settings` primitive for all six
+values. Telegram mutations do not require an expected revision, but every
+effective change still receives a new persistent opaque revision and UTC
+`updatedAt`; a Control Center PATCH holding the prior revision then receives
+`409`.
 The candidate state is flushed and atomically replaced before in-memory state
 changes. Persistent opaque revision and UTC `updatedAt` metadata change only
 for an effective mutation. This prevents ABA revision reuse (`A → B → A`).
 Legacy state receives metadata without changing effective notification values.
 Write/replace failures return a sanitized `503`, preserve the prior file and
 memory, and do not reschedule alerts.
+Telegram receives only `Не удалось сохранить настройку` on persistence
+failure; filesystem paths and raw exceptions are not shown.
 
 Timing is read from and written to:
 

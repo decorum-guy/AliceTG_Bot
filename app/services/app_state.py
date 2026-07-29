@@ -13,6 +13,14 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 DEFAULT_COFFEE_WARMED_UP_ALERT_DELAY_SECONDS = 13 * 60
 DEFAULT_COFFEE_LONG_RUNNING_ALERT_DELAY_SECONDS = 60 * 60
+COFFEE_NOTIFICATION_STATE_KEYS = {
+    "warmup.enabled": "coffee_warmed_up_alert_enabled",
+    "warmup.channels.telegram": "coffee_warmed_up_notify_telegram",
+    "warmup.channels.iphone": "coffee_warmed_up_notify_iphone",
+    "longRunning.enabled": "coffee_long_running_alert_enabled",
+    "longRunning.channels.telegram": "coffee_long_running_notify_telegram",
+    "longRunning.channels.iphone": "coffee_long_running_notify_iphone",
+}
 
 
 class AppStateRevisionConflict(RuntimeError):
@@ -90,15 +98,19 @@ class AppStateStore:
     def coffee_pushward_show_seconds(self) -> bool:
         return bool(self._state.get("coffee_pushward_show_seconds", True))
 
-    async def set_coffee_warmed_up_alert_enabled(self, enabled: bool) -> None:
-        async with self._lock:
-            self._state["coffee_warmed_up_alert_enabled"] = enabled
-            await asyncio.to_thread(self._save)
+    async def set_coffee_warmed_up_alert_enabled(self, enabled: bool) -> bool:
+        return (
+            await self.mutate_coffee_notification_settings(
+                {"warmup.enabled": enabled}
+            )
+        )[2]
 
-    async def set_coffee_long_running_alert_enabled(self, enabled: bool) -> None:
-        async with self._lock:
-            self._state["coffee_long_running_alert_enabled"] = enabled
-            await asyncio.to_thread(self._save)
+    async def set_coffee_long_running_alert_enabled(self, enabled: bool) -> bool:
+        return (
+            await self.mutate_coffee_notification_settings(
+                {"longRunning.enabled": enabled}
+            )
+        )[2]
 
     async def set_coffee_warmed_up_alert_delay_seconds(self, delay_seconds: int) -> None:
         async with self._lock:
@@ -115,25 +127,33 @@ class AppStateStore:
             self._state["coffee_timing_migrated_to_ha"] = True
             await asyncio.to_thread(self._save)
 
-    async def set_coffee_warmed_up_notify_telegram(self, enabled: bool) -> None:
-        async with self._lock:
-            self._state["coffee_warmed_up_notify_telegram"] = enabled
-            await asyncio.to_thread(self._save)
+    async def set_coffee_warmed_up_notify_telegram(self, enabled: bool) -> bool:
+        return (
+            await self.mutate_coffee_notification_settings(
+                {"warmup.channels.telegram": enabled}
+            )
+        )[2]
 
-    async def set_coffee_warmed_up_notify_iphone(self, enabled: bool) -> None:
-        async with self._lock:
-            self._state["coffee_warmed_up_notify_iphone"] = enabled
-            await asyncio.to_thread(self._save)
+    async def set_coffee_warmed_up_notify_iphone(self, enabled: bool) -> bool:
+        return (
+            await self.mutate_coffee_notification_settings(
+                {"warmup.channels.iphone": enabled}
+            )
+        )[2]
 
-    async def set_coffee_long_running_notify_telegram(self, enabled: bool) -> None:
-        async with self._lock:
-            self._state["coffee_long_running_notify_telegram"] = enabled
-            await asyncio.to_thread(self._save)
+    async def set_coffee_long_running_notify_telegram(self, enabled: bool) -> bool:
+        return (
+            await self.mutate_coffee_notification_settings(
+                {"longRunning.channels.telegram": enabled}
+            )
+        )[2]
 
-    async def set_coffee_long_running_notify_iphone(self, enabled: bool) -> None:
-        async with self._lock:
-            self._state["coffee_long_running_notify_iphone"] = enabled
-            await asyncio.to_thread(self._save)
+    async def set_coffee_long_running_notify_iphone(self, enabled: bool) -> bool:
+        return (
+            await self.mutate_coffee_notification_settings(
+                {"longRunning.channels.iphone": enabled}
+            )
+        )[2]
 
     async def set_coffee_pushward_show_seconds(self, enabled: bool) -> None:
         async with self._lock:
@@ -181,21 +201,32 @@ class AppStateStore:
         expected_revision: str,
         values: dict[str, bool],
     ) -> tuple[dict[str, object], str, bool]:
-        key_map = {
-            "warmup.enabled": "coffee_warmed_up_alert_enabled",
-            "warmup.channels.telegram": "coffee_warmed_up_notify_telegram",
-            "warmup.channels.iphone": "coffee_warmed_up_notify_iphone",
-            "longRunning.enabled": "coffee_long_running_alert_enabled",
-            "longRunning.channels.telegram": "coffee_long_running_notify_telegram",
-            "longRunning.channels.iphone": "coffee_long_running_notify_iphone",
-        }
+        return await self.mutate_coffee_notification_settings(
+            values,
+            expected_revision=expected_revision,
+        )
+
+    async def mutate_coffee_notification_settings(
+        self,
+        values: dict[str, bool],
+        *,
+        expected_revision: str | None = None,
+    ) -> tuple[dict[str, object], str, bool]:
+        """Atomically mutate the six coffee notification policy values."""
+
+        unknown = set(values) - set(COFFEE_NOTIFICATION_STATE_KEYS)
+        if unknown:
+            raise ValueError("Unknown coffee notification setting")
         async with self._lock:
-            if not hmac_compare(expected_revision, self.coffee_notification_revision()):
+            if expected_revision is not None and not hmac_compare(
+                expected_revision,
+                self.coffee_notification_revision(),
+            ):
                 raise AppStateRevisionConflict("Notification settings revision is stale")
             candidate = dict(self._state)
             changed = False
             for path, value in values.items():
-                state_key = key_map[path]
+                state_key = COFFEE_NOTIFICATION_STATE_KEYS[path]
                 current = bool(candidate.get(state_key, getattr(self, state_key)))
                 if current != value:
                     candidate[state_key] = value
