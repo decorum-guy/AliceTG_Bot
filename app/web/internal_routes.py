@@ -15,13 +15,18 @@ from app.keyboards.main import main_menu
 from app.messages import coffee as coffee_messages
 from app.messages.common import admin_menu_text
 from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager, AdminModeSession
-from app.services.app_state import AppStateRevisionConflict, AppStateStore
+from app.services.app_state import (
+    AppStatePersistenceError,
+    AppStateRevisionConflict,
+    AppStateStore,
+)
 from app.services.coffee_alerts import CoffeeAlertScheduler
 from app.services.coffee_timing_policy import (
     CoffeeTimingPolicyService,
     TimingPartialUpdateError,
     TimingPolicyError,
     TimingRevisionConflict,
+    TimingStateUnknownError,
     TimingValidationError,
 )
 from app.services.control_center_coffee import (
@@ -53,12 +58,15 @@ async def health_ready(request: web.Request) -> web.Response:
     try:
         coffee_state = await ha.get_state(settings.coffee_switch_entity)
         ha_ready = coffee_state is not None
-        timing_ready = timing_policy.status == "ready"
     except (HomeAssistantError, TimingPolicyError):
         ha_ready = False
+    try:
+        await timing_policy.refresh()
+        timing_ready = timing_policy.status == "ready"
+    except (HomeAssistantError, TimingPolicyError):
         timing_ready = False
     telegram_ready = _telegram_transport_ready(bot)
-    ready = ha_ready and telegram_ready
+    ready = ha_ready and timing_ready and telegram_ready
     return web.json_response(
         {
             "status": "ready" if ready else "not_ready",
@@ -156,14 +164,22 @@ def _notification_response(app_state: AppStateStore) -> dict:
         "schemaVersion": 1,
         "source": "alice-tg-bot",
         "revision": app_state.coffee_notification_revision(),
-        "updatedAt": None,
+        "updatedAt": app_state.coffee_notification_settings_updated_at,
         **app_state.coffee_notification_settings(),
     }
 
 
 async def control_center_notification_settings_get(request: web.Request) -> web.Response:
     _check_control_center_auth(request)
-    return web.json_response(_notification_response(request.app["app_state"]))
+    app_state: AppStateStore = request.app["app_state"]
+    try:
+        await app_state.ensure_coffee_notification_metadata()
+    except AppStatePersistenceError:
+        return _control_center_error("notification_settings_unavailable", 503)
+    return web.json_response(
+        _notification_response(app_state),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def control_center_notification_settings_patch(request: web.Request) -> web.Response:
@@ -181,6 +197,8 @@ async def control_center_notification_settings_patch(request: web.Request) -> we
         )
     except AppStateRevisionConflict:
         return _control_center_error("revision_conflict", 409)
+    except AppStatePersistenceError:
+        return _control_center_error("notification_settings_unavailable", 503)
     if changed:
         scheduler: CoffeeAlertScheduler = request.app["coffee_alert_scheduler"]
         scheduler.reschedule_active_alerts()
@@ -221,9 +239,14 @@ async def control_center_timing_patch(request: web.Request) -> web.Response:
         return _control_center_error("revision_conflict", 409)
     except TimingValidationError:
         return _control_center_error("invalid_timing_value", 400)
+    except TimingStateUnknownError:
+        return _control_center_error("timing_state_unknown", 503)
     except (HomeAssistantError, TimingPartialUpdateError, TimingPolicyError):
         return _control_center_error("home_assistant_unavailable", 503)
-    return web.json_response(_timing_response(policy))
+    return web.json_response(
+        _timing_response(policy),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def control_center_coffee_action(request: web.Request) -> web.Response:

@@ -12,7 +12,10 @@ from app.services.coffee_timing_policy import (
     COFFEE_WARMUP_HELPER,
     CoffeeTimingPolicyRefresher,
     CoffeeTimingPolicyService,
+    TimingPartialUpdateError,
     TimingPolicyError,
+    TimingRevisionConflict,
+    TimingStateUnknownError,
 )
 from app.services.home_assistant import HomeAssistantError
 
@@ -45,6 +48,11 @@ class FakeHomeAssistant:
         self.available = True
         self.active_reads = 0
         self.max_active_reads = 0
+        self.fail_write_numbers: set[int] = set()
+        self.ignore_write_numbers: set[int] = set()
+        self.write_started = asyncio.Event()
+        self.release_first_write: asyncio.Event | None = None
+        self.go_offline_on_write_failure = False
 
     async def get_state(self, entity_id: str) -> dict | None:
         if not self.available:
@@ -61,7 +69,17 @@ class FakeHomeAssistant:
         if not self.available:
             raise HomeAssistantError("offline")
         self.calls.append((domain, service, payload))
+        call_number = len(self.calls)
+        if call_number == 1 and self.release_first_write is not None:
+            self.write_started.set()
+            await self.release_first_write.wait()
+        if call_number in self.fail_write_numbers:
+            if self.go_offline_on_write_failure:
+                self.available = False
+            raise HomeAssistantError("write failed")
         entity_id = payload["entity_id"]
+        if call_number in self.ignore_write_numbers:
+            return
         if domain == "input_boolean":
             self.states[entity_id]["state"] = "on"
         else:
@@ -150,6 +168,126 @@ class CoffeeTimingPolicyTests(unittest.IsolatedAsyncioTestCase):
         service = CoffeeTimingPolicyService(FakeHomeAssistant(warmup="unavailable"))
         with self.assertRaises(TimingPolicyError):
             await service.refresh()
+
+    async def test_patch_requires_initialized_marker(self) -> None:
+        ha = FakeHomeAssistant(initialized=False)
+        service = CoffeeTimingPolicyService(ha)
+        current, _ = await service._read_policy_with_states()
+        with self.assertRaises(TimingPolicyError):
+            await service.patch_minutes(
+                expected_revision=current.revision,
+                warmup_minutes=15,
+            )
+        self.assertEqual(ha.calls, [])
+
+    async def test_concurrent_same_revision_allows_one_writer(self) -> None:
+        ha = FakeHomeAssistant()
+        ha.release_first_write = asyncio.Event()
+        service = CoffeeTimingPolicyService(ha)
+        current = await service.refresh()
+
+        first = asyncio.create_task(
+            service.patch_minutes(
+                expected_revision=current.revision,
+                warmup_minutes=15,
+            )
+        )
+        await ha.write_started.wait()
+        second = asyncio.create_task(
+            service.patch_minutes(
+                expected_revision=current.revision,
+                long_running_minutes=61,
+            )
+        )
+        await asyncio.sleep(0)
+        ha.release_first_write.set()
+
+        result = await first
+        self.assertEqual(result.warmup_duration_seconds, 15 * 60)
+        with self.assertRaises(TimingRevisionConflict):
+            await second
+        self.assertEqual(len(ha.calls), 1)
+
+    async def test_partial_failure_rolls_back_and_confirms_original_pair(self) -> None:
+        ha = FakeHomeAssistant()
+        ha.fail_write_numbers = {2}
+        service = CoffeeTimingPolicyService(ha)
+        current = await service.refresh()
+
+        with self.assertRaises(TimingPartialUpdateError):
+            await service.patch_minutes(
+                expected_revision=current.revision,
+                warmup_minutes=15,
+                long_running_minutes=61,
+            )
+
+        self.assertEqual(ha.states[COFFEE_WARMUP_HELPER]["state"], "13")
+        self.assertEqual(ha.states[COFFEE_LONG_RUNNING_HELPER]["state"], "60")
+        self.assertIsNotNone(service.policy)
+        self.assertEqual(service.status, "ready")
+
+    async def test_failed_rollback_marks_timing_state_unknown(self) -> None:
+        ha = FakeHomeAssistant()
+        ha.fail_write_numbers = {2, 3}
+        service = CoffeeTimingPolicyService(ha)
+        current = await service.refresh()
+
+        with self.assertRaises(TimingStateUnknownError):
+            await service.patch_minutes(
+                expected_revision=current.revision,
+                warmup_minutes=15,
+                long_running_minutes=61,
+            )
+
+        self.assertIsNone(service.policy)
+        self.assertEqual(service.status, "unavailable")
+
+    async def test_rollback_readback_mismatch_marks_state_unknown(self) -> None:
+        ha = FakeHomeAssistant()
+        ha.fail_write_numbers = {2}
+        ha.ignore_write_numbers = {4}
+        service = CoffeeTimingPolicyService(ha)
+        current = await service.refresh()
+
+        with self.assertRaises(TimingStateUnknownError):
+            await service.patch_minutes(
+                expected_revision=current.revision,
+                warmup_minutes=15,
+                long_running_minutes=61,
+            )
+        self.assertIsNone(service.policy)
+
+    async def test_ha_unavailable_during_rollback_marks_state_unknown(self) -> None:
+        ha = FakeHomeAssistant()
+        ha.fail_write_numbers = {2}
+        ha.go_offline_on_write_failure = True
+        service = CoffeeTimingPolicyService(ha)
+        current = await service.refresh()
+
+        with self.assertRaises(TimingStateUnknownError):
+            await service.patch_minutes(
+                expected_revision=current.revision,
+                warmup_minutes=15,
+                long_running_minutes=61,
+            )
+        self.assertIsNone(service.policy)
+
+    async def test_unchanged_and_partial_patch_use_exact_readback(self) -> None:
+        ha = FakeHomeAssistant()
+        service = CoffeeTimingPolicyService(ha)
+        current = await service.refresh()
+        unchanged = await service.patch_minutes(
+            expected_revision=current.revision,
+            warmup_minutes=13,
+        )
+        self.assertEqual(ha.calls, [])
+
+        updated = await service.patch_minutes(
+            expected_revision=unchanged.revision,
+            long_running_minutes=75,
+        )
+        self.assertEqual(updated.warmup_duration_seconds, 13 * 60)
+        self.assertEqual(updated.long_running_threshold_seconds, 75 * 60)
 
     async def test_refresh_recovers_reschedules_once_and_cancels_cleanly(self) -> None:
         ha = FakeHomeAssistant()

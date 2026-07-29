@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -154,6 +155,8 @@ class ControlCenterApiTests(unittest.IsolatedAsyncioTestCase):
         )
         current = await response.json()
         self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIsInstance(current["updatedAt"], str)
         self.assertNotIn("delivery", current)
         self.assertNotIn("timing", current)
 
@@ -196,6 +199,31 @@ class ControlCenterApiTests(unittest.IsolatedAsyncioTestCase):
             json={"expectedRevision": changed_payload["revision"], "timing": 15},
         )
         self.assertEqual(unknown.status, 400)
+
+    async def test_notification_persistence_failure_is_sanitized_and_not_rescheduled(self) -> None:
+        response = await self.client.get(
+            "/internal/notification-settings/coffee",
+            headers=self.auth,
+        )
+        current = await response.json()
+        with patch(
+            "app.services.app_state.os.replace",
+            side_effect=OSError("private path omitted"),
+        ):
+            failed = await self.client.patch(
+                "/internal/notification-settings/coffee",
+                headers=self.auth,
+                json={
+                    "expectedRevision": current["revision"],
+                    "warmup": {"channels": {"telegram": False}},
+                },
+            )
+        payload = await failed.json()
+        self.assertEqual(failed.status, 503)
+        self.assertEqual(payload["error"], "notification_settings_unavailable")
+        self.assertNotIn("path", str(payload).lower())
+        self.assertTrue(self.state.coffee_warmed_up_notify_telegram)
+        self.assertEqual(self.scheduler.reschedules, 0)
 
     async def test_timing_get_patch_readback_conflict_bounds_and_outage(self) -> None:
         response = await self.client.get(

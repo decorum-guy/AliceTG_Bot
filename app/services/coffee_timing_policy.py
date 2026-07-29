@@ -36,6 +36,10 @@ class TimingPartialUpdateError(TimingPolicyError):
     pass
 
 
+class TimingStateUnknownError(TimingPartialUpdateError):
+    """A failed mutation could not be restored and confirmed."""
+
+
 class TimingHomeAssistant(Protocol):
     async def get_state(self, entity_id: str) -> dict | None: ...
 
@@ -79,6 +83,7 @@ class CoffeeTimingPolicyService:
         self._policy: CoffeeTimingPolicy | None = None
         self._last_error_at: str | None = None
         self._stale_after_seconds = max(0.01, stale_after_seconds)
+        self._mutation_lock = asyncio.Lock()
 
     @property
     def policy(self) -> CoffeeTimingPolicy | None:
@@ -129,10 +134,22 @@ class CoffeeTimingPolicyService:
         return policy
 
     async def set_warmup_duration_seconds(self, seconds: int) -> CoffeeTimingPolicy:
-        return await self._set_seconds(COFFEE_WARMUP_HELPER, seconds)
+        if seconds < 60 or seconds % 60:
+            raise TimingValidationError("Timing value must be a positive whole number of minutes")
+        current = await self.refresh()
+        return await self.patch_minutes(
+            expected_revision=current.revision,
+            warmup_minutes=seconds // 60,
+        )
 
     async def set_long_running_threshold_seconds(self, seconds: int) -> CoffeeTimingPolicy:
-        return await self._set_seconds(COFFEE_LONG_RUNNING_HELPER, seconds)
+        if seconds < 60 or seconds % 60:
+            raise TimingValidationError("Timing value must be a positive whole number of minutes")
+        current = await self.refresh()
+        return await self.patch_minutes(
+            expected_revision=current.revision,
+            long_running_minutes=seconds // 60,
+        )
 
     async def patch_minutes(
         self,
@@ -143,75 +160,104 @@ class CoffeeTimingPolicyService:
     ) -> CoffeeTimingPolicy:
         if warmup_minutes is None and long_running_minutes is None:
             raise TimingValidationError("At least one timing value is required")
-        current, states = await self._read_policy_with_states()
-        if not hmac_compare(expected_revision, current.revision):
-            raise TimingRevisionConflict("Timing policy revision is stale")
+        async with self._mutation_lock:
+            if not await self._is_initialized():
+                raise TimingPolicyError("Home Assistant timing policy is not initialized")
+            current, states = await self._read_policy_with_states()
+            if not hmac_compare(expected_revision, current.revision):
+                raise TimingRevisionConflict("Timing policy revision is stale")
 
-        requested = {
-            COFFEE_WARMUP_HELPER: warmup_minutes,
-            COFFEE_LONG_RUNNING_HELPER: long_running_minutes,
-        }
-        original = {
-            COFFEE_WARMUP_HELPER: current.warmup_duration_seconds // 60,
-            COFFEE_LONG_RUNNING_HELPER: current.long_running_threshold_seconds // 60,
-        }
-        for entity_id, minutes in requested.items():
-            if minutes is not None:
-                _validate_minutes(minutes, _constraints(states[entity_id], entity_id))
+            requested = {
+                COFFEE_WARMUP_HELPER: warmup_minutes,
+                COFFEE_LONG_RUNNING_HELPER: long_running_minutes,
+            }
+            original = {
+                COFFEE_WARMUP_HELPER: current.warmup_duration_seconds // 60,
+                COFFEE_LONG_RUNNING_HELPER: current.long_running_threshold_seconds // 60,
+            }
+            for entity_id, minutes in requested.items():
+                if minutes is not None:
+                    _validate_minutes(minutes, _constraints(states[entity_id], entity_id))
 
-        changed = [
-            (entity_id, minutes)
-            for entity_id, minutes in requested.items()
-            if minutes is not None and minutes != original[entity_id]
-        ]
-        if not changed:
-            self._policy = current
-            self._last_error_at = None
-            return current
+            changed = [
+                (entity_id, minutes)
+                for entity_id, minutes in requested.items()
+                if minutes is not None and minutes != original[entity_id]
+            ]
+            if not changed:
+                self._policy = current
+                self._last_error_at = None
+                return current
 
-        applied: list[str] = []
-        try:
-            for entity_id, minutes in changed:
-                await self._ha.call_service(
-                    "input_number",
-                    "set_value",
-                    {"entity_id": entity_id, "value": minutes},
-                )
-                applied.append(entity_id)
-            confirmed = await self._read_policy()
-            if (
-                confirmed.warmup_duration_seconds // 60
-                != (warmup_minutes if warmup_minutes is not None else original[COFFEE_WARMUP_HELPER])
-                or confirmed.long_running_threshold_seconds // 60
-                != (
-                    long_running_minutes
-                    if long_running_minutes is not None
-                    else original[COFFEE_LONG_RUNNING_HELPER]
-                )
-            ):
-                raise TimingPartialUpdateError("Home Assistant did not confirm both timing values")
-        except Exception as exc:
-            rollback_ok = True
-            for entity_id in reversed(applied):
-                try:
+            applied: list[str] = []
+            try:
+                for entity_id, minutes in changed:
+                    applied.append(entity_id)
                     await self._ha.call_service(
                         "input_number",
                         "set_value",
-                        {"entity_id": entity_id, "value": original[entity_id]},
+                        {"entity_id": entity_id, "value": minutes},
                     )
-                except Exception:
-                    rollback_ok = False
-            if not rollback_ok:
+                    await self._confirm_helper_minutes(entity_id, minutes)
+                confirmed = await self._read_policy()
+                expected_pair = (
+                    warmup_minutes
+                    if warmup_minutes is not None
+                    else original[COFFEE_WARMUP_HELPER],
+                    long_running_minutes
+                    if long_running_minutes is not None
+                    else original[COFFEE_LONG_RUNNING_HELPER],
+                )
+                if _policy_minutes(confirmed) != expected_pair:
+                    raise TimingPartialUpdateError(
+                        "Home Assistant did not confirm both timing values"
+                    )
+            except Exception as exc:
+                if not applied:
+                    if isinstance(exc, TimingPolicyError):
+                        raise
+                    raise TimingPartialUpdateError("Timing update failed") from exc
+                await self._rollback_or_mark_unknown(original, applied)
                 raise TimingPartialUpdateError(
-                    "Timing update failed and rollback could not be confirmed"
+                    "Timing update failed and original values were restored"
                 ) from exc
-            if isinstance(exc, TimingPolicyError):
-                raise
-            raise TimingPartialUpdateError("Timing update failed and was rolled back") from exc
 
-        self._policy = confirmed
+            self._policy = confirmed
+            self._last_error_at = None
+            return confirmed
+
+    async def _confirm_helper_minutes(self, entity_id: str, expected: int) -> None:
+        state = await self._ha.get_state(entity_id)
+        if _minutes_state_to_seconds(state, entity_id) // 60 != expected:
+            raise TimingPartialUpdateError("Home Assistant helper read-back mismatch")
+
+    async def _rollback_or_mark_unknown(
+        self,
+        original: dict[str, int],
+        applied: list[str],
+    ) -> None:
+        try:
+            for entity_id in reversed(applied):
+                await self._ha.call_service(
+                    "input_number",
+                    "set_value",
+                    {"entity_id": entity_id, "value": original[entity_id]},
+                )
+                await self._confirm_helper_minutes(entity_id, original[entity_id])
+            restored = await self._read_policy()
+            if _policy_minutes(restored) != (
+                original[COFFEE_WARMUP_HELPER],
+                original[COFFEE_LONG_RUNNING_HELPER],
+            ):
+                raise TimingPartialUpdateError("Rollback read-back mismatch")
+        except Exception as rollback_exc:
+            self._policy = None
+            self._last_error_at = _now()
+            raise TimingStateUnknownError(
+                "Timing state is unknown after an unconfirmed rollback"
+            ) from rollback_exc
+        self._policy = restored
         self._last_error_at = None
-        return confirmed
 
     async def _set_seconds(self, entity_id: str, seconds: int) -> CoffeeTimingPolicy:
         if seconds < 60 or seconds % 60:
@@ -457,6 +503,13 @@ def _revision(warmup_state: dict | None, long_state: dict | None) -> str:
         str((long_state or {}).get("last_updated", "")),
     )
     return hashlib.sha256("|".join(values).encode("utf-8")).hexdigest()
+
+
+def _policy_minutes(policy: CoffeeTimingPolicy) -> tuple[int, int]:
+    return (
+        policy.warmup_duration_seconds // 60,
+        policy.long_running_threshold_seconds // 60,
+    )
 
 
 def _constraints(state: dict, entity_id: str) -> TimingHelperConstraints:

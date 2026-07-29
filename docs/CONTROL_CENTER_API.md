@@ -33,6 +33,12 @@ Notification settings contain only warm-up/long-running enable flags and their
 Telegram/iPhone channel flags. Timing and delivery receipts are excluded.
 PATCH is partial, uses `expectedRevision`, persists atomically and reschedules
 active alerts exactly once only when the effective settings changed.
+The candidate state is flushed and atomically replaced before in-memory state
+changes. Persistent opaque revision and UTC `updatedAt` metadata change only
+for an effective mutation. This prevents ABA revision reuse (`A → B → A`).
+Legacy state receives metadata without changing effective notification values.
+Write/replace failures return a sanitized `503`, preserve the prior file and
+memory, and do not reschedule alerts.
 
 Timing is read from and written to:
 
@@ -44,6 +50,13 @@ perform HA read-back, return `409` on a stale revision and never change the
 initialization marker. Telegram and Control Center both use
 `CoffeeTimingPolicyService`; its managed refresher makes changes visible
 without a bot restart.
+
+Timing mutations are serialized by one `asyncio.Lock`. Canonical HA state and
+the initialization marker are read again inside the lock before checking
+`expectedRevision`. Each helper write is read back before the next write.
+Partial failure triggers rollback followed by exact two-helper read-back. An
+unconfirmed rollback clears the cached policy and returns the stable
+`timing_state_unknown` error; the next GET must read Home Assistant again.
 
 Coffee actions accept only `turn_on` and `turn_off`. `requestId` provides
 in-process idempotency, already-satisfied state is a successful no-op, and a
@@ -61,6 +74,14 @@ There is no arbitrary domain, service or entity input.
 
 Mutation responses use `Cache-Control: no-store`. Tokens, user identifiers,
 notification target names and raw upstream errors are absent from responses.
+
+## Health semantics
+
+`/health/live` depends only on the running process. `/health/ready` returns
+`200` only when Telegram transport is ready, the coffee entity is readable,
+both timing helpers exist, `input_boolean.coffee_timing_initialized` is on and
+the canonical timing policy was freshly confirmed. Cached, stale,
+uninitialized or unavailable timing produces sanitized `503`.
 
 ## Local verification
 
