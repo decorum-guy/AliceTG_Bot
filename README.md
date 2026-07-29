@@ -419,7 +419,11 @@ the Home Assistant Companion App. Set it to a comma-separated list, for example
 `notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook`. If it is empty, the bot uses
 `HA_MOBILE_NOTIFY_SERVICE` as a backward-compatible fallback. Find services in Home Assistant under
 Developer Tools -> Actions. Coffee alert channels are configured in Telegram:
-`Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Перегрев` -> `Telegram` / `iPhone`.
+`Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Долгая работа` -> `Telegram` / `iPhone`.
+
+Coffee timing values now live in canonical Home Assistant helpers. See
+[`docs/control-center-integration.md`](docs/control-center-integration.md) for
+the migration and sanitized health contracts.
 Reminder notification channels are configured in Telegram: `Напоминания` -> `Настройки` -> `Telegram` / `iPhone`.
 Coffee push title is `Кофемашина`; reminder push title is `Напоминание`, and the push body is only the reminder text.
 Coffee HA Mobile alert pushes use tag `coffee_machine_alert` and include the `COFFEE_TURN_OFF`
