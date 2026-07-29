@@ -78,16 +78,16 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 ### Coffee Alerts
 
 - Home Assistant only reports `switch.kofemashina` state changes to the bot: `on` and `off`.
-- The bot owns the warm-up and long-running timers. HA does not wait 13 minutes or 1 hour anymore.
+- HA helpers own warm-up and long-running policy; the bot schedules notification tasks from the current confirmed revision.
 - Each coffee alert can be delivered through Telegram, HA Mobile App push via Home Assistant, or both.
 - HA Mobile push uses `HA_MOBILE_NOTIFY_SERVICES` such as
   `notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook`. If it is empty, the bot falls back to
   `HA_MOBILE_NOTIFY_SERVICE` for backward compatibility.
 - Coffee alert channel settings and per-channel delivery flags are stored in `APP_STATE_PATH`.
-- Defaults: warm-up alert enabled after 13 minutes; long-running/overheat alert enabled after 60 minutes.
+- One-time bootstrap defaults are 13 minutes warm-up and 60 minutes for the “works too long” warning. Current values can differ and are refreshed from HA.
 - In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to configure each alert separately:
   enable/disable it and change its delay.
-- The alert settings and current coffee cycle state are stored in `APP_STATE_PATH` and survive bot container restarts.
+- Alert channel settings and current coffee cycle state are stored in `APP_STATE_PATH`; timing values are canonical in HA helpers.
 - If the bot restarts while the stored coffee state is `on`, it restores timers using elapsed time; due unsent alerts are sent immediately.
 - If the coffee machine turns off, active coffee alert timers are cancelled and no alert is sent.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.

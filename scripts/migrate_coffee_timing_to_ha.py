@@ -7,11 +7,14 @@ import json
 import os
 
 from app.services.app_state import AppStateStore
-from app.services.coffee_timing_policy import CoffeeTimingPolicyService
-from app.services.home_assistant import HomeAssistantClient
+from app.services.coffee_timing_policy import (
+    CoffeeTimingPolicyService,
+    TimingPolicyError,
+)
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 
 
-async def _run(apply: bool) -> int:
+async def _run(mode: str) -> int:
     ha_url = os.environ.get("HA_URL", "").strip()
     ha_token = os.environ.get("HA_LONG_LIVED_TOKEN", "").strip()
     state_path = os.environ.get("APP_STATE_PATH", "/app/data/state.json").strip()
@@ -22,10 +25,25 @@ async def _run(apply: bool) -> int:
     ha = HomeAssistantClient(ha_url, ha_token)
     try:
         service = CoffeeTimingPolicyService(ha)
-        result = await service.migrate_legacy(
-            AppStateStore(state_path),
-            apply=apply,
-        )
+        try:
+            if mode == "status":
+                result = await service.migration_status()
+            else:
+                result = await service.migrate_legacy(
+                    AppStateStore(state_path),
+                    apply=mode == "apply",
+                )
+        except (HomeAssistantError, TimingPolicyError):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "mode": mode,
+                        "error": "home_assistant_timing_helpers_unavailable",
+                    }
+                )
+            )
+            return 3
     finally:
         await ha.close()
 
@@ -33,10 +51,12 @@ async def _run(apply: bool) -> int:
         json.dumps(
             {
                 "ok": True,
-                "mode": "apply" if apply else "dry-run",
+                "mode": mode,
                 "status": result.status,
                 "helpers": list(result.writes),
                 "reason": result.reason,
+                "warmup_duration_seconds": result.warmup_duration_seconds,
+                "long_running_threshold_seconds": result.long_running_threshold_seconds,
             },
             ensure_ascii=False,
         )
@@ -49,12 +69,14 @@ def main() -> None:
         description="Migrate legacy coffee timing values to canonical HA helpers",
     )
     parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="perform verified helper writes; the default is a read-only dry-run",
+        "mode",
+        choices=("dry-run", "apply", "status"),
+        nargs="?",
+        default="dry-run",
+        help="status and dry-run are read-only; apply performs verified helper writes",
     )
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(_run(args.apply)))
+    raise SystemExit(asyncio.run(_run(args.mode)))
 
 
 if __name__ == "__main__":

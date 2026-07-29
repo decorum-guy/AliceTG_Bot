@@ -47,6 +47,17 @@ class AppStateStore:
         return bool(self._state.get("coffee_timing_migrated_to_ha", False))
 
     @property
+    def explicit_legacy_coffee_timing(self) -> tuple[int, int] | None:
+        warmup = self._state.get("coffee_warmed_up_alert_delay_seconds")
+        long_running = self._state.get("coffee_long_running_alert_delay_seconds")
+        if warmup is None and long_running is None:
+            return None
+        return (
+            int(warmup or DEFAULT_COFFEE_WARMED_UP_ALERT_DELAY_SECONDS),
+            int(long_running or DEFAULT_COFFEE_LONG_RUNNING_ALERT_DELAY_SECONDS),
+        )
+
+    @property
     def coffee_warmed_up_notify_telegram(self) -> bool:
         return bool(self._state.get("coffee_warmed_up_notify_telegram", True))
 

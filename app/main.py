@@ -15,7 +15,11 @@ from app.handlers import admin_modes, coffee, common, reminders, start, tea, wat
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
-from app.services.coffee_timing_policy import CoffeeTimingPolicyService, TimingPolicyError
+from app.services.coffee_timing_policy import (
+    CoffeeTimingPolicyRefresher,
+    CoffeeTimingPolicyService,
+    TimingPolicyError,
+)
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
@@ -70,7 +74,10 @@ async def create_app() -> web.Application:
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
     storage = MemoryStorage()
     app_state = AppStateStore(settings.app_state_path)
-    coffee_timing_policy = CoffeeTimingPolicyService(ha)
+    coffee_timing_policy = CoffeeTimingPolicyService(
+        ha,
+        stale_after_seconds=settings.coffee_timing_stale_after_seconds,
+    )
     try:
         await coffee_timing_policy.refresh()
         LOGGER.info("Canonical coffee timing policy loaded from Home Assistant")
@@ -105,6 +112,12 @@ async def create_app() -> web.Application:
         pushward_coffee_activity,
         pushward_coffee_widget,
     )
+    coffee_timing_refresher = CoffeeTimingPolicyRefresher(
+        coffee_timing_policy,
+        interval_seconds=settings.coffee_timing_refresh_interval_seconds,
+        max_backoff_seconds=settings.coffee_timing_refresh_max_backoff_seconds,
+        on_policy_change=lambda _: coffee_alert_scheduler.reschedule_active_alerts(),
+    )
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
@@ -128,6 +141,7 @@ async def create_app() -> web.Application:
     app["ha"] = ha
     app["app_state"] = app_state
     app["coffee_timing_policy"] = coffee_timing_policy
+    app["coffee_timing_refresher"] = coffee_timing_refresher
     app["admin_modes"] = admin_mode_manager
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow
@@ -143,8 +157,10 @@ async def create_app() -> web.Application:
     await reminder_workflow.restore_pending()
     await coffee_alert_scheduler.restore()
     await pushward_coffee_widget.restore()
+    coffee_timing_refresher.start()
 
     async def close_resources(_: web.Application) -> None:
+        await coffee_timing_refresher.close()
         await pushward_coffee_widget.close()
         await pushward_coffee_activity.close()
         await ha.close()

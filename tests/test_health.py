@@ -10,6 +10,7 @@ from aiohttp.test_utils import make_mocked_request
 
 from app.services.coffee_timing_policy import (
     COFFEE_LONG_RUNNING_HELPER,
+    COFFEE_TIMING_INITIALIZED_HELPER,
     COFFEE_WARMUP_HELPER,
     CoffeeTimingPolicyService,
 )
@@ -22,6 +23,8 @@ class FakeHomeAssistant:
             return {"state": "13", "last_updated": "2026-07-29T10:00:00Z"}
         if entity_id == COFFEE_LONG_RUNNING_HELPER:
             return {"state": "60", "last_updated": "2026-07-29T10:00:00Z"}
+        if entity_id == COFFEE_TIMING_INITIALIZED_HELPER:
+            return {"state": "on", "last_updated": "2026-07-29T10:00:00Z"}
         return {"state": "off", "last_updated": "2026-07-29T10:00:00Z"}
 
 

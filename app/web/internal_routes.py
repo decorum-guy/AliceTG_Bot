@@ -40,9 +40,8 @@ async def health_ready(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     try:
         coffee_state = await ha.get_state(settings.coffee_switch_entity)
-        await timing_policy.refresh()
         ha_ready = coffee_state is not None
-        timing_ready = True
+        timing_ready = timing_policy.status == "ready"
     except (HomeAssistantError, TimingPolicyError):
         ha_ready = False
         timing_ready = False
@@ -66,13 +65,7 @@ async def health_details(request: web.Request) -> web.Response:
     timing_policy: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
     policy = timing_policy.policy
     bot = request.app["bot"]
-    timing_status = (
-        "stale"
-        if policy is not None and timing_policy.last_error_at is not None
-        else "ready"
-        if policy is not None
-        else "unavailable"
-    )
+    timing_status = timing_policy.status
     return web.json_response(
         {
             "status": "running",
