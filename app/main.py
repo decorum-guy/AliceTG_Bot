@@ -15,7 +15,13 @@ from app.handlers import admin_modes, coffee, common, reminders, start, tea, wat
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
-from app.services.home_assistant import HomeAssistantClient
+from app.services.coffee_timing_policy import (
+    CoffeeTimingPolicyRefresher,
+    CoffeeTimingPolicyService,
+    TimingPolicyError,
+)
+from app.services.control_center_coffee import ControlCenterCoffeeActions
+from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
 from app.services.reminder_store import ReminderStore
@@ -69,6 +75,17 @@ async def create_app() -> web.Application:
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
     storage = MemoryStorage()
     app_state = AppStateStore(settings.app_state_path)
+    coffee_timing_policy = CoffeeTimingPolicyService(
+        ha,
+        stale_after_seconds=settings.coffee_timing_stale_after_seconds,
+    )
+    try:
+        await coffee_timing_policy.refresh()
+        LOGGER.info("Canonical coffee timing policy loaded from Home Assistant")
+    except (HomeAssistantError, TimingPolicyError):
+        LOGGER.warning(
+            "Canonical coffee timing policy is unavailable; timing-dependent alerts are paused"
+        )
     reminder_store = ReminderStore(settings.reminders_state_path)
     admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
@@ -76,21 +93,39 @@ async def create_app() -> web.Application:
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
     water_workflow = WaterWorkflow(settings, ha, storage, telegram_messages)
     reminder_workflow = ReminderWorkflow(reminder_store, telegram_messages, settings.telegram_admin_chat_id, settings, ha)
-    pushward_coffee_activity = PushWardCoffeeActivity(settings, ha, app_state)
-    pushward_coffee_widget = PushWardCoffeeWidget(settings, app_state)
+    pushward_coffee_activity = PushWardCoffeeActivity(
+        settings,
+        ha,
+        app_state,
+        coffee_timing_policy,
+    )
+    pushward_coffee_widget = PushWardCoffeeWidget(
+        settings,
+        app_state,
+        coffee_timing_policy,
+    )
     coffee_alert_scheduler = CoffeeAlertScheduler(
         settings,
         app_state,
         telegram_messages,
         ha,
+        coffee_timing_policy,
         pushward_coffee_activity,
         pushward_coffee_widget,
     )
+    coffee_timing_refresher = CoffeeTimingPolicyRefresher(
+        coffee_timing_policy,
+        interval_seconds=settings.coffee_timing_refresh_interval_seconds,
+        max_backoff_seconds=settings.coffee_timing_refresh_max_backoff_seconds,
+        on_policy_change=lambda _: coffee_alert_scheduler.reschedule_active_alerts(),
+    )
+    control_center_coffee_actions = ControlCenterCoffeeActions(ha, settings)
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
     dispatcher["storage"] = storage
     dispatcher["app_state"] = app_state
+    dispatcher["coffee_timing_policy"] = coffee_timing_policy
     dispatcher["admin_modes"] = admin_mode_manager
     dispatcher["telegram_messages"] = telegram_messages
     dispatcher["coffee_workflow"] = coffee_workflow
@@ -107,6 +142,9 @@ async def create_app() -> web.Application:
     app["dispatcher"] = dispatcher
     app["ha"] = ha
     app["app_state"] = app_state
+    app["coffee_timing_policy"] = coffee_timing_policy
+    app["coffee_timing_refresher"] = coffee_timing_refresher
+    app["control_center_coffee_actions"] = control_center_coffee_actions
     app["admin_modes"] = admin_mode_manager
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow
@@ -122,8 +160,10 @@ async def create_app() -> web.Application:
     await reminder_workflow.restore_pending()
     await coffee_alert_scheduler.restore()
     await pushward_coffee_widget.restore()
+    coffee_timing_refresher.start()
 
     async def close_resources(_: web.Application) -> None:
+        await coffee_timing_refresher.close()
         await pushward_coffee_widget.close()
         await pushward_coffee_activity.close()
         await ha.close()

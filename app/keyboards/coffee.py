@@ -21,7 +21,7 @@ def coffee_settings() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [inline_button(text="Разогрев", callback_data="coffee_alert_settings:warmed_up")],
-            [inline_button(text="Перегрев", callback_data="coffee_alert_settings:long_running")],
+            [inline_button(text="Долгая работа", callback_data="coffee_alert_settings:long_running")],
             [inline_button(text="PushWard Live Activity", callback_data="coffee:pushward_settings")],
             [inline_button(text="⬅️ Назад", callback_data="coffee:status", style=BUTTON_PRIMARY)],
         ]

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.config import Settings
 from app.services.app_state import AppStateStore
+from app.services.coffee_timing_policy import CoffeeTimingPolicyService
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 
 LOGGER = logging.getLogger(__name__)
@@ -38,10 +39,17 @@ def _normalize_update_activity_payload(payload: dict[str, object]) -> dict[str, 
 
 
 class PushWardCoffeeActivity:
-    def __init__(self, settings: Settings, ha: HomeAssistantClient, app_state: AppStateStore) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        ha: HomeAssistantClient,
+        app_state: AppStateStore,
+        timing_policy: CoffeeTimingPolicyService,
+    ) -> None:
         self._settings = settings
         self._ha = ha
         self._app_state = app_state
+        self._timing_policy = timing_policy
         self._slug = settings.pushward_coffee_activity_slug
         self._error_log_path = Path(settings.pushward_error_log_path)
         self._task: asyncio.Task[None] | None = None
@@ -164,8 +172,13 @@ class PushWardCoffeeActivity:
             return self._regular_update_interval()
 
         elapsed_seconds = _elapsed_seconds(self._app_state.coffee_on_since)
-        warmup_delay = max(1, self._app_state.coffee_warmed_up_alert_delay_seconds)
-        long_delay = max(warmup_delay, self._app_state.coffee_long_running_alert_delay_seconds)
+        warmup_delay = self._timing_policy.warmup_duration_seconds
+        long_delay = self._timing_policy.long_running_threshold_seconds
+        if warmup_delay is None or long_delay is None:
+            LOGGER.warning("PushWard update paused: canonical HA timing policy is unavailable")
+            return self._regular_update_interval()
+        warmup_delay = max(1, warmup_delay)
+        long_delay = max(warmup_delay, long_delay)
         next_sleep = self._next_update_sleep(elapsed_seconds, warmup_delay, long_delay)
 
         if elapsed_seconds < warmup_delay:

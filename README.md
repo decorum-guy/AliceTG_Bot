@@ -78,16 +78,16 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 ### Coffee Alerts
 
 - Home Assistant only reports `switch.kofemashina` state changes to the bot: `on` and `off`.
-- The bot owns the warm-up and long-running timers. HA does not wait 13 minutes or 1 hour anymore.
+- HA helpers own warm-up and long-running policy; the bot schedules notification tasks from the current confirmed revision.
 - Each coffee alert can be delivered through Telegram, HA Mobile App push via Home Assistant, or both.
 - HA Mobile push uses `HA_MOBILE_NOTIFY_SERVICES` such as
   `notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook`. If it is empty, the bot falls back to
   `HA_MOBILE_NOTIFY_SERVICE` for backward compatibility.
 - Coffee alert channel settings and per-channel delivery flags are stored in `APP_STATE_PATH`.
-- Defaults: warm-up alert enabled after 13 minutes; long-running/overheat alert enabled after 60 minutes.
+- One-time bootstrap defaults are 13 minutes warm-up and 60 minutes for the “works too long” warning. Current values can differ and are refreshed from HA.
 - In Telegram, open `Умные устройства` -> `Кофемашина` -> `Настройки` to configure each alert separately:
   enable/disable it and change its delay.
-- The alert settings and current coffee cycle state are stored in `APP_STATE_PATH` and survive bot container restarts.
+- Alert channel settings and current coffee cycle state are stored in `APP_STATE_PATH`; timing values are canonical in HA helpers.
 - If the bot restarts while the stored coffee state is `on`, it restores timers using elapsed time; due unsent alerts are sent immediately.
 - If the coffee machine turns off, active coffee alert timers are cancelled and no alert is sent.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
@@ -147,6 +147,10 @@ Successful response:
   "message": "Кофемашина включена"
 }
 ```
+
+Artem Control Center uses a separate internal Bearer boundary and never reuses
+the personal Shortcut token. Its narrow coffee contracts are documented in
+[`docs/CONTROL_CENTER_API.md`](docs/CONTROL_CENTER_API.md).
 
 Successful `turn_off` response:
 
@@ -392,6 +396,9 @@ INTERNAL_WEBHOOK_SECRET=
 
 # iPhone Shortcuts / Siri HTTP endpoint security
 SHORTCUTS_SECRET_TOKEN=change_me
+
+# Artem Control Center internal coffee API; independent random secret
+CONTROL_CENTER_API_TOKEN=
 ```
 
 `TELEGRAM_ALLOWED_USER_IDS` accepts comma-separated IDs, for example:
@@ -419,7 +426,11 @@ the Home Assistant Companion App. Set it to a comma-separated list, for example
 `notify.mobile_app_aaliv_iphone,notify.mobile_app_macbook`. If it is empty, the bot uses
 `HA_MOBILE_NOTIFY_SERVICE` as a backward-compatible fallback. Find services in Home Assistant under
 Developer Tools -> Actions. Coffee alert channels are configured in Telegram:
-`Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Перегрев` -> `Telegram` / `iPhone`.
+`Умные устройства` -> `Кофемашина` -> `Настройки` -> `Разогрев` / `Долгая работа` -> `Telegram` / `iPhone`.
+
+Coffee timing values now live in canonical Home Assistant helpers. See
+[`docs/control-center-integration.md`](docs/control-center-integration.md) for
+the migration and sanitized health contracts.
 Reminder notification channels are configured in Telegram: `Напоминания` -> `Настройки` -> `Telegram` / `iPhone`.
 Coffee push title is `Кофемашина`; reminder push title is `Напоминание`, and the push body is only the reminder text.
 Coffee HA Mobile alert pushes use tag `coffee_machine_alert` and include the `COFFEE_TURN_OFF`

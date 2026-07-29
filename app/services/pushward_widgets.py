@@ -10,6 +10,7 @@ import aiohttp
 
 from app.config import Settings
 from app.services.app_state import AppStateStore
+from app.services.coffee_timing_policy import CoffeeTimingPolicyService
 
 LOGGER = logging.getLogger(__name__)
 PUSHWARD_API_BASE_URL = "https://api.pushward.app"
@@ -17,9 +18,15 @@ PUSHWARD_WIDGET_TIMEOUT_SECONDS = 5
 
 
 class PushWardCoffeeWidget:
-    def __init__(self, settings: Settings, app_state: AppStateStore) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        app_state: AppStateStore,
+        timing_policy: CoffeeTimingPolicyService,
+    ) -> None:
         self._settings = settings
         self._app_state = app_state
+        self._timing_policy = timing_policy
         self._slug = settings.pushward_coffee_widget_slug
         self._name = settings.pushward_coffee_widget_name
         self._error_log_path = Path(settings.pushward_error_log_path)
@@ -200,7 +207,10 @@ class PushWardCoffeeWidget:
             file.write(line)
 
 
-def build_coffee_widget_content(app_state: AppStateStore) -> dict[str, Any]:
+def build_coffee_widget_content(
+    app_state: AppStateStore,
+    timing_policy: CoffeeTimingPolicyService,
+) -> dict[str, Any]:
     is_on = app_state.coffee_machine_state == "on" and bool(app_state.coffee_on_since)
     if not is_on:
         return {
@@ -217,7 +227,7 @@ def build_coffee_widget_content(app_state: AppStateStore) -> dict[str, Any]:
     return {
         "template": "stat_list",
         "icon": "cup.and.saucer.fill",
-        "accent_color": _coffee_widget_accent_color(app_state, elapsed_seconds),
+        "accent_color": _coffee_widget_accent_color(timing_policy, elapsed_seconds),
         "stat_rows": [
             {"label": "Статус", "value": "Вкл"},
             {"label": "Работает", "value": _runtime_text(elapsed_seconds)},
@@ -226,7 +236,7 @@ def build_coffee_widget_content(app_state: AppStateStore) -> dict[str, Any]:
 
 
 async def update_coffee_widget(widget: PushWardCoffeeWidget) -> None:
-    content = build_coffee_widget_content(widget._app_state)
+    content = build_coffee_widget_content(widget._app_state, widget._timing_policy)
     await widget._patch_widget(content)
     rows = content["stat_rows"]
     LOGGER.info(
@@ -237,7 +247,9 @@ async def update_coffee_widget(widget: PushWardCoffeeWidget) -> None:
 
 
 async def bootstrap_coffee_widget_if_needed(widget: PushWardCoffeeWidget, content: dict[str, Any] | None = None) -> None:
-    await widget._bootstrap_widget(content or build_coffee_widget_content(widget._app_state))
+    await widget._bootstrap_widget(
+        content or build_coffee_widget_content(widget._app_state, widget._timing_policy)
+    )
 
 
 def start_coffee_widget_loop(widget: PushWardCoffeeWidget | None) -> None:
@@ -250,9 +262,16 @@ def stop_coffee_widget_loop(widget: PushWardCoffeeWidget | None) -> None:
         widget.stop()
 
 
-def _coffee_widget_accent_color(app_state: AppStateStore, elapsed_seconds: int) -> str:
-    warmup_delay = max(1, app_state.coffee_warmed_up_alert_delay_seconds)
-    long_delay = max(warmup_delay, app_state.coffee_long_running_alert_delay_seconds)
+def _coffee_widget_accent_color(
+    timing_policy: CoffeeTimingPolicyService,
+    elapsed_seconds: int,
+) -> str:
+    warmup_delay = timing_policy.warmup_duration_seconds
+    long_delay = timing_policy.long_running_threshold_seconds
+    if warmup_delay is None or long_delay is None:
+        return "#8E8E93"
+    warmup_delay = max(1, warmup_delay)
+    long_delay = max(warmup_delay, long_delay)
     if elapsed_seconds >= long_delay:
         return "#FF3B30"
     if elapsed_seconds >= max(warmup_delay, long_delay - 5 * 60):
