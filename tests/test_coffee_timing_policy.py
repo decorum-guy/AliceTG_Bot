@@ -29,10 +29,12 @@ class FakeHomeAssistant:
             COFFEE_WARMUP_HELPER: {
                 "state": warmup,
                 "last_updated": "2026-07-29T10:00:00Z",
+                "attributes": {"min": 1, "max": 120, "step": 1},
             },
             COFFEE_LONG_RUNNING_HELPER: {
                 "state": long_running,
                 "last_updated": "2026-07-29T10:00:00Z",
+                "attributes": {"min": 1, "max": 240, "step": 1},
             },
             COFFEE_TIMING_INITIALIZED_HELPER: {
                 "state": "on" if initialized else "off",

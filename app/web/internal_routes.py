@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import logging
 import asyncio
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,9 +15,20 @@ from app.keyboards.main import main_menu
 from app.messages import coffee as coffee_messages
 from app.messages.common import admin_menu_text
 from app.services.admin_modes import ADMIN_TALK_DIALOGS, AdminModeManager, AdminModeSession
-from app.services.app_state import AppStateStore
+from app.services.app_state import AppStateRevisionConflict, AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
-from app.services.coffee_timing_policy import CoffeeTimingPolicyService, TimingPolicyError
+from app.services.coffee_timing_policy import (
+    CoffeeTimingPolicyService,
+    TimingPartialUpdateError,
+    TimingPolicyError,
+    TimingRevisionConflict,
+    TimingValidationError,
+)
+from app.services.control_center_coffee import (
+    CoffeeActionConflict,
+    CoffeeActionRateLimited,
+    ControlCenterCoffeeActions,
+)
 from app.services.coffee_machine import set_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
@@ -124,6 +136,203 @@ def _check_shortcuts_auth(request: web.Request) -> web.Response | None:
 
     LOGGER.info("Shortcut espresso authorization succeeded")
     return None
+
+
+def _check_control_center_auth(request: web.Request) -> None:
+    settings: Settings = request.app["settings"]
+    expected = settings.control_center_api_token
+    if not expected:
+        raise web.HTTPServiceUnavailable(text="Control Center API is disabled")
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise web.HTTPUnauthorized(text="Missing bearer token")
+    provided = authorization.removeprefix("Bearer ").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise web.HTTPForbidden(text="Invalid bearer token")
+
+
+def _notification_response(app_state: AppStateStore) -> dict:
+    return {
+        "schemaVersion": 1,
+        "source": "alice-tg-bot",
+        "revision": app_state.coffee_notification_revision(),
+        "updatedAt": None,
+        **app_state.coffee_notification_settings(),
+    }
+
+
+async def control_center_notification_settings_get(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    return web.json_response(_notification_response(request.app["app_state"]))
+
+
+async def control_center_notification_settings_patch(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    try:
+        payload = await request.json()
+        expected_revision, values = _parse_notification_patch(payload)
+    except (ValueError, TypeError):
+        return _control_center_error("invalid_request", 400)
+    app_state: AppStateStore = request.app["app_state"]
+    try:
+        _, _, changed = await app_state.patch_coffee_notification_settings(
+            expected_revision=expected_revision,
+            values=values,
+        )
+    except AppStateRevisionConflict:
+        return _control_center_error("revision_conflict", 409)
+    if changed:
+        scheduler: CoffeeAlertScheduler = request.app["coffee_alert_scheduler"]
+        scheduler.reschedule_active_alerts()
+    return web.json_response(
+        _notification_response(app_state),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def control_center_timing_get(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    timing: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
+    try:
+        policy = await timing.refresh()
+    except (HomeAssistantError, TimingPolicyError):
+        return _control_center_error("home_assistant_unavailable", 503)
+    return web.json_response(
+        _timing_response(policy),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def control_center_timing_patch(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    try:
+        payload = await request.json()
+        expected_revision, warmup, long_running = _parse_timing_patch(payload)
+    except (ValueError, TypeError):
+        return _control_center_error("invalid_request", 400)
+    timing: CoffeeTimingPolicyService = request.app["coffee_timing_policy"]
+    try:
+        policy = await timing.patch_minutes(
+            expected_revision=expected_revision,
+            warmup_minutes=warmup,
+            long_running_minutes=long_running,
+        )
+    except TimingRevisionConflict:
+        return _control_center_error("revision_conflict", 409)
+    except TimingValidationError:
+        return _control_center_error("invalid_timing_value", 400)
+    except (HomeAssistantError, TimingPartialUpdateError, TimingPolicyError):
+        return _control_center_error("home_assistant_unavailable", 503)
+    return web.json_response(_timing_response(policy))
+
+
+async def control_center_coffee_action(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or set(payload) != {"action", "requestId"}:
+            raise ValueError
+        action = payload["action"]
+        request_id = payload["requestId"]
+        if action not in {"turn_on", "turn_off"}:
+            raise ValueError
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", request_id):
+            raise ValueError
+    except (ValueError, TypeError):
+        return _control_center_error("invalid_request", 400)
+    executor: ControlCenterCoffeeActions = request.app["control_center_coffee_actions"]
+    try:
+        result = await executor.execute(action, request_id)
+    except CoffeeActionConflict:
+        return _control_center_error("idempotency_conflict", 409)
+    except CoffeeActionRateLimited:
+        return _control_center_error("rate_limited", 429)
+    except HomeAssistantError:
+        return _control_center_error("home_assistant_unavailable", 503)
+    return web.json_response(
+        {
+            "schemaVersion": 1,
+            "authority": "home-assistant",
+            "action": result.action,
+            "requestId": result.request_id,
+            "confirmedState": result.state,
+            "alreadyInState": result.already_in_state,
+            "observedAt": result.observed_at,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _parse_notification_patch(payload: object) -> tuple[str, dict[str, bool]]:
+    if not isinstance(payload, dict) or not set(payload).issubset(
+        {"expectedRevision", "warmup", "longRunning"}
+    ):
+        raise ValueError
+    expected = payload.get("expectedRevision")
+    if not isinstance(expected, str) or not expected:
+        raise ValueError
+    values: dict[str, bool] = {}
+    for event in ("warmup", "longRunning"):
+        if event not in payload:
+            continue
+        block = payload[event]
+        if not isinstance(block, dict) or not set(block).issubset({"enabled", "channels"}):
+            raise ValueError
+        if "enabled" in block:
+            if not isinstance(block["enabled"], bool):
+                raise ValueError
+            values[f"{event}.enabled"] = block["enabled"]
+        if "channels" in block:
+            channels = block["channels"]
+            if not isinstance(channels, dict) or not channels or not set(channels).issubset(
+                {"telegram", "iphone"}
+            ):
+                raise ValueError
+            for channel, enabled in channels.items():
+                if not isinstance(enabled, bool):
+                    raise ValueError
+                values[f"{event}.channels.{channel}"] = enabled
+    if not values:
+        raise ValueError
+    return expected, values
+
+
+def _parse_timing_patch(payload: object) -> tuple[str, int | None, int | None]:
+    if not isinstance(payload, dict) or not set(payload).issubset(
+        {"expectedRevision", "warmupMinutes", "longRunningMinutes"}
+    ):
+        raise ValueError
+    expected = payload.get("expectedRevision")
+    if not isinstance(expected, str) or not expected:
+        raise ValueError
+    warmup = payload.get("warmupMinutes")
+    long_running = payload.get("longRunningMinutes")
+    if warmup is None and long_running is None:
+        raise ValueError
+    for value in (warmup, long_running):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError
+    return expected, warmup, long_running
+
+
+def _timing_response(policy) -> dict:
+    return {
+        "schemaVersion": 1,
+        "source": "home-assistant",
+        "transport": "alice-tg-bot",
+        "revision": policy.revision,
+        "observedAt": policy.fetched_at,
+        "warmupMinutes": policy.warmup_duration_seconds // 60,
+        "longRunningMinutes": policy.long_running_threshold_seconds // 60,
+    }
+
+
+def _control_center_error(code: str, status: int) -> web.Response:
+    return web.json_response(
+        {"ok": False, "error": code},
+        status=status,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _parse_sonya_answer(request: web.Request) -> SonyaAnswer:
@@ -741,6 +950,26 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health/ready", health_ready)
     app.router.add_get("/health/details", health_details)
     app.router.add_post("/shortcut/espresso", shortcut_espresso)
+    app.router.add_get(
+        "/internal/notification-settings/coffee",
+        control_center_notification_settings_get,
+    )
+    app.router.add_patch(
+        "/internal/notification-settings/coffee",
+        control_center_notification_settings_patch,
+    )
+    app.router.add_get(
+        "/internal/control-center/coffee/timing",
+        control_center_timing_get,
+    )
+    app.router.add_patch(
+        "/internal/control-center/coffee/timing",
+        control_center_timing_patch,
+    )
+    app.router.add_post(
+        "/internal/control-center/coffee/action",
+        control_center_coffee_action,
+    )
     app.router.add_get("/shortcut/assets/coffee.gif", shortcut_coffee_gif)
     app.router.add_post("/internal/coffee/sonya-wants-answer", sonya_wants_answer)
     app.router.add_post("/internal/coffee/sonya-type-answer", sonya_type_answer)

@@ -60,6 +60,7 @@ class Settings:
     ha_mobile_notify_services: tuple[str, ...]
     internal_webhook_secret: str
     shortcuts_secret_token: str
+    control_center_api_token: str
     app_version: str = "unknown"
     app_commit: str = "unknown"
     reminders_state_path: str = "/app/data/reminders.json"
@@ -119,6 +120,7 @@ class Settings:
             ha_mobile_notify_services=_ha_mobile_notify_services_from_env(),
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
             shortcuts_secret_token=os.getenv("SHORTCUTS_SECRET_TOKEN", "").strip(),
+            control_center_api_token=os.getenv("CONTROL_CENTER_API_TOKEN", "").strip(),
             app_version=os.getenv("APP_VERSION", "unknown").strip() or "unknown",
             app_commit=os.getenv("APP_COMMIT", "unknown").strip() or "unknown",
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()

@@ -148,6 +148,10 @@ Successful response:
 }
 ```
 
+Artem Control Center uses a separate internal Bearer boundary and never reuses
+the personal Shortcut token. Its narrow coffee contracts are documented in
+[`docs/CONTROL_CENTER_API.md`](docs/CONTROL_CENTER_API.md).
+
 Successful `turn_off` response:
 
 ```json
@@ -392,6 +396,9 @@ INTERNAL_WEBHOOK_SECRET=
 
 # iPhone Shortcuts / Siri HTTP endpoint security
 SHORTCUTS_SECRET_TOKEN=change_me
+
+# Artem Control Center internal coffee API; independent random secret
+CONTROL_CENTER_API_TOKEN=
 ```
 
 `TELEGRAM_ALLOWED_USER_IDS` accepts comma-separated IDs, for example:

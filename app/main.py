@@ -20,6 +20,7 @@ from app.services.coffee_timing_policy import (
     CoffeeTimingPolicyService,
     TimingPolicyError,
 )
+from app.services.control_center_coffee import ControlCenterCoffeeActions
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
@@ -118,6 +119,7 @@ async def create_app() -> web.Application:
         max_backoff_seconds=settings.coffee_timing_refresh_max_backoff_seconds,
         on_policy_change=lambda _: coffee_alert_scheduler.reschedule_active_alerts(),
     )
+    control_center_coffee_actions = ControlCenterCoffeeActions(ha, settings)
 
     dispatcher["settings"] = settings
     dispatcher["ha"] = ha
@@ -142,6 +144,7 @@ async def create_app() -> web.Application:
     app["app_state"] = app_state
     app["coffee_timing_policy"] = coffee_timing_policy
     app["coffee_timing_refresher"] = coffee_timing_refresher
+    app["control_center_coffee_actions"] = control_center_coffee_actions
     app["admin_modes"] = admin_mode_manager
     app["coffee_workflow"] = coffee_workflow
     app["tea_workflow"] = tea_workflow

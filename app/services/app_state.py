@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -9,6 +10,10 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 DEFAULT_COFFEE_WARMED_UP_ALERT_DELAY_SECONDS = 13 * 60
 DEFAULT_COFFEE_LONG_RUNNING_ALERT_DELAY_SECONDS = 60 * 60
+
+
+class AppStateRevisionConflict(RuntimeError):
+    pass
 
 
 class AppStateStore:
@@ -126,6 +131,63 @@ class AppStateStore:
         async with self._lock:
             self._state["coffee_pushward_show_seconds"] = enabled
             await asyncio.to_thread(self._save)
+
+    def coffee_notification_settings(self) -> dict[str, object]:
+        return {
+            "warmup": {
+                "enabled": self.coffee_warmed_up_alert_enabled,
+                "channels": {
+                    "telegram": self.coffee_warmed_up_notify_telegram,
+                    "iphone": self.coffee_warmed_up_notify_iphone,
+                },
+            },
+            "longRunning": {
+                "enabled": self.coffee_long_running_alert_enabled,
+                "channels": {
+                    "telegram": self.coffee_long_running_notify_telegram,
+                    "iphone": self.coffee_long_running_notify_iphone,
+                },
+            },
+        }
+
+    def coffee_notification_revision(self) -> str:
+        encoded = json.dumps(
+            self.coffee_notification_settings(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def patch_coffee_notification_settings(
+        self,
+        *,
+        expected_revision: str,
+        values: dict[str, bool],
+    ) -> tuple[dict[str, object], str, bool]:
+        key_map = {
+            "warmup.enabled": "coffee_warmed_up_alert_enabled",
+            "warmup.channels.telegram": "coffee_warmed_up_notify_telegram",
+            "warmup.channels.iphone": "coffee_warmed_up_notify_iphone",
+            "longRunning.enabled": "coffee_long_running_alert_enabled",
+            "longRunning.channels.telegram": "coffee_long_running_notify_telegram",
+            "longRunning.channels.iphone": "coffee_long_running_notify_iphone",
+        }
+        async with self._lock:
+            if not hmac_compare(expected_revision, self.coffee_notification_revision()):
+                raise AppStateRevisionConflict("Notification settings revision is stale")
+            changed = False
+            for path, value in values.items():
+                state_key = key_map[path]
+                if bool(self._state.get(state_key, getattr(self, state_key))) != value:
+                    self._state[state_key] = value
+                    changed = True
+            if changed:
+                await asyncio.to_thread(self._save)
+            return (
+                self.coffee_notification_settings(),
+                self.coffee_notification_revision(),
+                changed,
+            )
 
     @property
     def coffee_machine_state(self) -> str:
@@ -251,3 +313,9 @@ class AppStateStore:
         tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
         tmp_path.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(self._path)
+
+
+def hmac_compare(left: str, right: str) -> bool:
+    import hmac
+
+    return hmac.compare_digest(left, right)
