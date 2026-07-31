@@ -45,7 +45,7 @@ for required in \
     }
 done
 
-if grep -Eq '(^|[[:space:]"'"'])0\.0\.0\.0:' "$override"; then
+if grep -Eq '0\.0\.0\.0:|\[::\]:' "$override"; then
     printf '%s\n' 'compose override must never bind Control Center ports publicly' >&2
     exit 1
 fi
