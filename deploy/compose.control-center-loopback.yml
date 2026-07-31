@@ -1,0 +1,8 @@
+services:
+  homeassistant:
+    ports:
+      - "127.0.0.1:${CONTROL_CENTER_HA_LOOPBACK_PORT:-18123}:8123"
+
+  telegram-bot:
+    ports:
+      - "127.0.0.1:${CONTROL_CENTER_BOT_LOOPBACK_PORT:-18088}:8088"
