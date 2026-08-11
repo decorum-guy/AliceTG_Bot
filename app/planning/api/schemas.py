@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from aiohttp import web
 
 from app.planning.api.errors import PlanningApiError
+from app.planning.alice import AliceInterpretRequest
 from app.planning.models import (
     LOCAL_TIME_PATTERN,
     REMINDER_STATUSES,
@@ -475,6 +476,45 @@ def parse_empty_body(body: Mapping[str, Any]) -> None:
     body = _require_object(body)
     if body:
         raise _validation("This Planning action does not accept a request body.")
+
+
+def parse_alice_interpret_request(body: Mapping[str, Any]) -> AliceInterpretRequest:
+    """Parse the closed HA/Yandex adapter input; body metadata never grants authority."""
+
+    body = _require_object(body)
+    allowed = {
+        "text",
+        "intent",
+        "dialog",
+        "application_id",
+        "session_id",
+        "message_id",
+        "request_id",
+        "user_id",
+        "reference_time_utc",
+        "timezone",
+        "locale",
+        "correlation_id",
+    }
+    _assert_keys(body, allowed, context="Alice interpretation")
+    _assert_not_server_owned(body)
+    locale = body.get("locale", "ru-RU")
+    if locale != "ru-RU":
+        raise _validation("Alice interpretation supports only locale ru-RU.")
+    return AliceInterpretRequest(
+        text=_required_text(_required(body, "text"), "text", max_length=2000),
+        intent=_optional_text(body.get("intent"), "intent", max_length=128),
+        dialog=_optional_text(body.get("dialog"), "dialog", max_length=128),
+        application_id=_optional_text(body.get("application_id"), "application_id", max_length=256),
+        session_id=_optional_text(body.get("session_id"), "session_id", max_length=256),
+        message_id=_optional_text(body.get("message_id"), "message_id", max_length=256),
+        request_id=_optional_text(body.get("request_id"), "request_id", max_length=256),
+        user_id=_optional_text(body.get("user_id"), "user_id", max_length=256),
+        reference_time_utc=_required_timestamp(_required(body, "reference_time_utc"), "reference_time_utc"),
+        timezone=_required_timezone(_required(body, "timezone"), "timezone"),
+        locale=locale,
+        correlation_id=_optional_text(body.get("correlation_id"), "correlation_id", max_length=256),
+    )
 
 
 def parse_list_options(query: Mapping[str, str], *, allowed: set[str]) -> tuple[int, int]:

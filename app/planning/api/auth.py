@@ -37,6 +37,9 @@ ROUTE_PERMISSIONS: dict[str, frozenset[str]] = {
     "DELETE /events/{id}": frozenset({"panel-agent", "operator"}),
     "GET /projects": frozenset({"ha", "panel-agent", "operator"}),
     "GET /status": frozenset({"ha", "panel-agent", "operator"}),
+    # This is the only A5a write-capable ingress for Home Assistant.  HA does
+    # not receive generic Planning domain CRUD access.
+    "POST /alice/interpret": frozenset({"ha"}),
 }
 _SPECIAL_ROUTE_PERMISSIONS = {"__not_found__": frozenset(_AUDIENCE_VALUES)}
 
@@ -139,7 +142,12 @@ class PlanningAuthenticator:
         self.rate_limiter = rate_limiter or InProcessRateLimiter()
 
     @classmethod
-    def from_settings(cls, settings: object) -> "PlanningAuthenticator":
+    def from_settings(
+        cls,
+        settings: object,
+        *,
+        require_panel_agent: bool = True,
+    ) -> "PlanningAuthenticator":
         secrets = {
             "ha": str(getattr(settings, "planning_ha_secret", "") or "").strip(),
             "panel-agent": str(getattr(settings, "planning_panel_agent_secret", "") or "").strip(),
@@ -150,10 +158,10 @@ class PlanningAuthenticator:
             raise RuntimeError(
                 "Planning API is enabled but INTERNAL_WEBHOOK_SECRET is not configured"
             )
-        if not secrets["ha"] or not secrets["panel-agent"]:
+        if not secrets["ha"] or (require_panel_agent and not secrets["panel-agent"]):
             raise RuntimeError(
-                "Planning API is enabled but PLANNING_HA_SECRET and "
-                "PLANNING_PANEL_AGENT_SECRET are not configured"
+                "Planning API is enabled but PLANNING_HA_SECRET and, when domain "
+                "routes are enabled, PLANNING_PANEL_AGENT_SECRET are not configured"
             )
         configured = [secret for secret in secrets.values() if secret]
         if len(configured) != len(set(configured)):

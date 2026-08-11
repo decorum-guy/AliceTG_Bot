@@ -1018,8 +1018,15 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/water/sonya-comment-answer", water_comment_answer)
     app.router.add_post("/internal/water/sonya-direct-request", water_direct_request)
     app.router.add_post("/internal/reminders/alice-create", alice_reminder_create)
-    if getattr(app["settings"], "planning_api_enabled", False):
-        setup_planning_routes(app)
+    settings = app["settings"]
+    if getattr(settings, "planning_api_enabled", False) or getattr(
+        settings, "planning_alice_interpret_enabled", False
+    ):
+        setup_planning_routes(
+            app,
+            include_domain_routes=bool(getattr(settings, "planning_api_enabled", False)),
+            include_alice_route=bool(getattr(settings, "planning_alice_interpret_enabled", False)),
+        )
 
 
 def _coffee_runtime_text(switch_state: dict) -> str:

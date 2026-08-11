@@ -8,6 +8,7 @@ from typing import Any
 
 from aiohttp import web
 
+from app.planning.alice import AliceInterpretationService
 from app.planning.api.auth import (
     AuthenticatedPlanningContext,
     PlanningAuthenticator,
@@ -15,6 +16,7 @@ from app.planning.api.auth import (
 from app.planning.api.errors import PlanningApiError
 from app.planning.api.schemas import (
     parse_empty_body,
+    parse_alice_interpret_request,
     parse_event_create,
     parse_event_patch,
     parse_event_query,
@@ -377,6 +379,15 @@ async def _get_status(request: web.Request, auth: AuthenticatedPlanningContext) 
     return _json_response(payload, correlation_id=correlation_id)
 
 
+async def _alice_interpret(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    service = request.app.get("planning_alice_service")
+    if not isinstance(service, AliceInterpretationService):
+        raise RuntimeError("Alice interpretation service is not configured")
+    payload = parse_alice_interpret_request(await read_json_body(request))
+    result = service.interpret(auth=auth, request=payload)
+    return _stored_response(result)
+
+
 async def _planning_not_found(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
     raise PlanningApiError(
         code="route_not_found",
@@ -413,8 +424,13 @@ def _route(handler: Handler, route_key: str) -> Callable[[web.Request], Awaitabl
     return wrapped
 
 
-def setup_planning_routes(app: web.Application) -> None:
-    """Register only the fixed Planning v1 route surface."""
+def setup_planning_routes(
+    app: web.Application,
+    *,
+    include_domain_routes: bool = True,
+    include_alice_route: bool = False,
+) -> None:
+    """Register the fixed A4 domain surface and/or the narrow A5a Alice route."""
 
     database = app.get("planning_database")
     if database is None:
@@ -428,7 +444,24 @@ def setup_planning_routes(app: web.Application) -> None:
             stale_after_seconds=int(getattr(settings, "planning_api_stale_after_seconds", 300)),
         )
         app["planning_api_service"] = service
-    app["planning_authenticator"] = PlanningAuthenticator.from_settings(settings)
+    app["planning_authenticator"] = PlanningAuthenticator.from_settings(
+        settings,
+        require_panel_agent=include_domain_routes,
+    )
+
+    if include_alice_route:
+        app["planning_alice_service"] = AliceInterpretationService(
+            database,
+            idempotency_secret=str(getattr(settings, "planning_alice_idempotency_secret", "") or ""),
+        )
+
+    if not include_domain_routes:
+        if include_alice_route:
+            app.router.add_post(
+                f"{PLANNING_PREFIX}/alice/interpret",
+                _route(_alice_interpret, "POST /alice/interpret"),
+            )
+        return
 
     app.router.add_get(f"{PLANNING_PREFIX}/reminders", _route(_get_reminders, "GET /reminders"))
     app.router.add_post(f"{PLANNING_PREFIX}/reminders", _route(_create_reminder, "POST /reminders"))
@@ -470,6 +503,11 @@ def setup_planning_routes(app: web.Application) -> None:
     )
     app.router.add_get(f"{PLANNING_PREFIX}/projects", _route(_get_projects, "GET /projects"))
     app.router.add_get(f"{PLANNING_PREFIX}/status", _route(_get_status, "GET /status"))
+    if include_alice_route:
+        app.router.add_post(
+            f"{PLANNING_PREFIX}/alice/interpret",
+            _route(_alice_interpret, "POST /alice/interpret"),
+        )
     # Keep unmatched Planning paths inside the versioned error envelope.  This
     # does not create a generic operation surface; it is only a redacted 404.
     app.router.add_route(
