@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import tempfile
 import time
 import unittest
@@ -15,6 +16,7 @@ from app.planning import MutationContext, PlanningDatabase, PlanningRepository
 from app.planning.alice import AliceInterpretRequest, AliceInterpretationService
 from app.planning.api.auth import AuthenticatedPlanningContext
 from app.planning.api.routes import PLANNING_PREFIX, setup_planning_routes
+from app.planning.errors import PlanningIdempotencyConflictError
 from app.planning.parser import ParserInput, PlanningParser
 from app.planning.parser.dates import local_datetime_to_utc, parse_single_clock
 from app.web.internal_routes import setup_internal_routes
@@ -224,7 +226,14 @@ class PlanningAliceServiceA5aTests(unittest.TestCase):
         self.database.close()
         self.temp.cleanup()
 
-    def request(self, text: str, **values: str | None) -> AliceInterpretRequest:
+    def request_at(
+        self,
+        text: str,
+        *,
+        reference_time_utc: str = REF,
+        timezone: str = "Europe/Moscow",
+        **values: str | None,
+    ) -> AliceInterpretRequest:
         defaults: dict[str, str | None] = {
             "application_id": "synthetic-app",
             "session_id": "synthetic-session",
@@ -236,10 +245,13 @@ class PlanningAliceServiceA5aTests(unittest.TestCase):
         defaults.update(values)
         return AliceInterpretRequest(
             text=text,
-            reference_time_utc=REF,
-            timezone="Europe/Moscow",
+            reference_time_utc=reference_time_utc,
+            timezone=timezone,
             **defaults,
         )
+
+    def request(self, text: str, **values: str | None) -> AliceInterpretRequest:
+        return self.request_at(text, **values)
 
     def interpret(self, text: str, *, auth: AuthenticatedPlanningContext = HA_AUTH, **values: str | None):
         return self.service.interpret(auth=auth, request=self.request(text, **values))
@@ -317,6 +329,161 @@ class PlanningAliceServiceA5aTests(unittest.TestCase):
         self.assertEqual(first.response_json, second.response_json)
         self.assertEqual(len(self.repository.list_reminders()), 1)
 
+    def test_message_id_is_scoped_to_session_and_replays_exactly(self) -> None:
+        first_request = self.request(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id="session-A",
+            message_id="0",
+        )
+        replay_request = self.request_at(
+            "через час напомни проверить воду",
+            reference_time_utc="2026-08-12T09:00:03Z",
+            application_id="synthetic-app",
+            session_id="session-A",
+            message_id="0",
+        )
+        first = self.service.interpret(auth=HA_AUTH, request=first_request)
+        replay = self.service.interpret(auth=HA_AUTH, request=replay_request)
+        self.assertTrue(replay.replay)
+        self.assertEqual(first.response_json, replay.response_json)
+        self.assertEqual(len(self.repository.list_reminders()), 1)
+
+        other_session = self.interpret(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id="session-B",
+            message_id="0",
+        )
+        self.assertFalse(other_session.replay)
+        self.assertEqual(len(self.repository.list_reminders()), 2)
+
+    def test_same_scoped_message_id_with_different_command_conflicts_without_mutation(self) -> None:
+        self.interpret(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id="session-A",
+            message_id="1",
+        )
+        with self.assertRaises(PlanningIdempotencyConflictError):
+            self.interpret(
+                "через час напомни проверить воздух",
+                application_id="synthetic-app",
+                session_id="session-A",
+                message_id="1",
+            )
+        self.assertEqual(len(self.repository.list_reminders()), 1)
+
+    def test_bare_message_id_uses_fallback_instead_of_global_stability(self) -> None:
+        first = self.interpret(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id=None,
+            message_id="0",
+        )
+        second = self.interpret(
+            "через час напомни проверить воздух",
+            application_id="synthetic-app",
+            session_id=None,
+            message_id="0",
+        )
+        first_key = self.service._idempotency_key(
+            self.request(
+                "через час напомни проверить воду",
+                application_id="synthetic-app",
+                session_id=None,
+                message_id="0",
+            )
+        )
+        self.assertTrue(first_key.startswith("alice:hmac:"))
+        self.assertFalse(first.replay)
+        self.assertFalse(second.replay)
+        self.assertEqual(len(self.repository.list_reminders()), 2)
+
+    def test_scoped_request_id_is_not_assumed_global(self) -> None:
+        first = self.interpret(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id="session-A",
+            request_id="request-0",
+        )
+        replay = self.interpret(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id="session-A",
+            request_id="request-0",
+        )
+        other_session = self.interpret(
+            "через час напомни проверить воду",
+            application_id="synthetic-app",
+            session_id="session-B",
+            request_id="request-0",
+        )
+        key = self.service._idempotency_key(
+            self.request(
+                "через час напомни проверить воду",
+                application_id="synthetic-app",
+                session_id="session-A",
+                request_id="request-0",
+            )
+        )
+        self.assertTrue(key.startswith("alice:yandex-request:"))
+        self.assertFalse(first.replay)
+        self.assertTrue(replay.replay)
+        self.assertFalse(other_session.replay)
+        self.assertEqual(len(self.repository.list_reminders()), 2)
+
+    def test_fallback_relative_replay_preserves_first_due_time_and_response(self) -> None:
+        first = self.service.interpret(
+            auth=HA_AUTH,
+            request=self.request_at(
+                "через час напомни проверить воду",
+                reference_time_utc="2026-08-12T09:00:01Z",
+                message_id=None,
+                request_id=None,
+            ),
+        )
+        replay = self.service.interpret(
+            auth=HA_AUTH,
+            request=self.request_at(
+                "через час напомни проверить воду",
+                reference_time_utc="2026-08-12T09:00:03Z",
+                message_id=None,
+                request_id=None,
+            ),
+        )
+        self.assertTrue(replay.replay)
+        self.assertEqual(first.response_json, replay.response_json)
+        self.assertEqual(replay.payload["object"]["id"], first.payload["object"]["id"])
+        self.assertEqual(replay.payload["correlation_id"], first.payload["correlation_id"])
+        self.assertEqual(first.payload["object"]["due_at_utc"], "2026-08-12T10:00:01Z")
+        self.assertEqual(replay.payload["object"]["due_at_utc"], first.payload["object"]["due_at_utc"])
+        self.assertEqual(len(self.repository.list_reminders()), 1)
+
+    def test_fallback_bucket_boundary_creates_independent_identity(self) -> None:
+        first = self.service.interpret(
+            auth=HA_AUTH,
+            request=self.request_at(
+                "через час напомни проверить воду",
+                reference_time_utc="2026-08-12T09:00:01Z",
+                message_id=None,
+                request_id=None,
+            ),
+        )
+        second = self.service.interpret(
+            auth=HA_AUTH,
+            request=self.request_at(
+                "через час напомни проверить воду",
+                reference_time_utc="2026-08-12T09:00:17Z",
+                message_id=None,
+                request_id=None,
+            ),
+        )
+        self.assertFalse(first.replay)
+        self.assertFalse(second.replay)
+        self.assertNotEqual(first.response_json, second.response_json)
+        self.assertEqual(len(self.repository.list_reminders()), 2)
+
     def test_fallback_hmac_is_deterministic_and_stable_ids_are_independent(self) -> None:
         first = self.interpret("через час напомни проверить воду")
         replay = self.interpret("через час напомни проверить воду")
@@ -329,6 +496,53 @@ class PlanningAliceServiceA5aTests(unittest.TestCase):
         for row in rows:
             self.assertNotIn(ALICE_HMAC_SECRET, str(row["key"]))
             self.assertNotIn(ALICE_HMAC_SECRET, str(row["response_json"]))
+
+    def test_hmac_secret_and_yandex_identifiers_are_not_emitted_or_audited(self) -> None:
+        request = self.request(
+            "через час напомни проверить воду",
+            application_id="private-application",
+            session_id="private-session",
+            message_id="private-message",
+        )
+        key = self.service._idempotency_key(request)
+        response = self.service.interpret(auth=HA_AUTH, request=request)
+        audit_rows = self.database.connection.execute(
+            "SELECT actor_id, audience, surface, before_json, after_json FROM audit_events"
+        ).fetchall()
+        serialized = json.dumps(
+            [dict(row) for row in audit_rows],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        captured: list[str] = []
+
+        class CaptureHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                captured.append(self.format(record))
+
+        logger = logging.getLogger("app.planning.alice")
+        handler = CaptureHandler()
+        logger.addHandler(handler)
+        try:
+            self.service.interpret(auth=HA_AUTH, request=request)
+        finally:
+            logger.removeHandler(handler)
+        emitted = "\n".join(captured)
+        stored = " ".join(
+            str(row["key"]) + " " + str(row["response_json"])
+            for row in self.database.connection.execute("SELECT key, response_json FROM idempotency_keys")
+        )
+        for secret_or_identifier in (
+            ALICE_HMAC_SECRET,
+            "private-application",
+            "private-session",
+            "private-message",
+        ):
+            self.assertNotIn(secret_or_identifier, key)
+            self.assertNotIn(secret_or_identifier, response.response_json)
+            self.assertNotIn(secret_or_identifier, stored)
+            self.assertNotIn(secret_or_identifier, serialized)
+            self.assertNotIn(secret_or_identifier, emitted)
 
     def test_delivery_is_not_marked_completed_by_creation(self) -> None:
         payload = self.payload("через минуту напомни проверить воду", message_id="delivery-001")
@@ -478,6 +692,33 @@ class PlanningAliceHttpA5aTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_json["actor"]["surface"], "ha")
         self.assertEqual(first_json["object"]["source"], "alice")
         self.assertEqual(len(self.app["planning_alice_service"].repository.list_reminders()), 1)
+
+    async def test_http_message_id_is_session_scoped_and_conflicts_on_changed_command(self) -> None:
+        first_body = self._body(
+            text="через час напомни проверить воду",
+            session_id="http-session-A",
+            message_id="0",
+        )
+        replay = await self._post(first_body)
+        self.assertEqual(replay.status, 200)
+        other_session = await self._post(
+            self._body(
+                text="через час напомни проверить воду",
+                session_id="http-session-B",
+                message_id="0",
+            )
+        )
+        self.assertEqual(other_session.status, 200)
+        conflict = await self._post(
+            self._body(
+                text="через час напомни проверить воздух",
+                session_id="http-session-A",
+                message_id="0",
+            )
+        )
+        self.assertEqual(conflict.status, 409)
+        self.assertEqual((await conflict.json())["error"]["code"], "idempotency_conflict")
+        self.assertEqual(len(self.app["planning_alice_service"].repository.list_reminders()), 2)
 
     async def test_panel_agent_is_denied_and_unauthenticated_is_denied(self) -> None:
         panel = await self._post(self._body(message_id="panel-message"), audience="panel-agent", secret=PANEL_SECRET)

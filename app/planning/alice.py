@@ -164,7 +164,7 @@ class AliceInterpretationService:
         if candidate is None or candidate.operation != "create":
             raise RuntimeError("Alice create path received a non-create candidate")
         key = self._idempotency_key(request, parsed)
-        request_hash = self._request_hash(auth, request, candidate)
+        request_hash = self._request_hash(auth, request)
         with self.database.transaction():
             claim = self.repository.claim_idempotency(
                 audience=auth.audience,
@@ -403,51 +403,91 @@ class AliceInterpretationService:
             "actor": dict(actor),
         }
 
-    def _idempotency_key(self, request: AliceInterpretRequest, parsed: ParseResult) -> str:
-        stable_kind: str | None = None
-        stable_value: str | None = None
-        for kind, value in (("message", request.message_id), ("request", request.request_id)):
-            if value:
-                stable_kind, stable_value = kind, value
-                break
-        if stable_value is not None and stable_kind is not None:
-            digest = hashlib.sha256(stable_value.encode("utf-8")).hexdigest()
-            return f"alice:yandex:{stable_kind}:{digest}"
+    def _idempotency_key(self, request: AliceInterpretRequest, parsed: ParseResult | None = None) -> str:
+        """Return a private digest of the trusted event identity.
 
-        normalized_command = normalize_for_idempotency(request.text)
-        reference_epoch = int(_as_datetime(request.reference_time_utc).timestamp())
-        time_bucket = reference_epoch // 15
-        material = json.dumps(
-            {
+        Yandex ``message_id`` is only unique inside ``session_id``.  A bare
+        message ID is intentionally ignored and uses the existing private
+        15-second heuristic instead.  ``request_id`` is treated as scoped
+        only when an application or session identity is available.
+        """
+
+        del parsed  # Kept as a compatibility-shaped private helper argument.
+        kind, material = self._event_identity_material(request)
+        digest = hmac.new(
+            self.idempotency_secret,
+            self._canonical_json(material),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"alice:{kind}:{digest}"
+
+    def _event_identity_material(self, request: AliceInterpretRequest) -> tuple[str, dict[str, Any]]:
+        if request.message_id and request.session_id:
+            return "yandex-message", {
+                "kind": "yandex-message",
+                "application_id": request.application_id or "",
+                "session_id": request.session_id,
+                "message_id": request.message_id,
+            }
+
+        # request_id has no stronger scope guarantee in the current adapter
+        # evidence.  Use it only with an application or session identity.
+        # If a message_id was supplied without session_id, deliberately use
+        # the fallback path rather than promoting request_id or message_id to
+        # a global identity for that delivery.
+        if not request.message_id and request.request_id and (request.application_id or request.session_id):
+            return "yandex-request", {
+                "kind": "yandex-request",
                 "application_id": request.application_id or "",
                 "session_id": request.session_id or "",
-                "normalized_command": normalized_command,
-                "timezone": request.timezone,
-                "time_bucket_15s": time_bucket,
-            },
+                "request_id": request.request_id,
+            }
+
+        reference_epoch = int(_as_datetime(request.reference_time_utc).timestamp())
+        return "hmac", {
+            "kind": "fallback-15s",
+            "application_id": request.application_id or "",
+            "session_id": request.session_id or "",
+            "normalized_command": normalize_for_idempotency(request.text),
+            "timezone": request.timezone,
+            "time_bucket_15s": reference_epoch // 15,
+        }
+
+    @staticmethod
+    def _canonical_json(value: Mapping[str, Any]) -> bytes:
+        return json.dumps(
+            value,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        digest = hmac.new(self.idempotency_secret, material, hashlib.sha256).hexdigest()
-        return f"alice:hmac:{digest}"
 
-    @staticmethod
     def _request_hash(
+        self,
         auth: AuthenticatedPlanningContext,
         request: AliceInterpretRequest,
-        candidate: Candidate,
+        candidate: Candidate | None = None,
     ) -> str:
+        """Hash stable event semantics, not transport arrival or derived times."""
+
+        del candidate  # Candidate timestamps intentionally do not define replay equivalence.
+        # The key material includes the fallback bucket or scoped Yandex
+        # identity.  Excluding reference_time_utc and the parsed candidate
+        # means a retransmitted relative command replays the first response.
+        kind, event_identity = self._event_identity_material(request)
         material = {
             "audience": auth.audience,
             "route": "POST /alice/interpret",
             "actor": auth.actor,
-            "reference_time_utc": request.reference_time_utc,
+            "event_identity_kind": kind,
+            "event_identity": event_identity,
+            "normalized_command": normalize_for_idempotency(request.text),
             "timezone": request.timezone,
             "locale": request.locale,
-            "candidate": candidate.to_dict(),
+            "intent": normalize_for_idempotency(request.intent or ""),
+            "dialog": normalize_for_idempotency(request.dialog or ""),
         }
-        encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = self._canonical_json(material)
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
     @staticmethod

@@ -143,9 +143,29 @@ Creates reuse the A4 `claim_idempotency` / `store_idempotency_response`
 transaction primitive. The domain mutation, audit record, and exact Alice
 response are committed atomically.
 
-When present, `message_id` is preferred, followed by `request_id`. The private
-key is `alice:yandex:{kind}:{sha256(id)}`. If neither stable ID is available,
-the adapter builds canonical UTF-8 JSON with sorted keys and compact separators:
+Yandex `message_id` is session-scoped, so it is stable only when
+`session_id` is also present. The preferred event identity material is the
+canonical JSON object below, with `kind="yandex-message"`,
+`application_id` (or an empty string when unavailable), `session_id`, and
+`message_id`:
+
+```json
+{
+  "application_id": "…",
+  "kind": "yandex-message",
+  "message_id": "…",
+  "session_id": "…"
+}
+```
+
+The database key is `alice:yandex-message:{hex}`, where `hex` is an
+HMAC-SHA256 digest using `PLANNING_ALICE_IDEMPOTENCY_SECRET`. If `message_id`
+is absent, a `request_id` is used only when an application or session identity
+is available, with `kind="yandex-request"` and the same private HMAC shape.
+An unscoped `request_id`, and a `message_id` without `session_id`, are not
+treated as globally stable; those requests use the private fallback heuristic.
+For the fallback, the adapter builds canonical UTF-8 JSON with sorted keys and
+compact separators:
 
 ```json
 {
@@ -158,9 +178,18 @@ the adapter builds canonical UTF-8 JSON with sorted keys and compact separators:
 ```
 
 The key is `alice:hmac:{hex}`, where `hex` is HMAC-SHA256 of that JSON using
-`PLANNING_ALICE_IDEMPOTENCY_SECRET`. The secret is neither stored nor exposed.
-The raw full transcript is not used as a database key. A replay returns the
-exact stored response and creates no second object.
+`PLANNING_ALICE_IDEMPOTENCY_SECRET`. The secret and raw Yandex identifiers are
+neither stored nor exposed. The raw full transcript is not used as a database
+key.
+
+The request hash covers stable semantics: authenticated audience and actor,
+route, the scoped event identity, normalized command, timezone, locale, intent,
+and dialog. It intentionally excludes ephemeral `reference_time_utc` and
+derived candidate timestamps. Therefore a retransmission in the same scoped
+event identity or fallback 15-second bucket returns the exact first response,
+including its original relative due time, object UUID, correlation ID, and
+canonical timestamps. A materially different normalized command under the same
+stable event identity raises `idempotency_conflict` before a second mutation.
 
 ## Queries and speech
 
