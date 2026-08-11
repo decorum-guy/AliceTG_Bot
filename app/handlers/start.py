@@ -21,7 +21,10 @@ async def start(message: Message, settings: Settings) -> None:
         await message.answer(SONYA_MENU_TEXT, reply_markup=sonya_order_menu())
         return
 
-    await message.answer(admin_menu_text(), reply_markup=main_menu())
+    await message.answer(
+        admin_menu_text(),
+        reply_markup=main_menu(planning_enabled=getattr(settings, "planning_telegram_ui_enabled", False)),
+    )
 
 
 @router.callback_query(F.data == "menu:main")
@@ -37,7 +40,10 @@ async def menu_main(callback: CallbackQuery, settings: Settings) -> None:
         return
 
     if callback.message:
-        await callback.message.edit_text(admin_menu_text(), reply_markup=main_menu())
+        await callback.message.edit_text(
+            admin_menu_text(),
+            reply_markup=main_menu(planning_enabled=getattr(settings, "planning_telegram_ui_enabled", False)),
+        )
     await callback.answer()
 
 

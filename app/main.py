@@ -11,11 +11,12 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 
 from app.config import Settings
-from app.handlers import admin_modes, coffee, common, reminders, start, tea, water
+from app.handlers import admin_modes, coffee, common, planning, reminders, start, tea, water
 from app.planning.legacy_import import build_reminder_store
 from app.planning.delivery import HomeAssistantMobileTransport, TelegramDeliveryTransport
 from app.planning.db import PlanningDatabase
 from app.planning.scheduler import DurableReminderScheduler, validate_scheduler_modes
+from app.planning.telegram_ui import PlanningTelegramService
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
@@ -78,6 +79,8 @@ async def create_app() -> web.Application:
     dispatcher.include_router(tea.router)
     dispatcher.include_router(water.router)
     dispatcher.include_router(reminders.router)
+    if settings.planning_telegram_ui_enabled:
+        dispatcher.include_router(planning.router)
     dispatcher.include_router(common.router)
 
     ha = HomeAssistantClient(settings.ha_url, settings.ha_long_lived_token)
@@ -103,6 +106,16 @@ async def create_app() -> web.Application:
         # A4/A5a have their own disabled-by-default API gates.  Opening the
         # Planning database here does not enable the A2 cutover or A3 worker.
         planning_database = PlanningDatabase(settings.planning_db_path)
+    planning_telegram_service: PlanningTelegramService | None = None
+    if settings.planning_telegram_ui_enabled:
+        if planning_database is None:
+            raise RuntimeError("Planning Telegram UI requires the canonical Planning database")
+        planning_telegram_service = PlanningTelegramService(
+            planning_database,
+            default_timezone=settings.planning_default_timezone,
+            action_token_ttl_seconds=settings.planning_telegram_action_token_ttl_seconds,
+            callback_rate_limit_per_minute=settings.planning_telegram_callback_rate_limit_per_minute,
+        )
     admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
@@ -170,6 +183,8 @@ async def create_app() -> web.Application:
     dispatcher["tea_workflow"] = tea_workflow
     dispatcher["water_workflow"] = water_workflow
     dispatcher["reminder_workflow"] = reminder_workflow
+    if planning_telegram_service is not None:
+        dispatcher["planning_telegram_service"] = planning_telegram_service
     dispatcher["coffee_alert_scheduler"] = coffee_alert_scheduler
     dispatcher["pushward_coffee_activity"] = pushward_coffee_activity
     dispatcher["pushward_coffee_widget"] = pushward_coffee_widget
@@ -189,6 +204,7 @@ async def create_app() -> web.Application:
     app["water_workflow"] = water_workflow
     app["reminder_workflow"] = reminder_workflow
     app["planning_database"] = planning_database
+    app["planning_telegram_service"] = planning_telegram_service
     app["durable_reminder_scheduler"] = durable_reminder_scheduler
     app["coffee_alert_scheduler"] = coffee_alert_scheduler
     app["pushward_coffee_activity"] = pushward_coffee_activity

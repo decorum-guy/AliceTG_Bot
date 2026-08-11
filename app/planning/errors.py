@@ -23,6 +23,36 @@ class PlanningTransactionRequiredError(PlanningError):
     pass
 
 
+class TelegramActionTokenError(PlanningError):
+    """A persisted Telegram mutation capability cannot be used safely."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class TelegramActionTokenUnknownError(TelegramActionTokenError):
+    def __init__(self) -> None:
+        super().__init__("unknown_token")
+
+
+class TelegramActionTokenExpiredError(TelegramActionTokenError):
+    def __init__(self) -> None:
+        super().__init__("expired_token")
+
+
+class TelegramActionTokenConsumedError(TelegramActionTokenError):
+    def __init__(self) -> None:
+        super().__init__("consumed_token")
+
+
+class TelegramActionTokenBindingError(TelegramActionTokenError):
+    def __init__(self, reason: str) -> None:
+        if reason not in {"wrong_user", "wrong_chat", "wrong_action", "wrong_domain"}:
+            raise ValueError("invalid Telegram action token binding reason")
+        super().__init__(reason)
+
+
 class PlanningLeaseLostError(PlanningError):
     """The worker no longer owns the durable job lease."""
 
