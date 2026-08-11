@@ -23,6 +23,11 @@ from app.planning.errors import (
     PlanningTransactionRequiredError,
     PlanningValidationError,
     PlanningVersionConflictError,
+    TelegramActionTokenBindingError,
+    TelegramActionTokenConsumedError,
+    TelegramActionTokenError,
+    TelegramActionTokenExpiredError,
+    TelegramActionTokenUnknownError,
 )
 from app.planning.models import (
     CalendarEvent,
@@ -38,6 +43,19 @@ from app.planning.models import (
     Task,
 )
 from app.planning.repositories import PlanningRepository
+from app.planning.telegram_actions import (
+    IssuedTelegramAction,
+    TelegramActionToken,
+    TelegramActionTokenStore,
+    TelegramMutationRateLimiter,
+)
+from app.planning.telegram_ui import (
+    PlanningActionOutcome,
+    PlanningButton,
+    PlanningTelegramService,
+    PlanningTelegramRateLimited,
+    PlanningView,
+)
 
 __all__ = [
     "AuditWriter",
@@ -61,12 +79,26 @@ __all__ = [
     "PlanningTransactionRequiredError",
     "PlanningValidationError",
     "PlanningVersionConflictError",
+    "TelegramActionTokenBindingError",
+    "TelegramActionTokenConsumedError",
+    "TelegramActionTokenError",
+    "TelegramActionTokenExpiredError",
+    "TelegramActionTokenUnknownError",
     "Project",
     "ProviderMapping",
     "Reminder",
     "SyncConflict",
     "SyncCursor",
     "Task",
+    "IssuedTelegramAction",
+    "PlanningActionOutcome",
+    "PlanningButton",
+    "PlanningTelegramRateLimited",
+    "PlanningTelegramService",
+    "PlanningView",
+    "TelegramActionToken",
+    "TelegramActionTokenStore",
+    "TelegramMutationRateLimiter",
     "bounded_redacted_json",
     "reject_secret_fields",
 ]

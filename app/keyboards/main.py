@@ -3,12 +3,16 @@ from aiogram.types import InlineKeyboardMarkup
 from app.keyboards.styles import BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SUCCESS, inline_button
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [inline_button(text="🏠 Умные устройства", callback_data="devices:menu")],
-            [inline_button(text="🗣 Спросить Соню", callback_data="sonya:menu")],
-            [inline_button(text="⏰ Напоминания", callback_data="reminders:menu")],
+def main_menu(*, planning_enabled: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [inline_button(text="🏠 Умные устройства", callback_data="devices:menu")],
+        [inline_button(text="🗣 Спросить Соню", callback_data="sonya:menu")],
+        [inline_button(text="⏰ Напоминания", callback_data="reminders:menu")],
+    ]
+    if planning_enabled:
+        rows.append([inline_button(text="📋 Дела", callback_data="planning:menu")])
+    rows.extend(
+        [
             [
                 inline_button(text="🔊 Озвучить", callback_data="admin_mode:start:announce"),
                 inline_button(text="💬 Разговор", callback_data="admin_mode:start:talk"),
@@ -16,6 +20,7 @@ def main_menu() -> InlineKeyboardMarkup:
             [inline_button(text="⚙️ Настройки", callback_data="admin_settings:menu")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_settings_menu() -> InlineKeyboardMarkup:

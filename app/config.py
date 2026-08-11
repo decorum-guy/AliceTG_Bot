@@ -77,6 +77,9 @@ class Settings:
     planning_alice_idempotency_secret: str = ""
     planning_reminder_cutover_enabled: bool = False
     planning_durable_scheduler_enabled: bool = False
+    planning_telegram_ui_enabled: bool = False
+    planning_telegram_action_token_ttl_seconds: int = 900
+    planning_telegram_callback_rate_limit_per_minute: int = 30
     planning_scheduler_poll_interval_seconds: float = 5.0
     planning_scheduler_lease_seconds: int = 60
     planning_scheduler_batch_size: int = 10
@@ -135,6 +138,30 @@ class Settings:
         planning_default_timezone = os.getenv("PLANNING_DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
         planning_alice_interpret_enabled = _bool_env("PLANNING_ALICE_INTERPRET_ENABLED", False)
         planning_alice_idempotency_secret = os.getenv("PLANNING_ALICE_IDEMPOTENCY_SECRET", "").strip()
+        planning_reminder_cutover_enabled = _bool_env("PLANNING_REMINDER_CUTOVER_ENABLED", False)
+        planning_durable_scheduler_enabled = _bool_env("PLANNING_DURABLE_SCHEDULER_ENABLED", False)
+        planning_telegram_ui_enabled = _bool_env("PLANNING_TELEGRAM_UI_ENABLED", False)
+        planning_telegram_action_token_ttl_seconds = int(
+            os.getenv("PLANNING_TELEGRAM_ACTION_TOKEN_TTL_SECONDS", "900")
+        )
+        planning_telegram_callback_rate_limit = int(
+            os.getenv("PLANNING_TELEGRAM_CALLBACK_RATE_LIMIT_PER_MINUTE", "30")
+        )
+        if not 60 <= planning_telegram_action_token_ttl_seconds <= 3600:
+            raise RuntimeError(
+                "PLANNING_TELEGRAM_ACTION_TOKEN_TTL_SECONDS must be between 60 and 3600"
+            )
+        if not 1 <= planning_telegram_callback_rate_limit <= 120:
+            raise RuntimeError(
+                "PLANNING_TELEGRAM_CALLBACK_RATE_LIMIT_PER_MINUTE must be between 1 and 120"
+            )
+        if planning_telegram_ui_enabled and not (
+            planning_reminder_cutover_enabled and planning_durable_scheduler_enabled
+        ):
+            raise RuntimeError(
+                "PLANNING_TELEGRAM_UI_ENABLED requires both "
+                "PLANNING_REMINDER_CUTOVER_ENABLED and PLANNING_DURABLE_SCHEDULER_ENABLED"
+            )
         if planning_api_rate_limit <= 0 or planning_api_stale_after <= 0:
             raise RuntimeError("Planning API rate and freshness settings must be positive")
         if planning_api_enabled:
@@ -194,8 +221,11 @@ class Settings:
             planning_default_timezone=planning_default_timezone,
             planning_alice_interpret_enabled=planning_alice_interpret_enabled,
             planning_alice_idempotency_secret=planning_alice_idempotency_secret,
-            planning_reminder_cutover_enabled=_bool_env("PLANNING_REMINDER_CUTOVER_ENABLED", False),
-            planning_durable_scheduler_enabled=_bool_env("PLANNING_DURABLE_SCHEDULER_ENABLED", False),
+            planning_reminder_cutover_enabled=planning_reminder_cutover_enabled,
+            planning_durable_scheduler_enabled=planning_durable_scheduler_enabled,
+            planning_telegram_ui_enabled=planning_telegram_ui_enabled,
+            planning_telegram_action_token_ttl_seconds=planning_telegram_action_token_ttl_seconds,
+            planning_telegram_callback_rate_limit_per_minute=planning_telegram_callback_rate_limit,
             planning_scheduler_poll_interval_seconds=planning_poll_interval,
             planning_scheduler_lease_seconds=planning_lease_seconds,
             planning_scheduler_batch_size=planning_batch_size,

@@ -413,6 +413,25 @@ class PlanningRepository:
         ).fetchall()
         return [_row_to_reminder(row) for row in rows]
 
+    def list_active_reminders(self, *, limit: int = 100, offset: int = 0) -> list[Reminder]:
+        """Return pending/due reminders, including delivered-but-open rows."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1001:
+            raise PlanningValidationError("reminder.list limit is out of range")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
+            raise PlanningValidationError("reminder.list offset is out of range")
+        rows = self.connection.execute(
+            """
+            SELECT * FROM reminders
+            WHERE deleted_at IS NULL
+              AND status IN ('pending', 'due')
+            ORDER BY due_at_utc, id
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return [_row_to_reminder(row) for row in rows]
+
     def list_due_reminders(self, *, as_of_utc: str) -> list[Reminder]:
         validate_utc_timestamp(as_of_utc, "as_of_utc")
         rows = self.connection.execute(
@@ -1105,12 +1124,20 @@ class PlanningRepository:
         *,
         from_utc: str,
         to_utc: str,
+        from_local_date: str | None = None,
+        to_local_date: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[CalendarEvent]:
         validate_utc_timestamp(from_utc, "from_utc")
         validate_utc_timestamp(to_utc, "to_utc")
         _timestamp_order(from_utc, to_utc, "to_utc")
+        from_local_date = from_local_date or from_utc[:10]
+        to_local_date = to_local_date or to_utc[:10]
+        validate_date(from_local_date, "from_local_date")
+        validate_date(to_local_date, "to_local_date")
+        if to_local_date <= from_local_date:
+            raise PlanningValidationError("to_local_date must be later than from_local_date")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1001:
             raise PlanningValidationError("calendar_event.list limit is out of range")
         if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
@@ -1122,12 +1149,12 @@ class PlanningRepository:
               AND (
                     (all_day = 0 AND start_at_utc < ? AND end_at_utc > ?)
                     OR
-                    (all_day = 1 AND start_date < date(?) AND end_date_exclusive > date(?))
+                    (all_day = 1 AND start_date < ? AND end_date_exclusive > ?)
                   )
             ORDER BY all_day DESC, COALESCE(start_date, start_at_utc), id
             LIMIT ? OFFSET ?
             """,
-            (to_utc, from_utc, to_utc, from_utc, limit, offset),
+            (to_utc, from_utc, to_local_date, from_local_date, limit, offset),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
@@ -2087,10 +2114,11 @@ class PlanningRepository:
         if expected_version < 1:
             raise PlanningValidationError("expected_version must be positive")
         context = self._context(context)
+        trusted_telegram_surface = context.surface == "telegram" and context.actor_id.startswith("telegram:")
         if (
             context.audience != "operator"
             or context.actor_type not in {"operator", "service"}
-            or context.surface not in {"operator", "system"}
+            or not (context.surface in {"operator", "system"} or trusted_telegram_surface)
         ):
             raise PlanningValidationError("manual reminder retry requires an operator context")
         now = now or self._now()
