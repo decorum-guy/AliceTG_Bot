@@ -66,6 +66,7 @@ class Settings:
     reminders_state_path: str = "/app/data/reminders.json"
     app_state_path: str = "/app/data/state.json"
     planning_db_path: str = "/app/data/planning.sqlite3"
+    planning_reminder_cutover_enabled: bool = False
     pushward_coffee_activity_enabled: bool = False
     pushward_coffee_activity_slug: str = "ha-coffee-machine"
     pushward_error_log_path: str = "/app/data/pushward_errors.log"
@@ -129,6 +130,7 @@ class Settings:
             app_state_path=os.getenv("APP_STATE_PATH", "/app/data/state.json").strip() or "/app/data/state.json",
             planning_db_path=os.getenv("PLANNING_DB_PATH", "/app/data/planning.sqlite3").strip()
             or "/app/data/planning.sqlite3",
+            planning_reminder_cutover_enabled=_bool_env("PLANNING_REMINDER_CUTOVER_ENABLED", False),
             pushward_coffee_activity_enabled=_bool_env("PUSHWARD_COFFEE_ACTIVITY_ENABLED", False),
             pushward_coffee_activity_slug=os.getenv("PUSHWARD_COFFEE_ACTIVITY_SLUG", "ha-coffee-machine").strip()
             or "ha-coffee-machine",

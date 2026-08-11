@@ -12,6 +12,7 @@ from aiohttp import web
 
 from app.config import Settings
 from app.handlers import admin_modes, coffee, common, reminders, start, tea, water
+from app.planning.legacy_import import build_reminder_store
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
@@ -24,7 +25,6 @@ from app.services.control_center_coffee import ControlCenterCoffeeActions
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
-from app.services.reminder_store import ReminderStore
 from app.services.telegram_messages import TelegramMessages
 from app.storage.memory import MemoryStorage
 from app.web.internal_routes import setup_internal_routes
@@ -86,7 +86,11 @@ async def create_app() -> web.Application:
         LOGGER.warning(
             "Canonical coffee timing policy is unavailable; timing-dependent alerts are paused"
         )
-    reminder_store = ReminderStore(settings.reminders_state_path)
+    reminder_store, planning_database = build_reminder_store(
+        reminders_state_path=settings.reminders_state_path,
+        planning_db_path=settings.planning_db_path,
+        cutover_enabled=settings.planning_reminder_cutover_enabled,
+    )
     admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
@@ -150,6 +154,7 @@ async def create_app() -> web.Application:
     app["tea_workflow"] = tea_workflow
     app["water_workflow"] = water_workflow
     app["reminder_workflow"] = reminder_workflow
+    app["planning_database"] = planning_database
     app["coffee_alert_scheduler"] = coffee_alert_scheduler
     app["pushward_coffee_activity"] = pushward_coffee_activity
     app["pushward_coffee_widget"] = pushward_coffee_widget
@@ -168,6 +173,8 @@ async def create_app() -> web.Application:
         await pushward_coffee_activity.close()
         await ha.close()
         await bot.session.close()
+        if planning_database is not None:
+            planning_database.close()
 
     app.on_cleanup.append(close_resources)
     return app
