@@ -21,9 +21,10 @@ behavior or Control Center code.
   mutation.
 - Domain objects carry `source`, optional `source_ref`, and an immutable
   `audit_correlation_id`. Mutations also carry explicit actor/surface metadata.
-- Every mutation carries an idempotency key. The effective idempotency identity
-  is `(audience, key)` and the request hash is retained with the stored
-  canonical response.
+- Every mutation request carries an external `Idempotency-Key`. The effective
+  idempotency identity is `(audience, key)`, where `audience` comes from the
+  authenticated context. Planning computes and retains the request hash with
+  the stored canonical response; the client never supplies that hash.
 - Contract models are strict: unknown fields are rejected. Optional fields may
   be omitted or be explicit `null` where the field definition permits it.
 - No accepted contract field can carry an HA service/entity, shell command,
@@ -144,28 +145,65 @@ metadata plus `generatedAt` and a typed `items` array. `sourceStatus` is
 source snapshot exists, while `staleAfter` remains an explicit UTC time when
 the source can calculate one.
 
-### Mutation, actor and idempotency
+### Mutation request, actor and idempotency boundary
 
-Mutation requests use the `Idempotency-Key` header and explicit actor metadata:
+The client/server trust boundary is explicit. A task create is sent to the
+domain route with an external `Idempotency-Key` header and only client-settable
+domain fields in the body:
+
+```http
+POST /internal/planning/v1/tasks
+Idempotency-Key: fixture-idempotency-task-001
+```
 
 ```json
 {
-  "id": "fixture-actor",
-  "type": "operator",
-  "surface": "panel-agent"
+  "title": "Create fixture task",
+  "notes": null,
+  "due_date": "2026-08-21",
+  "priority": "low",
+  "project_id": null
 }
 ```
 
-The contract-level mutation fields are `domain`, `operation`, `request`,
-`expected_version`, `actor` and `idempotency`. Creates use
-`expected_version: null`; edits and state transitions use the current object
-version (`If-Match` at HTTP level). A stale expected version returns the
-conflict envelope below and never silently overwrites the newer object.
+The create body must not contain `id`, `version`, `created_at`, `updated_at`,
+`audit_correlation_id`, `source`, `source_ref`, `created_by` or
+`request_hash`. Planning generates the internal UUIDv4, object version,
+timestamps, audit correlation and canonical source metadata. Source metadata
+derived from the authenticated actor/surface is not trusted when copied from a
+client body.
 
-For the same `(audience, key)` and identical request hash, the server must
-return the exact previously stored canonical response. Reusing the key with a
-different request hash is an idempotency conflict. This is a contract rule;
-the persistence primitive is an A1 concern.
+The authenticated context supplies the audience and actor/surface metadata:
+
+```json
+{
+  "audience": "panel-agent",
+  "actor": {
+    "id": "fixture-operator",
+    "type": "operator",
+    "surface": "panel-agent"
+  }
+}
+```
+
+`audience` is not an arbitrary mutation-body field. Planning computes the
+request hash internally from the authenticated request and stores it with the
+`Idempotency-Key` and the exact canonical response. For the same `(audience,
+key)` and identical request hash, the server returns the exact previously
+stored canonical response. Reusing the key with a different request hash is an
+idempotency conflict. The persistence primitive is an A1 concern.
+
+The canonical object is response-only. It contains the server-owned `id`,
+`version`, `created_at`, `updated_at`, audit correlation and source metadata.
+The `mutation_idempotency.json` fixture is a composite review example with
+separate `request`, `authenticated_context` and `server_record` sections; it
+must not be interpreted as a request envelope containing trusted server data.
+
+Edits and state transitions identify their target through the route/object ID,
+carry `If-Match`/expected-version semantics and contain only mutable fields or
+the fixed action. They never accept a full canonical object as trusted input.
+The `edit_state_transition.json` fixture shows a completion request with an
+`If-Match` version and a canonical response at the newer version.
 
 ### Error and conflict envelope
 
@@ -202,10 +240,11 @@ execution fields.
 | `valid_all_day_event.json` | Exclusive-end all-day event |
 | `valid_timed_event.json` | UTC timed event and provider identity metadata |
 | `source_freshness_metadata.json` | Typed list envelope and freshness fields |
-| `mutation_idempotency.json` | Versioned mutation, actor/surface and replay key |
+| `mutation_idempotency.json` | Create request/response trust boundary and replay key |
+| `edit_state_transition.json` | Fixed action, `If-Match` and canonical response |
 | `conflict_error_envelope.json` | Expected-version `409` error envelope |
 | `alice_created_response.json` | Versioned Alice response envelope |
-| `invalid_*.json` | Unknown, unsafe, enum, event-shape and time-zone rejection cases |
+| `invalid_*.json` | Unknown, unsafe, client-server-field, enum, event-shape and time-zone rejection cases |
 
 ## Verified runtime and persistence facts
 

@@ -4,6 +4,7 @@ import json
 import re
 import unittest
 import uuid
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,9 @@ SOURCE_VALUES = {"alice", "telegram", "panel-agent", "operator", "ticktick", "ca
 SOURCE_STATUS_VALUES = {"current", "stale", "offline", "degraded"}
 ACTOR_TYPES = {"user", "service", "operator"}
 SURFACES = {"ha", "panel-agent", "telegram", "operator", "system"}
+AUDIENCES = {"ha", "panel-agent", "operator"}
+CLIENT_TASK_CREATE_FIELDS = {"title", "notes", "due_date", "due_time", "timezone", "priority", "project_id"}
+SERVER_MANAGED_CLIENT_FIELDS = {"id", "version", "created_at", "updated_at", "audit_correlation_id"}
 
 
 class ContractViolation(AssertionError):
@@ -346,37 +350,134 @@ def _validate_freshness_envelope(value: Any) -> dict[str, Any]:
     return envelope
 
 
-def _validate_mutation(value: Any) -> dict[str, Any]:
-    envelope = _require_mapping(value, "mutation envelope")
+def _validate_authenticated_context(value: Any, context: str = "authenticated_context") -> dict[str, Any]:
+    auth_context = _require_mapping(value, context)
+    _assert_keys(auth_context, {"audience", "actor"}, {"audience", "actor"}, context)
+    if auth_context["audience"] not in AUDIENCES:
+        raise ContractViolation(f"{context}.audience has an invalid enum")
+    _validate_actor(auth_context["actor"], f"{context}.actor")
+    return auth_context
+
+
+def _validate_task_create_body(value: Any, context: str = "task create body") -> dict[str, Any]:
+    body = _require_mapping(value, context)
+    _assert_keys(body, CLIENT_TASK_CREATE_FIELDS, {"title", "priority"}, context)
+    _assert_nonempty_string(body["title"], f"{context}.title")
+    if "notes" in body and body["notes"] is not None:
+        _assert_nonempty_string(body["notes"], f"{context}.notes")
+    if "due_date" in body and body["due_date"] is not None:
+        _assert_date(body["due_date"], f"{context}.due_date")
+    if "due_time" in body and body["due_time"] is not None:
+        if "due_date" not in body or body.get("due_date") is None or "timezone" not in body:
+            raise ContractViolation(f"{context}.due_time requires due_date and timezone")
+        _assert_local_time(body["due_time"], f"{context}.due_time")
+    if "timezone" in body and body["timezone"] is not None:
+        _assert_timezone(body["timezone"], f"{context}.timezone")
+    if body["priority"] not in {"none", "low", "normal", "high"}:
+        raise ContractViolation(f"{context}.priority has an invalid enum")
+    if "project_id" in body and body["project_id"] is not None:
+        _assert_uuid4(body["project_id"], f"{context}.project_id")
+    return body
+
+
+def _validate_create_request(value: Any, context: str = "create request") -> dict[str, Any]:
+    request = _require_mapping(value, context)
+    _assert_keys(request, {"route", "headers", "body"}, {"route", "headers", "body"}, context)
+    if request["route"] != "/internal/planning/v1/tasks":
+        raise ContractViolation(f"{context}.route must identify the task create route")
+    headers = _require_mapping(request["headers"], f"{context}.headers")
+    _assert_keys(headers, {"Idempotency-Key"}, {"Idempotency-Key"}, f"{context}.headers")
+    _assert_nonempty_string(headers["Idempotency-Key"], f"{context}.headers.Idempotency-Key")
+    _validate_task_create_body(request["body"], f"{context}.body")
+    return request
+
+
+def _validate_canonical_response(value: Any, context: str = "canonical response") -> dict[str, Any]:
+    envelope = _require_mapping(value, context)
     _assert_keys(
         envelope,
-        {"schemaVersion", "kind", "domain", "operation", "idempotency", "expected_version", "actor", "request", "response", "correlation_id"},
-        {"schemaVersion", "kind", "domain", "operation", "idempotency", "expected_version", "actor", "request", "response", "correlation_id"},
-        "mutation envelope",
+        {"schemaVersion", "kind", "domain", "object", "sourceStatus", "lastSyncedAt", "staleAfter", "correlation_id"},
+        {"schemaVersion", "kind", "domain", "object", "sourceStatus", "lastSyncedAt", "staleAfter", "correlation_id"},
+        context,
     )
-    if envelope["schemaVersion"] != "planning.v1" or envelope["kind"] != "mutation":
-        raise ContractViolation("mutation envelope version or kind is invalid")
-    if envelope["domain"] != "task" or envelope["operation"] != "create":
-        raise ContractViolation("mutation fixture must be a task create")
-    idem = _require_mapping(envelope["idempotency"], "mutation idempotency")
-    _assert_keys(idem, {"audience", "key", "request_hash"}, {"audience", "key", "request_hash"}, "mutation idempotency")
-    _assert_nonempty_string(idem["audience"], "mutation idempotency.audience")
-    _assert_nonempty_string(idem["key"], "mutation idempotency.key")
-    if not isinstance(idem["request_hash"], str) or not SHA256.fullmatch(idem["request_hash"]):
-        raise ContractViolation("mutation idempotency.request_hash must be sha256 hex")
-    if envelope["expected_version"] is not None:
-        _assert_positive_version(envelope["expected_version"], "mutation expected_version")
-    _validate_actor(envelope["actor"], "mutation actor")
-    request = _require_mapping(envelope["request"], "mutation request")
-    _assert_keys(request, {"object"}, {"object"}, "mutation request")
-    _validate_task(request["object"], "mutation request.object")
-    response = _require_mapping(envelope["response"], "mutation response")
-    _assert_keys(response, {"status", "object"}, {"status", "object"}, "mutation response")
-    if response["status"] not in {"created", "updated", "completed", "cancelled", "archived", "deleted"}:
-        raise ContractViolation("mutation response.status has an invalid enum")
-    _validate_task(response["object"], "mutation response.object")
-    _assert_uuid4(envelope["correlation_id"], "mutation envelope.correlation_id")
+    if envelope["schemaVersion"] != "planning.v1" or envelope["kind"] != "object":
+        raise ContractViolation(f"{context} version or kind is invalid")
+    validators = {"reminder": _validate_reminder, "task": _validate_task, "calendar_event": _validate_event}
+    validator = validators.get(envelope["domain"])
+    if validator is None:
+        raise ContractViolation(f"{context}.domain has an invalid enum")
+    validator(envelope["object"], f"{context}.object")
+    if envelope["sourceStatus"] not in SOURCE_STATUS_VALUES:
+        raise ContractViolation(f"{context}.sourceStatus has an invalid enum")
+    if envelope["lastSyncedAt"] is not None:
+        _assert_utc_timestamp(envelope["lastSyncedAt"], f"{context}.lastSyncedAt")
+    _assert_utc_timestamp(envelope["staleAfter"], f"{context}.staleAfter")
+    _assert_uuid4(envelope["correlation_id"], f"{context}.correlation_id")
     return envelope
+
+
+def _validate_server_record(value: Any, context: str = "server record") -> dict[str, Any]:
+    record = _require_mapping(value, context)
+    _assert_keys(record, {"request_hash", "canonical_response"}, {"request_hash", "canonical_response"}, context)
+    if not isinstance(record["request_hash"], str) or not SHA256.fullmatch(record["request_hash"]):
+        raise ContractViolation(f"{context}.request_hash must be server-computed sha256 hex")
+    _validate_canonical_response(record["canonical_response"], f"{context}.canonical_response")
+    return record
+
+
+def _validate_mutation(value: Any) -> dict[str, Any]:
+    example = _require_mapping(value, "mutation example")
+    _assert_keys(
+        example,
+        {"schemaVersion", "kind", "operation", "request", "authenticated_context", "server_record", "correlation_id"},
+        {"schemaVersion", "kind", "operation", "request", "authenticated_context", "server_record", "correlation_id"},
+        "mutation example",
+    )
+    if example["schemaVersion"] != "planning.v1" or example["kind"] != "mutation_example" or example["operation"] != "create":
+        raise ContractViolation("mutation example version, kind or operation is invalid")
+    _validate_create_request(example["request"])
+    _validate_authenticated_context(example["authenticated_context"])
+    record = _validate_server_record(example["server_record"])
+    if record["canonical_response"]["domain"] != "task":
+        raise ContractViolation("create canonical response must be a task")
+    _assert_uuid4(example["correlation_id"], "mutation example.correlation_id")
+    return example
+
+
+def _validate_edit_state_transition(value: Any) -> dict[str, Any]:
+    example = _require_mapping(value, "edit/state transition example")
+    _assert_keys(
+        example,
+        {"schemaVersion", "kind", "operation", "request", "authenticated_context", "server_record", "correlation_id"},
+        {"schemaVersion", "kind", "operation", "request", "authenticated_context", "server_record", "correlation_id"},
+        "edit/state transition example",
+    )
+    if example["schemaVersion"] != "planning.v1" or example["kind"] != "mutation_example" or example["operation"] != "complete":
+        raise ContractViolation("edit/state transition example version, kind or operation is invalid")
+    request = _require_mapping(example["request"], "edit/state transition request")
+    _assert_keys(request, {"route", "headers", "body"}, {"route", "headers", "body"}, "edit/state transition request")
+    match = re.fullmatch(r"/internal/planning/v1/tasks/([0-9a-f-]{36})/complete", request["route"])
+    if match is None:
+        raise ContractViolation("edit/state transition route must identify a task and fixed action")
+    _assert_uuid4(match.group(1), "edit/state transition route object id")
+    headers = _require_mapping(request["headers"], "edit/state transition headers")
+    _assert_keys(headers, {"Idempotency-Key", "If-Match"}, {"Idempotency-Key", "If-Match"}, "edit/state transition headers")
+    _assert_nonempty_string(headers["Idempotency-Key"], "edit/state transition Idempotency-Key")
+    if not isinstance(headers["If-Match"], str) or not headers["If-Match"].isdigit() or int(headers["If-Match"]) < 1:
+        raise ContractViolation("edit/state transition If-Match must be a positive version")
+    body = _require_mapping(request["body"], "edit/state transition body")
+    _assert_keys(body, set(), set(), "edit/state transition body")
+    _validate_authenticated_context(example["authenticated_context"], "edit/state transition authenticated_context")
+    record = _validate_server_record(example["server_record"], "edit/state transition server record")
+    canonical = record["canonical_response"]
+    if canonical["domain"] != "task" or canonical["object"]["status"] != "completed":
+        raise ContractViolation("edit/state transition must return a completed task")
+    if canonical["object"]["id"] != match.group(1):
+        raise ContractViolation("edit/state transition response must target the route object")
+    if canonical["object"]["version"] <= int(headers["If-Match"]):
+        raise ContractViolation("edit/state transition response must advance the version")
+    _assert_uuid4(example["correlation_id"], "edit/state transition correlation_id")
+    return example
 
 
 def _validate_error(value: Any) -> dict[str, Any]:
@@ -478,9 +579,61 @@ class PlanningV1ContractTests(unittest.TestCase):
 
     def test_versioned_mutation_and_idempotency_contract(self) -> None:
         mutation = _validate_mutation(_load("mutation_idempotency.json"))
-        self.assertIsNone(mutation["expected_version"])
-        self.assertEqual(mutation["idempotency"]["audience"], "panel-agent")
-        self.assertEqual(mutation["response"]["object"]["version"], 1)
+        request = mutation["request"]
+        self.assertEqual(request["headers"]["Idempotency-Key"], "fixture-idempotency-task-001")
+        self.assertNotIn("request_hash", request["headers"])
+        self.assertNotIn("audience", request["body"])
+        for field in SERVER_MANAGED_CLIENT_FIELDS:
+            self.assertNotIn(field, request["body"])
+        self.assertEqual(mutation["authenticated_context"]["audience"], "panel-agent")
+        self.assertIn("request_hash", mutation["server_record"])
+        canonical = mutation["server_record"]["canonical_response"]["object"]
+        self.assertEqual(canonical["version"], 1)
+        for field in ("id", "version", "created_at", "updated_at", "audit_correlation_id", "source"):
+            self.assertIn(field, canonical)
+
+    def test_create_request_rejects_server_owned_fields(self) -> None:
+        with self.assertRaises(ContractViolation):
+            _validate_create_request(_load("invalid_create_server_fields.json"))
+
+        base_request = _load("mutation_idempotency.json")["request"]
+        for field in SERVER_MANAGED_CLIENT_FIELDS | {"source", "source_ref", "created_by"}:
+            candidate = deepcopy(base_request)
+            candidate["body"][field] = "client-supplied"
+            with self.subTest(field=field):
+                with self.assertRaises(ContractViolation):
+                    _validate_create_request(candidate)
+
+    def test_idempotency_key_and_audience_are_external_and_request_hash_is_internal(self) -> None:
+        with self.assertRaises(ContractViolation):
+            _validate_create_request(_load("invalid_client_request_hash.json"))
+
+        candidate = deepcopy(_load("mutation_idempotency.json")["request"])
+        candidate["body"]["audience"] = "operator"
+        with self.assertRaises(ContractViolation):
+            _validate_create_request(candidate)
+
+    def test_edit_state_transition_requires_expected_version_and_returns_canonical_object(self) -> None:
+        transition = _validate_edit_state_transition(_load("edit_state_transition.json"))
+        request = transition["request"]
+        self.assertEqual(request["headers"]["If-Match"], "3")
+        self.assertEqual(request["body"], {})
+        canonical = transition["server_record"]["canonical_response"]["object"]
+        self.assertEqual(canonical["status"], "completed")
+        self.assertEqual(canonical["version"], 4)
+
+        missing_version = deepcopy(request)
+        missing_version["headers"].pop("If-Match")
+        invalid_transition = deepcopy(transition)
+        invalid_transition["request"] = missing_version
+        with self.assertRaises(ContractViolation):
+            _validate_edit_state_transition(invalid_transition)
+
+        full_object_request = deepcopy(request)
+        full_object_request["body"] = canonical
+        invalid_transition["request"] = full_object_request
+        with self.assertRaises(ContractViolation):
+            _validate_edit_state_transition(invalid_transition)
 
     def test_conflict_error_envelope_contract(self) -> None:
         error = _validate_error(_load("conflict_error_envelope.json"))
