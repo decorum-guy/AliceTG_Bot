@@ -1,0 +1,11 @@
+{
+  "route": "/internal/planning/v1/tasks",
+  "headers": {
+    "Idempotency-Key": "fixture-invalid-request-hash-001",
+    "request_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "body": {
+    "title": "Invalid request hash fixture",
+    "priority": "normal"
+  }
+}

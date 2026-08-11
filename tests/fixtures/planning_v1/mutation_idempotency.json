@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "planning.v1",
+  "kind": "mutation_example",
+  "operation": "create",
+  "correlation_id": "6d2f8a4c-1b73-4e90-9c25-7a5e3d8b6f04",
+  "request": {
+    "route": "/internal/planning/v1/tasks",
+    "headers": {
+      "Idempotency-Key": "fixture-idempotency-task-001"
+    },
+    "body": {
+      "title": "Create fixture task",
+      "notes": null,
+      "due_date": "2026-08-21",
+      "priority": "low",
+      "project_id": null
+    }
+  },
+  "authenticated_context": {
+    "audience": "panel-agent",
+    "actor": {
+      "id": "fixture-operator",
+      "type": "operator",
+      "surface": "panel-agent"
+    }
+  },
+  "server_record": {
+    "request_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "canonical_response": {
+      "schemaVersion": "planning.v1",
+      "kind": "object",
+      "domain": "task",
+      "object": {
+        "domain": "task",
+        "id": "3e7a1c5d-9b42-4f68-8d10-6c2e5a7b9f03",
+        "title": "Create fixture task",
+        "notes": null,
+        "due_date": "2026-08-21",
+        "priority": "low",
+        "project_id": null,
+        "status": "open",
+        "source": "panel-agent",
+        "source_ref": "fixture:auth-context:panel-agent",
+        "version": 1,
+        "created_at": "2026-08-11T07:45:00Z",
+        "updated_at": "2026-08-11T07:45:00Z",
+        "audit_correlation_id": "4c8e2a6d-1f53-4b79-9d20-7a5e3c8b6f04"
+      },
+      "sourceStatus": "current",
+      "lastSyncedAt": "2026-08-11T07:45:00Z",
+      "staleAfter": "2026-08-11T07:50:00Z",
+      "correlation_id": "6d2f8a4c-1b73-4e90-9c25-7a5e3d8b6f04"
+    }
+  }
+}

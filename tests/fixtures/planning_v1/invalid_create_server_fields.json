@@ -1,0 +1,15 @@
+{
+  "route": "/internal/planning/v1/tasks",
+  "headers": {
+    "Idempotency-Key": "fixture-invalid-server-fields-001"
+  },
+  "body": {
+    "title": "Invalid create fixture",
+    "priority": "normal",
+    "id": "3e7a1c5d-9b42-4f68-8d10-6c2e5a7b9f03",
+    "version": 9,
+    "created_at": "2026-08-11T08:05:00Z",
+    "updated_at": "2026-08-11T08:05:00Z",
+    "audit_correlation_id": "4c8e2a6d-1f53-4b79-9d20-7a5e3c8b6f04"
+  }
+}

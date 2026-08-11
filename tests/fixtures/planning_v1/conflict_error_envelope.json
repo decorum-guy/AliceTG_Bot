@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "planning.v1",
+  "kind": "error",
+  "http_status": 409,
+  "error": {
+    "code": "version_conflict",
+    "message": "Object version is stale.",
+    "details": {
+      "domain": "task",
+      "object_id": "e1c5a7b9-4d32-4f60-8a21-9b7e3c5d1f08",
+      "expected_version": 2,
+      "actual_version": 3
+    },
+    "retryable": false
+  },
+  "sourceStatus": "current",
+  "lastSyncedAt": "2026-08-11T07:50:00Z",
+  "staleAfter": "2026-08-11T07:55:00Z",
+  "actor": {
+    "id": "fixture-operator",
+    "type": "operator",
+    "surface": "panel-agent"
+  },
+  "correlation_id": "7e3a1c5d-9b42-4f68-8d10-6c2e5a7b9f03"
+}

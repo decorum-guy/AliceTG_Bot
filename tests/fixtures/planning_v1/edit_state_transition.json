@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "planning.v1",
+  "kind": "mutation_example",
+  "operation": "complete",
+  "correlation_id": "9b5d7f1a-3c84-4e20-8f26-6a5e3d8b7c04",
+  "request": {
+    "route": "/internal/planning/v1/tasks/e1c5a7b9-4d32-4f60-8a21-9b7e3c5d1f08/complete",
+    "headers": {
+      "Idempotency-Key": "fixture-idempotency-complete-001",
+      "If-Match": "3"
+    },
+    "body": {}
+  },
+  "authenticated_context": {
+    "audience": "panel-agent",
+    "actor": {
+      "id": "fixture-operator",
+      "type": "operator",
+      "surface": "panel-agent"
+    }
+  },
+  "server_record": {
+    "request_hash": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "canonical_response": {
+      "schemaVersion": "planning.v1",
+      "kind": "object",
+      "domain": "task",
+      "object": {
+        "domain": "task",
+        "id": "e1c5a7b9-4d32-4f60-8a21-9b7e3c5d1f08",
+        "title": "Update project brief",
+        "due_date": "2026-08-16",
+        "due_time": "14:05",
+        "timezone": "Europe/Moscow",
+        "priority": "high",
+        "project_id": "a8f2c4d6-1b39-4e57-9c02-7d5a3b8e6f14",
+        "status": "completed",
+        "source": "panel-agent",
+        "source_ref": "fixture:auth-context:panel-agent",
+        "completed_at": "2026-08-11T08:00:00Z",
+        "version": 4,
+        "created_at": "2026-08-11T07:15:00Z",
+        "updated_at": "2026-08-11T08:00:00Z",
+        "audit_correlation_id": "f7d2b4a6-8c10-4e35-9a72-1b6d5f3c8e04"
+      },
+      "sourceStatus": "current",
+      "lastSyncedAt": "2026-08-11T08:00:00Z",
+      "staleAfter": "2026-08-11T08:05:00Z",
+      "correlation_id": "8a4c6e2f-1b73-4d90-9c25-7e5a3b8d6f04"
+    }
+  }
+}
