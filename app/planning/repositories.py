@@ -363,6 +363,56 @@ class PlanningRepository:
         validate_uuid4(reminder_id, "reminder.id")
         return _row_to_reminder(self._require_row("reminders", reminder_id, "reminder"))
 
+    def list_reminders(
+        self,
+        *,
+        state: str | None = None,
+        from_utc: str | None = None,
+        to_utc: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Reminder]:
+        """Return a bounded, stable reminder view without tombstones."""
+
+        if state is not None and state not in {"pending", "due", "completed", "cancelled"}:
+            raise PlanningValidationError("reminder.state has an invalid enum")
+        if from_utc is not None:
+            validate_utc_timestamp(from_utc, "reminder.from")
+        if to_utc is not None:
+            validate_utc_timestamp(to_utc, "reminder.to")
+        if from_utc is not None and to_utc is not None:
+            _timestamp_order(from_utc, to_utc, "reminder.to")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1001:
+            raise PlanningValidationError("reminder.list limit is out of range")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
+            raise PlanningValidationError("reminder.list offset is out of range")
+
+        # The ordinary/upcoming views hide tombstones.  An explicit
+        # state=cancelled request is the approved audit view for cancelled
+        # reminders, so it may include their logical tombstones.
+        clauses = ["status = 'cancelled'"] if state == "cancelled" else ["deleted_at IS NULL"]
+        values: list[Any] = []
+        if state is not None:
+            clauses.append("status = ?")
+            values.append(state)
+        if from_utc is not None:
+            clauses.append("due_at_utc >= ?")
+            values.append(from_utc)
+        if to_utc is not None:
+            clauses.append("due_at_utc < ?")
+            values.append(to_utc)
+        values.extend((limit, offset))
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM reminders
+            WHERE {' AND '.join(clauses)}
+            ORDER BY due_at_utc, id
+            LIMIT ? OFFSET ?
+            """,
+            values,
+        ).fetchall()
+        return [_row_to_reminder(row) for row in rows]
+
     def list_due_reminders(self, *, as_of_utc: str) -> list[Reminder]:
         validate_utc_timestamp(as_of_utc, "as_of_utc")
         rows = self.connection.execute(
@@ -581,6 +631,24 @@ class PlanningRepository:
         validate_uuid4(project_id, "project.id")
         return _row_to_project(self._require_row("projects", project_id, "project"))
 
+    def list_projects(self, *, limit: int = 100, offset: int = 0) -> list[Project]:
+        """Return a bounded, stable project view without tombstones."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1001:
+            raise PlanningValidationError("project.list limit is out of range")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
+            raise PlanningValidationError("project.list offset is out of range")
+        rows = self.connection.execute(
+            """
+            SELECT * FROM projects
+            WHERE deleted_at IS NULL
+            ORDER BY name COLLATE NOCASE, id
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return [_row_to_project(row) for row in rows]
+
     def update_project(
         self,
         project_id: str,
@@ -764,6 +832,50 @@ class PlanningRepository:
             ORDER BY due_date, COALESCE(due_time, '99:99:99'), id
             """,
             (*statuses, on_or_before),
+        ).fetchall()
+        return [_row_to_task(row) for row in rows]
+
+    def list_tasks(
+        self,
+        *,
+        view: str,
+        today: str,
+        project_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Task]:
+        """Return one of the explicit today/overdue/upcoming task views."""
+
+        if view not in {"today", "overdue", "upcoming"}:
+            raise PlanningValidationError("task.view has an invalid enum")
+        validate_date(today, "task.today")
+        if project_id is not None:
+            validate_uuid4(project_id, "task.project_id")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1001:
+            raise PlanningValidationError("task.list limit is out of range")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
+            raise PlanningValidationError("task.list offset is out of range")
+
+        if view == "today":
+            date_clause = "due_date = ?"
+        elif view == "overdue":
+            date_clause = "due_date < ?"
+        else:
+            date_clause = "due_date > ?"
+        clauses = ["deleted_at IS NULL", "status = 'open'", "due_date IS NOT NULL", date_clause]
+        values: list[Any] = [today]
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        values.extend((limit, offset))
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM tasks
+            WHERE {' AND '.join(clauses)}
+            ORDER BY due_date, CASE WHEN due_time IS NULL THEN 1 ELSE 0 END, due_time, id
+            LIMIT ? OFFSET ?
+            """,
+            values,
         ).fetchall()
         return [_row_to_task(row) for row in rows]
 
@@ -988,10 +1100,21 @@ class PlanningRepository:
         validate_uuid4(event_id, "calendar_event.id")
         return _row_to_event(self._require_row("calendar_events", event_id, "calendar_event"))
 
-    def list_calendar_events(self, *, from_utc: str, to_utc: str) -> list[CalendarEvent]:
+    def list_calendar_events(
+        self,
+        *,
+        from_utc: str,
+        to_utc: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CalendarEvent]:
         validate_utc_timestamp(from_utc, "from_utc")
         validate_utc_timestamp(to_utc, "to_utc")
         _timestamp_order(from_utc, to_utc, "to_utc")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1001:
+            raise PlanningValidationError("calendar_event.list limit is out of range")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
+            raise PlanningValidationError("calendar_event.list offset is out of range")
         rows = self.connection.execute(
             """
             SELECT * FROM calendar_events
@@ -1002,8 +1125,9 @@ class PlanningRepository:
                     (all_day = 1 AND start_date < date(?) AND end_date_exclusive > date(?))
                   )
             ORDER BY all_day DESC, COALESCE(start_date, start_at_utc), id
+            LIMIT ? OFFSET ?
             """,
-            (to_utc, from_utc, to_utc, from_utc),
+            (to_utc, from_utc, to_utc, from_utc, limit, offset),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 

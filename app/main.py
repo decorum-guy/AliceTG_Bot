@@ -14,6 +14,7 @@ from app.config import Settings
 from app.handlers import admin_modes, coffee, common, reminders, start, tea, water
 from app.planning.legacy_import import build_reminder_store
 from app.planning.delivery import HomeAssistantMobileTransport, TelegramDeliveryTransport
+from app.planning.db import PlanningDatabase
 from app.planning.scheduler import DurableReminderScheduler, validate_scheduler_modes
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
@@ -98,6 +99,10 @@ async def create_app() -> web.Application:
         planning_db_path=settings.planning_db_path,
         cutover_enabled=settings.planning_reminder_cutover_enabled,
     )
+    if settings.planning_api_enabled and planning_database is None:
+        # A4 has its own disabled-by-default API gate.  Opening the Planning
+        # database here does not enable the A2 reminder cutover or A3 worker.
+        planning_database = PlanningDatabase(settings.planning_db_path)
     admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)

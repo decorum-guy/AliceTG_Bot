@@ -36,6 +36,7 @@ from app.services.control_center_coffee import (
 )
 from app.services.coffee_machine import set_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
+from app.planning.api import setup_planning_routes
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.reminders import ReminderWorkflow
 from app.workflows.tea import TeaAnswer, TeaWorkflow
@@ -1017,6 +1018,8 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/water/sonya-comment-answer", water_comment_answer)
     app.router.add_post("/internal/water/sonya-direct-request", water_direct_request)
     app.router.add_post("/internal/reminders/alice-create", alice_reminder_create)
+    if getattr(app["settings"], "planning_api_enabled", False):
+        setup_planning_routes(app)
 
 
 def _coffee_runtime_text(switch_state: dict) -> str:
