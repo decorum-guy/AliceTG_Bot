@@ -35,16 +35,20 @@ class ReminderWorkflow:
         admin_chat_id: int,
         settings: Settings,
         ha: HomeAssistantClient,
+        durable_scheduler_enabled: bool = False,
     ) -> None:
         self._store = store
         self._telegram_messages = telegram_messages
         self._admin_chat_id = admin_chat_id
         self._settings = settings
         self._ha = ha
+        self._durable_scheduler_enabled = durable_scheduler_enabled
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._drafts: dict[int, ReminderDraft] = {}
 
     async def restore_pending(self) -> None:
+        if self._durable_scheduler_enabled:
+            return
         reminders = await self._store.list_pending()
         LOGGER.info("Reminder restore started: pending_count=%s", len(reminders))
         for reminder in reminders:
@@ -170,7 +174,8 @@ class ReminderWorkflow:
             reminder.due_at,
             len(parsed.text),
         )
-        self._schedule(reminder)
+        if not self._durable_scheduler_enabled:
+            self._schedule(reminder)
         return reminder
 
     def _schedule(self, reminder: ReminderRecord) -> None:

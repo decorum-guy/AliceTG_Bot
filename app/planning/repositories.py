@@ -11,6 +11,7 @@ from app.planning.db import PlanningDatabase
 from app.planning.errors import (
     PlanningIdempotencyConflictError,
     PlanningIdempotencyInProgressError,
+    PlanningLeaseLostError,
     PlanningNotFoundError,
     PlanningTransactionRequiredError,
     PlanningValidationError,
@@ -19,12 +20,15 @@ from app.planning.errors import (
 from app.planning.models import (
     AUDIENCES,
     CalendarEvent,
+    DeliveryAttempt,
     IdempotencyClaim,
     MutationContext,
     OutboxJob,
     Project,
     ProviderMapping,
     Reminder,
+    REMINDER_DELIVERY_JOB_TYPE,
+    REMINDER_OUTBOX_DEDUPE_PREFIX,
     SyncConflict,
     SyncCursor,
     Task,
@@ -171,9 +175,19 @@ def _timestamp_order(start: str, end: str, field: str) -> None:
 class PlanningRepository:
     """Typed storage operations. Mutations always use guarded versions and audit."""
 
-    def __init__(self, database: PlanningDatabase, audit: AuditWriter | None = None) -> None:
+    def __init__(
+        self,
+        database: PlanningDatabase,
+        audit: AuditWriter | None = None,
+        *,
+        now_fn: Callable[[], str] = utc_now,
+    ) -> None:
         self.database = database
-        self.audit = audit or AuditWriter(database)
+        self._now_fn = now_fn
+        self.audit = audit or AuditWriter(database, now_fn=now_fn)
+
+    def _now(self) -> str:
+        return self._now_fn()
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -242,6 +256,9 @@ class PlanningRepository:
         context: MutationContext,
         notes: str | None = None,
         source_ref: str | None = None,
+        outbox_job_type: str | None = None,
+        outbox_payload: Mapping[str, Any] | None = None,
+        outbox_dedupe_key: str | None = None,
     ) -> Reminder:
         context = self._context(context)
         validate_reminder_shape(
@@ -253,8 +270,14 @@ class PlanningRepository:
             notes=notes,
         )
         source_ref = self._source_ref(context, source_ref)
+        if outbox_payload is not None and outbox_job_type is None:
+            raise PlanningValidationError("durable reminder delivery requires outbox_job_type")
+        if outbox_payload is None and (outbox_job_type is not None or outbox_dedupe_key is not None):
+            raise PlanningValidationError(
+                "outbox_job_type and outbox_dedupe_key require an outbox payload"
+            )
         object_id = new_uuid4()
-        timestamp = utc_now()
+        timestamp = self._now()
         reminder = Reminder(
             id=object_id,
             title=title,
@@ -313,6 +336,27 @@ class PlanningRepository:
                 before=None,
                 after=reminder.to_dict(),
             )
+            if outbox_payload is not None:
+                payload = dict(outbox_payload)
+                payload.setdefault("reminder_id", reminder.id)
+                self.enqueue_outbox(
+                    job_type=outbox_job_type or "",
+                    payload=payload,
+                    available_at=reminder.due_at_utc,
+                    correlation_id=reminder.audit_correlation_id,
+                    dedupe_key=outbox_dedupe_key or f"{REMINDER_OUTBOX_DEDUPE_PREFIX}{reminder.id}",
+                    reminder_id=reminder.id,
+                )
+                self._record_audit(
+                    context=context,
+                    action="delivery_queued",
+                    domain=reminder.domain,
+                    object_id=reminder.id,
+                    old_version=reminder.version,
+                    new_version=reminder.version,
+                    before=None,
+                    after={"available_at": reminder.due_at_utc, "job_type": outbox_job_type},
+                )
         return reminder
 
     def get_reminder(self, reminder_id: str) -> Reminder:
@@ -363,7 +407,7 @@ class PlanningRepository:
             new_completed_at = current.completed_at if completed_at is _UNSET else completed_at
             new_cancelled_at = current.cancelled_at if cancelled_at is _UNSET else cancelled_at
             new_deleted_at = current.deleted_at
-            timestamp = utc_now()
+            timestamp = self._now()
             if new_status == "completed" and new_completed_at is None:
                 new_completed_at = timestamp
             if new_status == "cancelled" and new_cancelled_at is None:
@@ -426,6 +470,27 @@ class PlanningRepository:
             )
             if cursor.rowcount != 1:
                 self._raise_version_conflict("reminder", reminder_id, expected_version, "reminders")
+            if updated.status in {"completed", "cancelled"}:
+                suppressed = self.connection.execute(
+                    """
+                    UPDATE outbox
+                    SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+                        lease_token = NULL, updated_at = ?
+                    WHERE reminder_id = ? AND status IN ('queued', 'leased')
+                    """,
+                    (updated.updated_at, updated.id),
+                )
+                if suppressed.rowcount:
+                    self._record_audit(
+                        context=context,
+                        action="delivery_suppressed",
+                        domain=updated.domain,
+                        object_id=updated.id,
+                        old_version=current.version,
+                        new_version=updated.version,
+                        before={"status": current.status, "delivery_state": current.delivery_state},
+                        after={"status": updated.status, "suppressed_jobs": suppressed.rowcount},
+                    )
             self._record_audit(
                 context=context,
                 action="update" if updated.status == current.status else updated.status,
@@ -467,7 +532,7 @@ class PlanningRepository:
         if notes is not None:
             validate_text(notes, "project.notes", max_length=4000, allow_empty=True)
         source_ref = self._source_ref(context, source_ref)
-        timestamp = utc_now()
+        timestamp = self._now()
         project = Project(
             id=new_uuid4(),
             name=name,
@@ -538,7 +603,7 @@ class PlanningRepository:
                 name=current.name if name is _UNSET else str(name),
                 notes=current.notes if notes is _UNSET else notes,
                 version=current.version + 1,
-                updated_at=utc_now(),
+                updated_at=self._now(),
             )
             validate_text(updated.name, "project.name", max_length=200)
             if updated.notes is not None:
@@ -576,7 +641,7 @@ class PlanningRepository:
             current = _row_to_project(self._require_row("projects", project_id, "project"))
             if current.version != expected_version:
                 raise PlanningVersionConflictError("project", project_id, expected_version, current.version)
-            deleted_at = utc_now()
+            deleted_at = self._now()
             updated = replace(current, version=current.version + 1, updated_at=deleted_at, deleted_at=deleted_at)
             cursor = self.connection.execute(
                 "UPDATE projects SET version = ?, updated_at = ?, deleted_at = ? WHERE id = ? AND version = ?",
@@ -621,7 +686,7 @@ class PlanningRepository:
             project_id=project_id,
         )
         source_ref = self._source_ref(context, source_ref)
-        timestamp = utc_now()
+        timestamp = self._now()
         task = Task(
             id=new_uuid4(),
             title=title,
@@ -728,7 +793,7 @@ class PlanningRepository:
             new_status = current.status if status is _UNSET else str(status)
             if current.status == "archived" and new_status != "archived":
                 raise PlanningValidationError("archived tasks cannot be reopened")
-            timestamp = utc_now()
+            timestamp = self._now()
             completed_at = current.completed_at
             archived_at = current.archived_at
             deleted_at = current.deleted_at
@@ -850,7 +915,7 @@ class PlanningRepository:
             assert start_at_utc is not None and end_at_utc is not None
             _timestamp_order(start_at_utc, end_at_utc, "calendar_event.end_at_utc")
         source_ref = self._source_ref(context, source_ref)
-        timestamp = utc_now()
+        timestamp = self._now()
         event = CalendarEvent(
             id=new_uuid4(),
             title=title,
@@ -988,7 +1053,7 @@ class PlanningRepository:
                 else provider_calendar_id,
                 sync_state=current.sync_state if sync_state is _UNSET else str(sync_state),  # type: ignore[arg-type]
                 version=current.version + 1,
-                updated_at=utc_now(),
+                updated_at=self._now(),
             )
             validate_event_shape(
                 all_day=updated.all_day,
@@ -1064,7 +1129,7 @@ class PlanningRepository:
             current = _row_to_event(self._require_row("calendar_events", event_id, "calendar_event"))
             if current.version != expected_version:
                 raise PlanningVersionConflictError("calendar_event", event_id, expected_version, current.version)
-            deleted_at = utc_now()
+            deleted_at = self._now()
             updated = replace(current, version=current.version + 1, updated_at=deleted_at, deleted_at=deleted_at)
             cursor = self.connection.execute(
                 "UPDATE calendar_events SET version = ?, updated_at = ?, deleted_at = ? WHERE id = ? AND version = ?",
@@ -1096,7 +1161,7 @@ class PlanningRepository:
         validate_text(audience, "idempotency.audience", max_length=64)
         validate_text(key, "idempotency.key", max_length=256)
         validate_request_hash(request_hash)
-        timestamp = utc_now()
+        timestamp = self._now()
         cursor = self.connection.execute(
             """
             INSERT INTO idempotency_keys(
@@ -1168,7 +1233,7 @@ class PlanningRepository:
             (
                 response_json,
                 response_status,
-                utc_now(),
+                self._now(),
                 expires_at,
                 correlation_id,
                 audience,
@@ -1233,6 +1298,8 @@ class PlanningRepository:
         lease_owner: str | None = None,
         lease_expires_at: str | None = None,
         correlation_id: str | None = None,
+        dedupe_key: str | None = None,
+        reminder_id: str | None = None,
     ) -> OutboxJob:
         if not self.database.in_transaction:
             raise PlanningTransactionRequiredError("outbox enqueue requires a surrounding transaction")
@@ -1249,13 +1316,17 @@ class PlanningRepository:
             raise PlanningValidationError("outbox.payload must be JSON-serializable") from exc
         if len(payload_json) > 1_048_576:
             raise PlanningValidationError("outbox.payload is too large")
-        available_at = available_at or utc_now()
+        available_at = available_at or self._now()
         validate_utc_timestamp(available_at, "outbox.available_at")
         if lease_expires_at is not None:
             validate_utc_timestamp(lease_expires_at, "outbox.lease_expires_at")
         if correlation_id is not None:
             validate_uuid4(correlation_id, "outbox.correlation_id")
-        timestamp = utc_now()
+        if dedupe_key is not None:
+            validate_text(dedupe_key, "outbox.dedupe_key", max_length=256)
+        if reminder_id is not None:
+            validate_uuid4(reminder_id, "outbox.reminder_id")
+        timestamp = self._now()
         job = OutboxJob(
             id=new_uuid4(),
             job_type=job_type,
@@ -1269,14 +1340,18 @@ class PlanningRepository:
             created_at=timestamp,
             updated_at=timestamp,
             correlation_id=correlation_id,
+            dedupe_key=dedupe_key,
+            reminder_id=reminder_id,
+            delivery_cycle_id=None,
         )
         self.connection.execute(
             """
             INSERT INTO outbox(
                 id, job_type, payload_version, payload_json, status, available_at,
                 lease_owner, lease_expires_at, attempt_count, created_at, updated_at,
-                last_error, correlation_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                last_error, correlation_id, dedupe_key, reminder_id, lease_token,
+                attempt_window_started_at, last_error_code, delivery_cycle_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?)
             """,
             (
                 job.id,
@@ -1291,6 +1366,9 @@ class PlanningRepository:
                 job.created_at,
                 job.updated_at,
                 job.correlation_id,
+                job.dedupe_key,
+                job.reminder_id,
+                job.delivery_cycle_id,
             ),
         )
         return job
@@ -1317,7 +1395,495 @@ class PlanningRepository:
             updated_at=str(row["updated_at"]),
             last_error=row["last_error"],
             correlation_id=row["correlation_id"],
+            dedupe_key=row["dedupe_key"],
+            reminder_id=row["reminder_id"],
+            lease_token=row["lease_token"],
+            attempt_window_started_at=row["attempt_window_started_at"],
+            last_error_code=row["last_error_code"],
+            delivery_cycle_id=row["delivery_cycle_id"],
         )
+
+    def ensure_reminder_outbox(
+        self,
+        *,
+        reminder_id: str,
+        job_type: str,
+        payload: Mapping[str, Any],
+        available_at: str,
+        dedupe_key: str,
+        correlation_id: str | None = None,
+        requeue_cancelled: bool = False,
+    ) -> OutboxJob:
+        """Create or recover one logical reminder delivery job inside a transaction."""
+
+        if not self.database.in_transaction:
+            raise PlanningTransactionRequiredError("reminder outbox reconciliation requires a transaction")
+        validate_uuid4(reminder_id, "outbox.reminder_id")
+        validate_text(dedupe_key, "outbox.dedupe_key", max_length=256)
+        validate_utc_timestamp(available_at, "outbox.available_at")
+        row = self.connection.execute(
+            "SELECT id, status FROM outbox WHERE dedupe_key = ?",
+            (dedupe_key,),
+        ).fetchone()
+        if row is not None:
+            job_id = str(row["id"])
+            if requeue_cancelled and str(row["status"]) == "cancelled":
+                self.connection.execute(
+                    """
+                    UPDATE outbox
+                    SET status = 'queued', available_at = ?, lease_owner = NULL,
+                        lease_expires_at = NULL, lease_token = NULL, last_error = NULL,
+                        last_error_code = NULL, attempt_count = 0,
+                        attempt_window_started_at = NULL, delivery_cycle_id = NULL,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'cancelled'
+                    """,
+                    (available_at, self._now(), job_id),
+                )
+            return self.get_outbox(job_id)
+
+        try:
+            return self.enqueue_outbox(
+                job_type=job_type,
+                payload=payload,
+                available_at=available_at,
+                correlation_id=correlation_id,
+                dedupe_key=dedupe_key,
+                reminder_id=reminder_id,
+            )
+        except sqlite3.IntegrityError:
+            # A second process can only reach this branch after the unique
+            # logical-job index wins a race.  Return that winner rather than
+            # manufacturing another delivery job.
+            existing = self.connection.execute(
+                "SELECT id FROM outbox WHERE dedupe_key = ?",
+                (dedupe_key,),
+            ).fetchone()
+            if existing is None:
+                raise
+            return self.get_outbox(str(existing["id"]))
+
+    def claim_outbox(
+        self,
+        *,
+        job_type: str,
+        lease_owner: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> OutboxJob | None:
+        """Atomically claim one queued or expired reminder job."""
+
+        validate_text(job_type, "outbox.job_type", max_length=128)
+        validate_text(lease_owner, "outbox.lease_owner", max_length=128)
+        validate_utc_timestamp(now, "outbox.now")
+        validate_utc_timestamp(lease_expires_at, "outbox.lease_expires_at")
+        with self.database.transaction():
+            candidate = self.connection.execute(
+                """
+                SELECT o.id
+                FROM outbox AS o
+                JOIN reminders AS r ON r.id = o.reminder_id
+                WHERE o.job_type = ?
+                  AND r.deleted_at IS NULL
+                  AND r.status IN ('pending', 'due')
+                  AND r.delivery_state IN ('not_due', 'queued', 'retrying')
+                  AND (
+                        (o.status = 'queued' AND o.available_at <= ?)
+                        OR
+                        (o.status = 'leased' AND o.lease_expires_at IS NOT NULL
+                            AND o.lease_expires_at <= ?)
+                  )
+                ORDER BY o.available_at, o.id
+                LIMIT 1
+                """,
+                (job_type, now, now),
+            ).fetchone()
+            if candidate is None:
+                return None
+            job_id = str(candidate["id"])
+            lease_token = new_uuid4()
+            cursor = self.connection.execute(
+                """
+                UPDATE outbox
+                SET status = 'leased', lease_owner = ?, lease_expires_at = ?,
+                    lease_token = ?, attempt_count = attempt_count + 1,
+                    updated_at = ?
+                WHERE id = ?
+                  AND job_type = ?
+                  AND (
+                        (status = 'queued' AND available_at <= ?)
+                        OR
+                        (status = 'leased' AND lease_expires_at IS NOT NULL
+                            AND lease_expires_at <= ?)
+                  )
+                """,
+                (
+                    lease_owner,
+                    lease_expires_at,
+                    lease_token,
+                    now,
+                    job_id,
+                    job_type,
+                    now,
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return self.get_outbox(job_id)
+
+    def transition_outbox(
+        self,
+        *,
+        job_id: str,
+        lease_owner: str,
+        lease_token: str,
+        status: str,
+        now: str,
+        available_at: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        """Commit a lease-owned job result; stale workers cannot commit."""
+
+        validate_uuid4(job_id, "outbox.id")
+        validate_text(lease_owner, "outbox.lease_owner", max_length=128)
+        validate_uuid4(lease_token, "outbox.lease_token")
+        if status not in {"queued", "succeeded", "failed", "cancelled"}:
+            raise PlanningValidationError("outbox.status has an invalid transition")
+        validate_utc_timestamp(now, "outbox.updated_at")
+        if status == "queued":
+            if available_at is None:
+                raise PlanningValidationError("queued outbox transition requires available_at")
+            validate_utc_timestamp(available_at, "outbox.available_at")
+        elif available_at is not None:
+            validate_utc_timestamp(available_at, "outbox.available_at")
+        if error_code is not None:
+            validate_text(error_code, "outbox.last_error_code", max_length=128, allow_empty=True)
+        if error_message is not None:
+            validate_text(error_message, "outbox.last_error", max_length=512, allow_empty=True)
+        with self.database.transaction():
+            cursor = self.connection.execute(
+                """
+                UPDATE outbox
+                SET status = ?, available_at = COALESCE(?, available_at),
+                    lease_owner = NULL, lease_expires_at = NULL, lease_token = NULL,
+                    last_error_code = ?, last_error = ?, updated_at = ?
+                WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_token = ?
+                """,
+                (
+                    status,
+                    available_at,
+                    error_code,
+                    error_message,
+                    now,
+                    job_id,
+                    lease_owner,
+                    lease_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def commit_reminder_delivery(
+        self,
+        *,
+        reminder_id: str,
+        expected_version: int,
+        job_id: str,
+        lease_owner: str,
+        lease_token: str,
+        delivery_state: str,
+        outbox_status: str,
+        now: str,
+        context: MutationContext,
+        audit_action: str,
+        available_at: str | None = None,
+        next_attempt_at: str | None = None,
+        final_failure_at: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> Reminder | None:
+        """Atomically persist reminder state and the lease-owned job result."""
+
+        validate_uuid4(reminder_id, "reminder.id")
+        validate_uuid4(job_id, "outbox.id")
+        validate_uuid4(lease_token, "outbox.lease_token")
+        if expected_version < 1:
+            raise PlanningValidationError("expected_version must be positive")
+        if delivery_state not in {"delivered", "retrying", "failed"}:
+            raise PlanningValidationError("reminder.delivery_state is not a delivery outcome")
+        if outbox_status not in {"queued", "succeeded", "failed"}:
+            raise PlanningValidationError("outbox.status is not a delivery outcome")
+        context = self._context(context)
+        validate_utc_timestamp(now, "delivery.now")
+        if available_at is not None:
+            validate_utc_timestamp(available_at, "outbox.available_at")
+        _optional_timestamp(next_attempt_at, "reminder.next_attempt_at")
+        _optional_timestamp(final_failure_at, "reminder.final_failure_at")
+        if error_code is not None:
+            validate_text(error_code, "outbox.last_error_code", max_length=128, allow_empty=True)
+        if error_message is not None:
+            validate_text(error_message, "outbox.last_error", max_length=512, allow_empty=True)
+        with self.database.transaction():
+            current = _row_to_reminder(self._require_row("reminders", reminder_id, "reminder"))
+            if current.status in {"completed", "cancelled"}:
+                self.connection.execute(
+                    """
+                    UPDATE outbox
+                    SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+                        lease_token = NULL, updated_at = ?
+                    WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_token = ?
+                    """,
+                    (now, job_id, lease_owner, lease_token),
+                )
+                return None
+            if current.version != expected_version:
+                raise PlanningVersionConflictError("reminder", reminder_id, expected_version, current.version)
+
+            updated = replace(
+                current,
+                status="due",
+                delivery_state=delivery_state,  # type: ignore[arg-type]
+                next_attempt_at=next_attempt_at,
+                final_failure_at=final_failure_at,
+                version=current.version + 1,
+                updated_at=now,
+            )
+            validate_reminder_shape(
+                title=updated.title,
+                due_at_utc=updated.due_at_utc,
+                timezone_name=updated.timezone,
+                status=updated.status,
+                delivery_state=updated.delivery_state,
+                notes=updated.notes,
+            )
+            cursor = self.connection.execute(
+                """
+                UPDATE reminders
+                SET status = ?, delivery_state = ?, next_attempt_at = ?,
+                    final_failure_at = ?, version = ?, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    updated.status,
+                    updated.delivery_state,
+                    updated.next_attempt_at,
+                    updated.final_failure_at,
+                    updated.version,
+                    updated.updated_at,
+                    reminder_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self._raise_version_conflict("reminder", reminder_id, expected_version, "reminders")
+            outbox_cursor = self.connection.execute(
+                """
+                UPDATE outbox
+                SET status = ?, available_at = COALESCE(?, available_at),
+                    lease_owner = NULL, lease_expires_at = NULL, lease_token = NULL,
+                    last_error_code = ?, last_error = ?, updated_at = ?
+                WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_token = ?
+                """,
+                (
+                    outbox_status,
+                    available_at,
+                    error_code,
+                    error_message,
+                    now,
+                    job_id,
+                    lease_owner,
+                    lease_token,
+                ),
+            )
+            if outbox_cursor.rowcount != 1:
+                raise PlanningLeaseLostError(f"lease lost while committing reminder {reminder_id}")
+            self._record_audit(
+                context=context,
+                action=audit_action,
+                domain=updated.domain,
+                object_id=updated.id,
+                old_version=current.version,
+                new_version=updated.version,
+                before={
+                    "status": current.status,
+                    "delivery_state": current.delivery_state,
+                    "next_attempt_at": current.next_attempt_at,
+                },
+                after={
+                    "status": updated.status,
+                    "delivery_state": updated.delivery_state,
+                    "next_attempt_at": updated.next_attempt_at,
+                    "final_failure_at": updated.final_failure_at,
+                    "error_code": error_code,
+                },
+            )
+            return updated
+
+    def start_delivery_attempt(
+        self,
+        *,
+        reminder_id: str,
+        channel: str,
+        started_at: str | None = None,
+    ) -> DeliveryAttempt:
+        """Persist the attempt identity before calling a remote provider."""
+
+        validate_uuid4(reminder_id, "delivery_attempt.reminder_id")
+        validate_text(channel, "delivery_attempt.channel", max_length=64)
+        started_at = started_at or self._now()
+        validate_utc_timestamp(started_at, "delivery_attempt.started_at")
+        with self.database.transaction():
+            cycle_row = self.connection.execute(
+                """
+                SELECT delivery_cycle_id
+                FROM outbox
+                WHERE reminder_id = ? AND job_type = ?
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (reminder_id, REMINDER_DELIVERY_JOB_TYPE),
+            ).fetchone()
+            delivery_cycle_id = cycle_row["delivery_cycle_id"] if cycle_row is not None else None
+            if channel == "telegram" and delivery_cycle_id is None:
+                delivery_cycle_id = new_uuid4()
+                if cycle_row is not None:
+                    self.connection.execute(
+                        """
+                        UPDATE outbox
+                        SET delivery_cycle_id = ?, attempt_window_started_at = ?
+                        WHERE reminder_id = ? AND job_type = ?
+                        """,
+                        (
+                            delivery_cycle_id,
+                            started_at,
+                            reminder_id,
+                            REMINDER_DELIVERY_JOB_TYPE,
+                        ),
+                    )
+
+            row = self.connection.execute(
+                """
+                SELECT COALESCE(MAX(attempt_number), 0) + 1
+                FROM delivery_attempts
+                WHERE reminder_id = ? AND channel = ?
+                """,
+                (reminder_id, channel),
+            ).fetchone()
+            attempt_number = int(row[0])
+            attempt = DeliveryAttempt(
+                id=new_uuid4(),
+                reminder_id=reminder_id,
+                channel=channel,
+                attempt_number=attempt_number,
+                status="started",
+                started_at=started_at,
+                finished_at=None,
+                error_code=None,
+                error_message=None,
+                provider_receipt=None,
+                correlation_id=new_uuid4(),
+                created_at=self._now(),
+                delivery_cycle_id=delivery_cycle_id,
+            )
+            self.connection.execute(
+                """
+                INSERT INTO delivery_attempts(
+                    id, reminder_id, channel, attempt_number, status, started_at,
+                    finished_at, error_code, error_message, provider_receipt,
+                    created_at, correlation_id, delivery_cycle_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt.id,
+                    attempt.reminder_id,
+                    attempt.channel,
+                    attempt.attempt_number,
+                    attempt.status,
+                    attempt.started_at,
+                    attempt.finished_at,
+                    attempt.error_code,
+                    attempt.error_message,
+                    attempt.provider_receipt,
+                    attempt.created_at,
+                    attempt.correlation_id,
+                    attempt.delivery_cycle_id,
+                ),
+            )
+            return attempt
+
+    def count_delivery_attempts(
+        self,
+        *,
+        reminder_id: str,
+        channel: str,
+        delivery_cycle_id: str | None,
+    ) -> int:
+        """Count semantic channel attempts in one durable delivery cycle."""
+
+        validate_uuid4(reminder_id, "delivery_attempt.reminder_id")
+        validate_text(channel, "delivery_attempt.channel", max_length=64)
+        if delivery_cycle_id is None:
+            return 0
+        validate_uuid4(delivery_cycle_id, "delivery_attempt.delivery_cycle_id")
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM delivery_attempts
+            WHERE reminder_id = ? AND channel = ? AND delivery_cycle_id = ?
+            """,
+            (reminder_id, channel, delivery_cycle_id),
+        ).fetchone()
+        return int(row[0])
+
+    def has_successful_delivery_attempt(self, *, reminder_id: str, channel: str) -> bool:
+        """Return whether a channel has ever succeeded for this reminder."""
+
+        validate_uuid4(reminder_id, "delivery_attempt.reminder_id")
+        validate_text(channel, "delivery_attempt.channel", max_length=64)
+        row = self.connection.execute(
+            """
+            SELECT 1
+            FROM delivery_attempts
+            WHERE reminder_id = ? AND channel = ? AND status = 'succeeded'
+            LIMIT 1
+            """,
+            (reminder_id, channel),
+        ).fetchone()
+        return row is not None
+
+    def finish_delivery_attempt(
+        self,
+        *,
+        attempt_id: str,
+        status: str,
+        finished_at: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        provider_receipt: str | None = None,
+    ) -> bool:
+        validate_uuid4(attempt_id, "delivery_attempt.id")
+        if status not in {"succeeded", "failed"}:
+            raise PlanningValidationError("delivery_attempt.status must be succeeded or failed")
+        finished_at = finished_at or self._now()
+        validate_utc_timestamp(finished_at, "delivery_attempt.finished_at")
+        if error_code is not None:
+            validate_text(error_code, "delivery_attempt.error_code", max_length=128, allow_empty=True)
+        if error_message is not None:
+            validate_text(error_message, "delivery_attempt.error_message", max_length=512, allow_empty=True)
+        if provider_receipt is not None:
+            validate_text(provider_receipt, "delivery_attempt.provider_receipt", max_length=512, allow_empty=True)
+        with self.database.transaction():
+            cursor = self.connection.execute(
+                """
+                UPDATE delivery_attempts
+                SET status = ?, finished_at = ?, error_code = ?, error_message = ?,
+                    provider_receipt = ?
+                WHERE id = ? AND status IN ('queued', 'started')
+                """,
+                (status, finished_at, error_code, error_message, provider_receipt, attempt_id),
+            )
+            return cursor.rowcount == 1
 
     def record_delivery_attempt(
         self,
@@ -1331,6 +1897,8 @@ class PlanningRepository:
         error_code: str | None = None,
         error_message: str | None = None,
         provider_receipt: str | None = None,
+        correlation_id: str | None = None,
+        delivery_cycle_id: str | None = None,
     ) -> str:
         if not self.database.in_transaction:
             raise PlanningTransactionRequiredError("delivery attempt writes require a surrounding transaction")
@@ -1348,13 +1916,19 @@ class PlanningRepository:
             validate_text(error_message, "delivery_attempt.error_message", max_length=2000, allow_empty=True)
         if provider_receipt is not None:
             validate_text(provider_receipt, "delivery_attempt.provider_receipt", max_length=512, allow_empty=True)
+        if correlation_id is None:
+            correlation_id = new_uuid4()
+        validate_uuid4(correlation_id, "delivery_attempt.correlation_id")
+        if delivery_cycle_id is not None:
+            validate_uuid4(delivery_cycle_id, "delivery_attempt.delivery_cycle_id")
         attempt_id = new_uuid4()
         self.connection.execute(
             """
             INSERT INTO delivery_attempts(
                 id, reminder_id, channel, attempt_number, status, started_at,
-                finished_at, error_code, error_message, provider_receipt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                finished_at, error_code, error_message, provider_receipt, created_at,
+                correlation_id, delivery_cycle_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
@@ -1367,10 +1941,122 @@ class PlanningRepository:
                 error_code,
                 error_message,
                 provider_receipt,
-                utc_now(),
+                self._now(),
+                correlation_id,
+                delivery_cycle_id,
             ),
         )
         return attempt_id
+
+    def manual_retry_reminder(
+        self,
+        reminder_id: str,
+        *,
+        expected_version: int,
+        context: MutationContext,
+        now: str | None = None,
+        delivery_payload: Mapping[str, Any] | None = None,
+    ) -> Reminder:
+        """Requeue a terminal delivery failure for a trusted operator only."""
+
+        validate_uuid4(reminder_id, "reminder.id")
+        if expected_version < 1:
+            raise PlanningValidationError("expected_version must be positive")
+        context = self._context(context)
+        if (
+            context.audience != "operator"
+            or context.actor_type not in {"operator", "service"}
+            or context.surface not in {"operator", "system"}
+        ):
+            raise PlanningValidationError("manual reminder retry requires an operator context")
+        now = now or self._now()
+        validate_utc_timestamp(now, "manual_retry.now")
+        dedupe_key = f"{REMINDER_OUTBOX_DEDUPE_PREFIX}{reminder_id}"
+        with self.database.transaction():
+            current = _row_to_reminder(self._require_row("reminders", reminder_id, "reminder"))
+            if current.version != expected_version:
+                raise PlanningVersionConflictError("reminder", reminder_id, expected_version, current.version)
+            if current.status in {"completed", "cancelled"}:
+                raise PlanningValidationError("completed or cancelled reminders cannot be manually retried")
+            if current.delivery_state != "failed":
+                # A retry request replayed with the current version is a safe
+                # no-op and cannot create another active job.
+                return current
+
+            job_row = self.connection.execute(
+                "SELECT * FROM outbox WHERE dedupe_key = ?",
+                (dedupe_key,),
+            ).fetchone()
+            if job_row is None:
+                if delivery_payload is None:
+                    raise PlanningValidationError("terminal reminder has no durable delivery job to retry")
+                payload = dict(delivery_payload)
+                payload.setdefault("reminder_id", reminder_id)
+                self.enqueue_outbox(
+                    job_type=REMINDER_DELIVERY_JOB_TYPE,
+                    payload=payload,
+                    available_at=now,
+                    correlation_id=current.audit_correlation_id,
+                    dedupe_key=dedupe_key,
+                    reminder_id=reminder_id,
+                )
+            else:
+                job_status = str(job_row["status"])
+                if job_status == "leased" and job_row["lease_expires_at"] is not None:
+                    if str(job_row["lease_expires_at"]) > now:
+                        raise PlanningValidationError("terminal reminder delivery job still has a live lease")
+                self.connection.execute(
+                    """
+                    UPDATE outbox
+                    SET status = 'queued', available_at = ?, lease_owner = NULL,
+                        lease_expires_at = NULL, lease_token = NULL, attempt_count = 0,
+                        attempt_window_started_at = NULL, last_error = NULL,
+                        last_error_code = NULL, delivery_cycle_id = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, str(job_row["id"])),
+                )
+
+            updated = replace(
+                current,
+                status="due",
+                delivery_state="queued",
+                next_attempt_at=None,
+                final_failure_at=None,
+                version=current.version + 1,
+                updated_at=now,
+            )
+            cursor = self.connection.execute(
+                """
+                UPDATE reminders
+                SET status = ?, delivery_state = ?, next_attempt_at = ?,
+                    final_failure_at = ?, version = ?, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    updated.status,
+                    updated.delivery_state,
+                    updated.next_attempt_at,
+                    updated.final_failure_at,
+                    updated.version,
+                    updated.updated_at,
+                    reminder_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self._raise_version_conflict("reminder", reminder_id, expected_version, "reminders")
+            self._record_audit(
+                context=context,
+                action="manual_retry",
+                domain=updated.domain,
+                object_id=updated.id,
+                old_version=current.version,
+                new_version=updated.version,
+                before={"delivery_state": current.delivery_state, "final_failure_at": current.final_failure_at},
+                after={"delivery_state": updated.delivery_state, "next_attempt_at": None},
+            )
+            return updated
 
     def create_provider_mapping(
         self,
@@ -1399,7 +2085,7 @@ class PlanningRepository:
         ):
             if value is not None:
                 validate_text(value, f"provider_mapping.{field}", max_length=max_length, allow_empty=True)
-        timestamp = utc_now()
+        timestamp = self._now()
         mapping = ProviderMapping(
             id=new_uuid4(),
             domain=domain,
@@ -1447,7 +2133,7 @@ class PlanningRepository:
         validate_text(scope, "sync_cursor.scope", max_length=512)
         if cursor is not None:
             validate_text(cursor, "sync_cursor.cursor", max_length=2000, allow_empty=True)
-        timestamp = utc_now()
+        timestamp = self._now()
         result = SyncCursor(provider, scope, cursor, None, timestamp, timestamp)
         with self.database.transaction():
             self.connection.execute(
@@ -1496,7 +2182,7 @@ class PlanningRepository:
             remote_hash=remote_hash,
             details=details,
             status="open",
-            created_at=utc_now(),
+            created_at=self._now(),
             resolved_at=None,
         )
         with self.database.transaction():

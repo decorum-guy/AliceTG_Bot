@@ -23,6 +23,12 @@ class PlanningTransactionRequiredError(PlanningError):
     pass
 
 
+class PlanningLeaseLostError(PlanningError):
+    """The worker no longer owns the durable job lease."""
+
+    pass
+
+
 class PlanningMigrationError(PlanningError):
     pass
 

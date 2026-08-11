@@ -67,6 +67,11 @@ class Settings:
     app_state_path: str = "/app/data/state.json"
     planning_db_path: str = "/app/data/planning.sqlite3"
     planning_reminder_cutover_enabled: bool = False
+    planning_durable_scheduler_enabled: bool = False
+    planning_scheduler_poll_interval_seconds: float = 5.0
+    planning_scheduler_lease_seconds: int = 60
+    planning_scheduler_batch_size: int = 10
+    planning_scheduler_jitter_seconds: float = 5.0
     pushward_coffee_activity_enabled: bool = False
     pushward_coffee_activity_slug: str = "ha-coffee-machine"
     pushward_error_log_path: str = "/app/data/pushward_errors.log"
@@ -104,6 +109,15 @@ class Settings:
         if telegram_mode not in {"polling", "webhook"}:
             raise RuntimeError("TELEGRAM_MODE must be polling or webhook")
 
+        planning_poll_interval = float(os.getenv("PLANNING_SCHEDULER_POLL_INTERVAL_SECONDS", "5"))
+        if not 5.0 <= planning_poll_interval <= 10.0:
+            raise RuntimeError("PLANNING_SCHEDULER_POLL_INTERVAL_SECONDS must be between 5 and 10")
+        planning_lease_seconds = int(os.getenv("PLANNING_SCHEDULER_LEASE_SECONDS", "60"))
+        planning_batch_size = int(os.getenv("PLANNING_SCHEDULER_BATCH_SIZE", "10"))
+        planning_jitter_seconds = float(os.getenv("PLANNING_SCHEDULER_JITTER_SECONDS", "5"))
+        if planning_lease_seconds <= 0 or planning_batch_size <= 0 or planning_jitter_seconds < 0:
+            raise RuntimeError("Planning scheduler lease, batch size and jitter must be valid positive values")
+
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
             telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
@@ -131,6 +145,11 @@ class Settings:
             planning_db_path=os.getenv("PLANNING_DB_PATH", "/app/data/planning.sqlite3").strip()
             or "/app/data/planning.sqlite3",
             planning_reminder_cutover_enabled=_bool_env("PLANNING_REMINDER_CUTOVER_ENABLED", False),
+            planning_durable_scheduler_enabled=_bool_env("PLANNING_DURABLE_SCHEDULER_ENABLED", False),
+            planning_scheduler_poll_interval_seconds=planning_poll_interval,
+            planning_scheduler_lease_seconds=planning_lease_seconds,
+            planning_scheduler_batch_size=planning_batch_size,
+            planning_scheduler_jitter_seconds=planning_jitter_seconds,
             pushward_coffee_activity_enabled=_bool_env("PUSHWARD_COFFEE_ACTIVITY_ENABLED", False),
             pushward_coffee_activity_slug=os.getenv("PUSHWARD_COFFEE_ACTIVITY_SLUG", "ha-coffee-machine").strip()
             or "ha-coffee-machine",

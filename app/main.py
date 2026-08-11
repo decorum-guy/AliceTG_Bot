@@ -13,6 +13,8 @@ from aiohttp import web
 from app.config import Settings
 from app.handlers import admin_modes, coffee, common, reminders, start, tea, water
 from app.planning.legacy_import import build_reminder_store
+from app.planning.delivery import HomeAssistantMobileTransport, TelegramDeliveryTransport
+from app.planning.scheduler import DurableReminderScheduler, validate_scheduler_modes
 from app.services.admin_modes import AdminModeManager
 from app.services.app_state import AppStateStore
 from app.services.coffee_alerts import CoffeeAlertScheduler
@@ -43,6 +45,11 @@ async def create_app() -> web.Application:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = Settings.from_env()
+    validate_scheduler_modes(
+        durable_scheduler_enabled=settings.planning_durable_scheduler_enabled,
+        legacy_scheduler_enabled=not settings.planning_durable_scheduler_enabled,
+        reminder_cutover_enabled=settings.planning_reminder_cutover_enabled,
+    )
     if settings.telegram_proxy_url:
         LOGGER.info("Telegram API proxy is enabled")
     else:
@@ -96,7 +103,29 @@ async def create_app() -> web.Application:
     coffee_workflow = CoffeeWorkflow(settings, ha, storage, telegram_messages)
     tea_workflow = TeaWorkflow(settings, ha, storage, telegram_messages)
     water_workflow = WaterWorkflow(settings, ha, storage, telegram_messages)
-    reminder_workflow = ReminderWorkflow(reminder_store, telegram_messages, settings.telegram_admin_chat_id, settings, ha)
+    durable_reminder_scheduler: DurableReminderScheduler | None = None
+    if settings.planning_durable_scheduler_enabled:
+        if planning_database is None:
+            raise RuntimeError("durable reminder scheduler requires a Planning database")
+        durable_reminder_scheduler = DurableReminderScheduler(
+            planning_database,
+            telegram_transport=TelegramDeliveryTransport(telegram_messages),
+            mobile_transport=HomeAssistantMobileTransport(ha, settings.ha_mobile_notify_services),
+            default_chat_id=settings.telegram_admin_chat_id,
+            settings_provider=reminder_store.get_settings,
+            interval_seconds=settings.planning_scheduler_poll_interval_seconds,
+            lease_seconds=settings.planning_scheduler_lease_seconds,
+            batch_size=settings.planning_scheduler_batch_size,
+            jitter_bound_seconds=settings.planning_scheduler_jitter_seconds,
+        )
+    reminder_workflow = ReminderWorkflow(
+        reminder_store,
+        telegram_messages,
+        settings.telegram_admin_chat_id,
+        settings,
+        ha,
+        durable_scheduler_enabled=settings.planning_durable_scheduler_enabled,
+    )
     pushward_coffee_activity = PushWardCoffeeActivity(
         settings,
         ha,
@@ -155,6 +184,7 @@ async def create_app() -> web.Application:
     app["water_workflow"] = water_workflow
     app["reminder_workflow"] = reminder_workflow
     app["planning_database"] = planning_database
+    app["durable_reminder_scheduler"] = durable_reminder_scheduler
     app["coffee_alert_scheduler"] = coffee_alert_scheduler
     app["pushward_coffee_activity"] = pushward_coffee_activity
     app["pushward_coffee_widget"] = pushward_coffee_widget
@@ -162,12 +192,17 @@ async def create_app() -> web.Application:
     if settings.telegram_mode == "webhook":
         setup_telegram_routes(app, settings.webhook_path)
     setup_internal_routes(app)
-    await reminder_workflow.restore_pending()
+    if durable_reminder_scheduler is not None:
+        await durable_reminder_scheduler.start()
+    else:
+        await reminder_workflow.restore_pending()
     await coffee_alert_scheduler.restore()
     await pushward_coffee_widget.restore()
     coffee_timing_refresher.start()
 
     async def close_resources(_: web.Application) -> None:
+        if durable_reminder_scheduler is not None:
+            await durable_reminder_scheduler.close()
         await coffee_timing_refresher.close()
         await pushward_coffee_widget.close()
         await pushward_coffee_activity.close()

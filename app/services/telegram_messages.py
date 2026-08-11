@@ -55,6 +55,22 @@ class TelegramMessages:
             LOGGER.exception("Cannot send Telegram message")
             return None
 
+    async def send_delivery(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> int:
+        """Send a reminder without swallowing typed provider errors.
+
+        Durable Planning owns classification and persistence; this method
+        deliberately reuses the existing Bot/session and message formatting
+        boundary rather than creating another Telegram client.
+        """
+
+        message = await self._bot.send_message(chat_id, text, reply_markup=reply_markup)
+        return message.message_id
+
     async def safe_delete(self, chat_id: int, message_id: int) -> None:
         try:
             await self._bot.delete_message(chat_id=chat_id, message_id=message_id)

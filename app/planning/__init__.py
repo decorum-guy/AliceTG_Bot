@@ -16,6 +16,7 @@ from app.planning.errors import (
     PlanningError,
     PlanningIdempotencyConflictError,
     PlanningIdempotencyInProgressError,
+    PlanningLeaseLostError,
     PlanningMigrationError,
     PlanningNewerSchemaError,
     PlanningNotFoundError,
@@ -25,6 +26,7 @@ from app.planning.errors import (
 )
 from app.planning.models import (
     CalendarEvent,
+    DeliveryAttempt,
     IdempotencyClaim,
     MutationContext,
     OutboxJob,
@@ -40,6 +42,7 @@ from app.planning.repositories import PlanningRepository
 __all__ = [
     "AuditWriter",
     "CalendarEvent",
+    "DeliveryAttempt",
     "DEFAULT_PLANNING_DB_PATH",
     "IdempotencyClaim",
     "MutationContext",
@@ -50,6 +53,7 @@ __all__ = [
     "PlanningError",
     "PlanningIdempotencyConflictError",
     "PlanningIdempotencyInProgressError",
+    "PlanningLeaseLostError",
     "PlanningMigrationError",
     "PlanningNewerSchemaError",
     "PlanningNotFoundError",
