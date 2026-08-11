@@ -66,6 +66,13 @@ class Settings:
     reminders_state_path: str = "/app/data/reminders.json"
     app_state_path: str = "/app/data/state.json"
     planning_db_path: str = "/app/data/planning.sqlite3"
+    planning_api_enabled: bool = False
+    planning_ha_secret: str = ""
+    planning_panel_agent_secret: str = ""
+    planning_operator_secret: str = ""
+    planning_api_rate_limit_per_minute: int = 120
+    planning_api_stale_after_seconds: int = 300
+    planning_default_timezone: str = "Europe/Moscow"
     planning_reminder_cutover_enabled: bool = False
     planning_durable_scheduler_enabled: bool = False
     planning_scheduler_poll_interval_seconds: float = 5.0
@@ -117,6 +124,28 @@ class Settings:
         planning_jitter_seconds = float(os.getenv("PLANNING_SCHEDULER_JITTER_SECONDS", "5"))
         if planning_lease_seconds <= 0 or planning_batch_size <= 0 or planning_jitter_seconds < 0:
             raise RuntimeError("Planning scheduler lease, batch size and jitter must be valid positive values")
+        planning_api_enabled = _bool_env("PLANNING_API_ENABLED", False)
+        planning_ha_secret = os.getenv("PLANNING_HA_SECRET", "").strip()
+        planning_panel_agent_secret = os.getenv("PLANNING_PANEL_AGENT_SECRET", "").strip()
+        planning_operator_secret = os.getenv("PLANNING_OPERATOR_SECRET", "").strip()
+        planning_api_rate_limit = int(os.getenv("PLANNING_API_RATE_LIMIT_PER_MINUTE", "120"))
+        planning_api_stale_after = int(os.getenv("PLANNING_API_STALE_AFTER_SECONDS", "300"))
+        planning_default_timezone = os.getenv("PLANNING_DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
+        if planning_api_rate_limit <= 0 or planning_api_stale_after <= 0:
+            raise RuntimeError("Planning API rate and freshness settings must be positive")
+        if planning_api_enabled:
+            if not planning_ha_secret or not planning_panel_agent_secret:
+                raise RuntimeError(
+                    "PLANNING_API_ENABLED requires PLANNING_HA_SECRET and "
+                    "PLANNING_PANEL_AGENT_SECRET"
+                )
+            configured_planning_secrets = [
+                planning_ha_secret,
+                planning_panel_agent_secret,
+                *([planning_operator_secret] if planning_operator_secret else []),
+            ]
+            if len(configured_planning_secrets) != len(set(configured_planning_secrets)):
+                raise RuntimeError("Planning API audience secrets must be independently rotatable")
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
@@ -144,6 +173,13 @@ class Settings:
             app_state_path=os.getenv("APP_STATE_PATH", "/app/data/state.json").strip() or "/app/data/state.json",
             planning_db_path=os.getenv("PLANNING_DB_PATH", "/app/data/planning.sqlite3").strip()
             or "/app/data/planning.sqlite3",
+            planning_api_enabled=planning_api_enabled,
+            planning_ha_secret=planning_ha_secret,
+            planning_panel_agent_secret=planning_panel_agent_secret,
+            planning_operator_secret=planning_operator_secret,
+            planning_api_rate_limit_per_minute=planning_api_rate_limit,
+            planning_api_stale_after_seconds=planning_api_stale_after,
+            planning_default_timezone=planning_default_timezone,
             planning_reminder_cutover_enabled=_bool_env("PLANNING_REMINDER_CUTOVER_ENABLED", False),
             planning_durable_scheduler_enabled=_bool_env("PLANNING_DURABLE_SCHEDULER_ENABLED", False),
             planning_scheduler_poll_interval_seconds=planning_poll_interval,
