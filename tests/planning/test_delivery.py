@@ -75,6 +75,69 @@ class DeliveryTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.kind, "success")
         self.assertEqual(home_assistant.services, ["notify.mobile_fixture"])
 
+    async def test_optional_mobile_fanout_attempts_all_services_after_first_success(self) -> None:
+        home_assistant = FakeHomeAssistant([None, None])
+        transport = HomeAssistantMobileTransport(
+            home_assistant,
+            ("notify.mobile_fixture_a", "notify.mobile_fixture_b"),
+        )
+        result = await transport.send(
+            reminder=SimpleNamespace(title="Synthetic reminder"),
+            chat_id=1,
+            correlation_id="correlation",
+        )
+        self.assertEqual(result.kind, "success")
+        self.assertEqual(home_assistant.services, ["notify.mobile_fixture_a", "notify.mobile_fixture_b"])
+
+    async def test_optional_mobile_success_aggregates_with_other_service_failure(self) -> None:
+        home_assistant = FakeHomeAssistant([None, HomeAssistantError("private body", status=503)])
+        transport = HomeAssistantMobileTransport(
+            home_assistant,
+            ("notify.mobile_fixture_a", "notify.mobile_fixture_b"),
+        )
+        result = await transport.send(
+            reminder=SimpleNamespace(title="Synthetic reminder"),
+            chat_id=1,
+            correlation_id="correlation",
+        )
+        self.assertEqual(result.kind, "success")
+        self.assertEqual(home_assistant.services, ["notify.mobile_fixture_a", "notify.mobile_fixture_b"])
+
+    async def test_optional_mobile_all_retryable_failures_aggregate_retryable(self) -> None:
+        home_assistant = FakeHomeAssistant([
+            HomeAssistantError("private body", status=503),
+            asyncio.TimeoutError(),
+        ])
+        transport = HomeAssistantMobileTransport(
+            home_assistant,
+            ("notify.mobile_fixture_a", "notify.mobile_fixture_b"),
+        )
+        result = await transport.send(
+            reminder=SimpleNamespace(title="Synthetic reminder"),
+            chat_id=1,
+            correlation_id="correlation",
+        )
+        self.assertEqual((result.kind, result.code), ("retryable", "ha_mobile_temporary_failure"))
+        self.assertEqual(home_assistant.services, ["notify.mobile_fixture_a", "notify.mobile_fixture_b"])
+
+    async def test_optional_mobile_all_permanent_failures_aggregate_permanent(self) -> None:
+        home_assistant = FakeHomeAssistant([
+            HomeAssistantError("private body", status=400),
+            HomeAssistantError("private body", status=404),
+        ])
+        transport = HomeAssistantMobileTransport(
+            home_assistant,
+            ("notify.mobile_fixture_a", "notify.mobile_fixture_b"),
+        )
+        result = await transport.send(
+            reminder=SimpleNamespace(title="Synthetic reminder"),
+            chat_id=1,
+            correlation_id="correlation",
+        )
+        self.assertEqual((result.kind, result.code), ("permanent", "ha_mobile_permanent_failure"))
+        self.assertEqual(home_assistant.services, ["notify.mobile_fixture_a", "notify.mobile_fixture_b"])
+        self.assertNotIn("private", result.diagnostic or "")
+
     async def test_optional_mobile_temporary_failure_is_independent(self) -> None:
         home_assistant = FakeHomeAssistant([HomeAssistantError("private body", status=503)])
         transport = HomeAssistantMobileTransport(home_assistant, ("notify.mobile_fixture",))

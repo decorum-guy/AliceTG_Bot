@@ -1342,6 +1342,7 @@ class PlanningRepository:
             correlation_id=correlation_id,
             dedupe_key=dedupe_key,
             reminder_id=reminder_id,
+            delivery_cycle_id=None,
         )
         self.connection.execute(
             """
@@ -1349,8 +1350,8 @@ class PlanningRepository:
                 id, job_type, payload_version, payload_json, status, available_at,
                 lease_owner, lease_expires_at, attempt_count, created_at, updated_at,
                 last_error, correlation_id, dedupe_key, reminder_id, lease_token,
-                attempt_window_started_at, last_error_code
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL)
+                attempt_window_started_at, last_error_code, delivery_cycle_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?)
             """,
             (
                 job.id,
@@ -1367,6 +1368,7 @@ class PlanningRepository:
                 job.correlation_id,
                 job.dedupe_key,
                 job.reminder_id,
+                job.delivery_cycle_id,
             ),
         )
         return job
@@ -1398,6 +1400,7 @@ class PlanningRepository:
             lease_token=row["lease_token"],
             attempt_window_started_at=row["attempt_window_started_at"],
             last_error_code=row["last_error_code"],
+            delivery_cycle_id=row["delivery_cycle_id"],
         )
 
     def ensure_reminder_outbox(
@@ -1430,7 +1433,9 @@ class PlanningRepository:
                     UPDATE outbox
                     SET status = 'queued', available_at = ?, lease_owner = NULL,
                         lease_expires_at = NULL, lease_token = NULL, last_error = NULL,
-                        last_error_code = NULL, updated_at = ?
+                        last_error_code = NULL, attempt_count = 0,
+                        attempt_window_started_at = NULL, delivery_cycle_id = NULL,
+                        updated_at = ?
                     WHERE id = ? AND status = 'cancelled'
                     """,
                     (available_at, self._now(), job_id),
@@ -1502,7 +1507,6 @@ class PlanningRepository:
                 UPDATE outbox
                 SET status = 'leased', lease_owner = ?, lease_expires_at = ?,
                     lease_token = ?, attempt_count = attempt_count + 1,
-                    attempt_window_started_at = COALESCE(attempt_window_started_at, ?),
                     updated_at = ?
                 WHERE id = ?
                   AND job_type = ?
@@ -1517,7 +1521,6 @@ class PlanningRepository:
                     lease_owner,
                     lease_expires_at,
                     lease_token,
-                    now,
                     now,
                     job_id,
                     job_type,
@@ -1731,6 +1734,34 @@ class PlanningRepository:
         started_at = started_at or self._now()
         validate_utc_timestamp(started_at, "delivery_attempt.started_at")
         with self.database.transaction():
+            cycle_row = self.connection.execute(
+                """
+                SELECT delivery_cycle_id
+                FROM outbox
+                WHERE reminder_id = ? AND job_type = ?
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (reminder_id, REMINDER_DELIVERY_JOB_TYPE),
+            ).fetchone()
+            delivery_cycle_id = cycle_row["delivery_cycle_id"] if cycle_row is not None else None
+            if channel == "telegram" and delivery_cycle_id is None:
+                delivery_cycle_id = new_uuid4()
+                if cycle_row is not None:
+                    self.connection.execute(
+                        """
+                        UPDATE outbox
+                        SET delivery_cycle_id = ?, attempt_window_started_at = ?
+                        WHERE reminder_id = ? AND job_type = ?
+                        """,
+                        (
+                            delivery_cycle_id,
+                            started_at,
+                            reminder_id,
+                            REMINDER_DELIVERY_JOB_TYPE,
+                        ),
+                    )
+
             row = self.connection.execute(
                 """
                 SELECT COALESCE(MAX(attempt_number), 0) + 1
@@ -1753,14 +1784,15 @@ class PlanningRepository:
                 provider_receipt=None,
                 correlation_id=new_uuid4(),
                 created_at=self._now(),
+                delivery_cycle_id=delivery_cycle_id,
             )
             self.connection.execute(
                 """
                 INSERT INTO delivery_attempts(
                     id, reminder_id, channel, attempt_number, status, started_at,
                     finished_at, error_code, error_message, provider_receipt,
-                    created_at, correlation_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, correlation_id, delivery_cycle_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt.id,
@@ -1775,9 +1807,50 @@ class PlanningRepository:
                     attempt.provider_receipt,
                     attempt.created_at,
                     attempt.correlation_id,
+                    attempt.delivery_cycle_id,
                 ),
             )
             return attempt
+
+    def count_delivery_attempts(
+        self,
+        *,
+        reminder_id: str,
+        channel: str,
+        delivery_cycle_id: str | None,
+    ) -> int:
+        """Count semantic channel attempts in one durable delivery cycle."""
+
+        validate_uuid4(reminder_id, "delivery_attempt.reminder_id")
+        validate_text(channel, "delivery_attempt.channel", max_length=64)
+        if delivery_cycle_id is None:
+            return 0
+        validate_uuid4(delivery_cycle_id, "delivery_attempt.delivery_cycle_id")
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM delivery_attempts
+            WHERE reminder_id = ? AND channel = ? AND delivery_cycle_id = ?
+            """,
+            (reminder_id, channel, delivery_cycle_id),
+        ).fetchone()
+        return int(row[0])
+
+    def has_successful_delivery_attempt(self, *, reminder_id: str, channel: str) -> bool:
+        """Return whether a channel has ever succeeded for this reminder."""
+
+        validate_uuid4(reminder_id, "delivery_attempt.reminder_id")
+        validate_text(channel, "delivery_attempt.channel", max_length=64)
+        row = self.connection.execute(
+            """
+            SELECT 1
+            FROM delivery_attempts
+            WHERE reminder_id = ? AND channel = ? AND status = 'succeeded'
+            LIMIT 1
+            """,
+            (reminder_id, channel),
+        ).fetchone()
+        return row is not None
 
     def finish_delivery_attempt(
         self,
@@ -1825,6 +1898,7 @@ class PlanningRepository:
         error_message: str | None = None,
         provider_receipt: str | None = None,
         correlation_id: str | None = None,
+        delivery_cycle_id: str | None = None,
     ) -> str:
         if not self.database.in_transaction:
             raise PlanningTransactionRequiredError("delivery attempt writes require a surrounding transaction")
@@ -1845,14 +1919,16 @@ class PlanningRepository:
         if correlation_id is None:
             correlation_id = new_uuid4()
         validate_uuid4(correlation_id, "delivery_attempt.correlation_id")
+        if delivery_cycle_id is not None:
+            validate_uuid4(delivery_cycle_id, "delivery_attempt.delivery_cycle_id")
         attempt_id = new_uuid4()
         self.connection.execute(
             """
             INSERT INTO delivery_attempts(
                 id, reminder_id, channel, attempt_number, status, started_at,
                 finished_at, error_code, error_message, provider_receipt, created_at,
-                correlation_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                correlation_id, delivery_cycle_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
@@ -1867,6 +1943,7 @@ class PlanningRepository:
                 provider_receipt,
                 self._now(),
                 correlation_id,
+                delivery_cycle_id,
             ),
         )
         return attempt_id
@@ -1934,7 +2011,7 @@ class PlanningRepository:
                     SET status = 'queued', available_at = ?, lease_owner = NULL,
                         lease_expires_at = NULL, lease_token = NULL, attempt_count = 0,
                         attempt_window_started_at = NULL, last_error = NULL,
-                        last_error_code = NULL, updated_at = ?
+                        last_error_code = NULL, delivery_cycle_id = NULL, updated_at = ?
                     WHERE id = ?
                     """,
                     (now, now, str(job_row["id"])),

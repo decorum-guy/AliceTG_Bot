@@ -163,7 +163,9 @@ class HomeAssistantMobileTransport:
         if not self._services:
             return DeliveryResult.permanent("ha_mobile_not_configured", diagnostic="No configured mobile service")
 
-        retryable_failure: DeliveryResult | None = None
+        successful_services = 0
+        retryable_failures = 0
+        permanent_failures = 0
         for service in self._services:
             try:
                 await self._home_assistant.notify(
@@ -172,30 +174,27 @@ class HomeAssistantMobileTransport:
                     message=reminder.title,
                 )
             except asyncio.TimeoutError:
-                retryable_failure = DeliveryResult.retryable(
-                    "ha_mobile_timeout",
-                    diagnostic="Home Assistant mobile request timed out",
-                )
+                retryable_failures += 1
             except HomeAssistantError as exc:
                 if exc.status is None or exc.status == 429 or exc.status >= 500:
-                    retryable_failure = DeliveryResult.retryable(
-                        "ha_mobile_temporary_failure",
-                        diagnostic="Home Assistant mobile provider temporarily failed",
-                    )
+                    retryable_failures += 1
                 else:
-                    retryable_failure = retryable_failure or DeliveryResult.permanent(
-                        "ha_mobile_permanent_failure",
-                        diagnostic="Home Assistant rejected the mobile notification",
-                    )
+                    permanent_failures += 1
             except (OSError, RuntimeError):
-                retryable_failure = DeliveryResult.retryable(
-                    "ha_mobile_network",
-                    diagnostic="Home Assistant mobile network failure",
-                )
+                retryable_failures += 1
             else:
-                return DeliveryResult.success(code="ha_mobile_delivered", provider_receipt="ha-mobile")
+                successful_services += 1
 
-        return retryable_failure or DeliveryResult.permanent(
-            "ha_mobile_failed",
-            diagnostic="Home Assistant mobile delivery failed",
-        )
+        if successful_services:
+            return DeliveryResult.success(code="ha_mobile_delivered", provider_receipt="ha-mobile")
+        if retryable_failures:
+            return DeliveryResult.retryable(
+                "ha_mobile_temporary_failure",
+                diagnostic="Home Assistant mobile services temporarily failed",
+            )
+        if permanent_failures:
+            return DeliveryResult.permanent(
+                "ha_mobile_permanent_failure",
+                diagnostic="Home Assistant mobile services rejected the notification",
+            )
+        return DeliveryResult.permanent("ha_mobile_failed", diagnostic="Home Assistant mobile delivery failed")

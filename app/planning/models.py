@@ -379,6 +379,7 @@ class OutboxJob:
     available_at: str
     lease_owner: str | None
     lease_expires_at: str | None
+    # Worker lease-claim count; required delivery attempts live in delivery_attempts.
     attempt_count: int
     created_at: str
     updated_at: str
@@ -389,6 +390,7 @@ class OutboxJob:
     lease_token: str | None = None
     attempt_window_started_at: str | None = None
     last_error_code: str | None = None
+    delivery_cycle_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -405,6 +407,7 @@ class DeliveryAttempt:
     provider_receipt: str | None
     correlation_id: str
     created_at: str
+    delivery_cycle_id: str | None = None
 
 
 @dataclass(frozen=True)

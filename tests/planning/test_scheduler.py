@@ -103,8 +103,15 @@ class DurableReminderSchedulerTests(unittest.IsolatedAsyncioTestCase):
             outbox_payload={"chat_id": -100000000001} if durable else None,
         )
 
-    def scheduler(self, *, telegram: FakeTransport | None = None, mobile: FakeTransport | None = None, **kwargs: Any):
-        async def settings_provider() -> ReminderSettings:
+    def scheduler(
+        self,
+        *,
+        telegram: FakeTransport | None = None,
+        mobile: FakeTransport | None = None,
+        settings_provider: Any | None = None,
+        **kwargs: Any,
+    ):
+        async def default_settings_provider() -> ReminderSettings:
             return self.settings
 
         return DurableReminderScheduler(
@@ -112,7 +119,7 @@ class DurableReminderSchedulerTests(unittest.IsolatedAsyncioTestCase):
             telegram_transport=telegram or self.telegram,
             mobile_transport=mobile,
             default_chat_id=-100000000099,
-            settings_provider=settings_provider,
+            settings_provider=settings_provider or default_settings_provider,
             now_fn=self.clock,
             jitter_fn=lambda _base: 0,
             **kwargs,
@@ -430,11 +437,25 @@ class DurableReminderSchedulerTests(unittest.IsolatedAsyncioTestCase):
             await self.run_once(scheduler)
         failed = self.repository.get_reminder(reminder.id)
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 8)
+        historical_cycle = self.database.connection.execute(
+            "SELECT DISTINCT delivery_cycle_id FROM delivery_attempts WHERE channel = 'telegram'"
+        ).fetchone()[0]
         self.repository.manual_retry_reminder(reminder.id, expected_version=failed.version, context=MANUAL_CONTEXT, now=self.clock())
+        self.assertIsNone(self.database.connection.execute("SELECT delivery_cycle_id FROM outbox").fetchone()[0])
         await self.run_once(scheduler)
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 9)
         numbers = [row[0] for row in self.database.connection.execute("SELECT attempt_number FROM delivery_attempts ORDER BY attempt_number")]
         self.assertEqual(numbers, list(range(1, 10)))
+        new_cycle = self.database.connection.execute(
+            "SELECT delivery_cycle_id FROM outbox"
+        ).fetchone()[0]
+        self.assertNotEqual(new_cycle, historical_cycle)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM delivery_attempts WHERE delivery_cycle_id = ?", (new_cycle,)
+            ).fetchone()[0],
+            1,
+        )
 
     async def test_cancellation_before_send_suppresses_delivery(self) -> None:
         reminder = self.reminder()
@@ -501,6 +522,81 @@ class DurableReminderSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.telegram.calls), 1)
         self.assertEqual(self.repository.get_reminder(reminder.id).delivery_state, "delivered")
 
+    async def test_crash_before_telegram_attempt_does_not_consume_retry_ordinal(self) -> None:
+        reminder = self.reminder()
+
+        async def crash_before_attempt(_reminder, _channel):
+            raise SimulatedCrash("before attempt persistence")
+
+        crashing = self.scheduler(before_attempt_persist=crash_before_attempt, lease_seconds=10)
+        with self.assertRaises(SimulatedCrash):
+            await self.run_once(crashing)
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 0)
+        self.clock.advance(seconds=11)
+        telegram = FakeTransport("telegram", [DeliveryResult.retryable("telegram_timeout")])
+        await self.run_once(self.scheduler(telegram=telegram, lease_seconds=10))
+        self.assertEqual(self.repository.get_reminder(reminder.id).next_attempt_at, "2026-08-11T10:00:41.000000Z")
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT attempt_number FROM delivery_attempts WHERE channel = 'telegram'"
+            ).fetchone()[0],
+            1,
+        )
+
+    async def test_settings_failure_before_telegram_attempt_does_not_consume_budget(self) -> None:
+        reminder = self.reminder()
+        settings_calls = 0
+
+        async def failing_settings() -> ReminderSettings:
+            nonlocal settings_calls
+            settings_calls += 1
+            if settings_calls == 1:
+                raise SimulatedCrash("settings unavailable")
+            return self.settings
+
+        with self.assertRaises(SimulatedCrash):
+            await self.run_once(self.scheduler(settings_provider=failing_settings, lease_seconds=10))
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 0)
+        self.clock.advance(seconds=11)
+        telegram = FakeTransport("telegram", [DeliveryResult.retryable("telegram_timeout")])
+        await self.run_once(self.scheduler(telegram=telegram, settings_provider=failing_settings, lease_seconds=10))
+        self.assertEqual(self.repository.get_reminder(reminder.id).next_attempt_at, "2026-08-11T10:00:41.000000Z")
+
+    async def test_lease_reclaim_without_telegram_attempt_keeps_first_retry_delay(self) -> None:
+        reminder = self.reminder()
+        self.repository.claim_outbox(
+            job_type=REMINDER_DELIVERY_JOB_TYPE,
+            lease_owner="crashed-worker",
+            now=self.clock(),
+            lease_expires_at="2026-08-11T10:00:10.000000Z",
+        )
+        self.clock.set("2026-08-11T10:00:11.000000Z")
+        telegram = FakeTransport("telegram", [DeliveryResult.retryable("telegram_timeout")])
+        await self.run_once(self.scheduler(telegram=telegram, lease_seconds=10))
+        self.assertEqual(self.repository.get_reminder(reminder.id).next_attempt_at, "2026-08-11T10:00:41.000000Z")
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 1)
+
+    async def test_persisted_telegram_attempt_consumes_retry_ordinal(self) -> None:
+        reminder = self.reminder()
+
+        async def crash_after_attempt(_reminder, _channel):
+            raise SimulatedCrash("after attempt persistence")
+
+        crashing = self.scheduler(before_provider_send=crash_after_attempt, lease_seconds=10)
+        with self.assertRaises(SimulatedCrash):
+            await self.run_once(crashing)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT status, attempt_number FROM delivery_attempts WHERE channel = 'telegram'"
+            ).fetchone()[0:2],
+            ("started", 1),
+        )
+        self.clock.advance(seconds=11)
+        telegram = FakeTransport("telegram", [DeliveryResult.retryable("telegram_timeout")])
+        await self.run_once(self.scheduler(telegram=telegram, lease_seconds=10))
+        self.assertEqual(self.repository.get_reminder(reminder.id).next_attempt_at, "2026-08-11T10:02:11.000000Z")
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 2)
+
     async def test_failure_during_provider_send_is_audited_and_retryable(self) -> None:
         reminder = self.reminder()
         telegram = FakeTransport("telegram", [RuntimeError("network failure")])
@@ -508,6 +604,31 @@ class DurableReminderSchedulerTests(unittest.IsolatedAsyncioTestCase):
         attempt = self.database.connection.execute("SELECT status, error_code FROM delivery_attempts").fetchone()
         self.assertEqual((attempt["status"], attempt["error_code"]), ("failed", "transport_exception"))
         self.assertEqual(self.repository.get_reminder(reminder.id).delivery_state, "retrying")
+
+    async def test_optional_success_is_not_repeated_while_telegram_retries(self) -> None:
+        self.settings.notify_iphone_enabled = True
+        reminder = self.reminder()
+        telegram = FakeTransport(
+            "telegram",
+            [DeliveryResult.retryable("telegram_timeout"), DeliveryResult.success()],
+        )
+        mobile = FakeTransport("iphone", [DeliveryResult.success(provider_receipt="ha-mobile")])
+        scheduler = self.scheduler(telegram=telegram, mobile=mobile)
+        await self.run_once(scheduler)
+        retry_at = self.repository.get_reminder(reminder.id).next_attempt_at
+        self.assertEqual((len(telegram.calls), len(mobile.calls)), (1, 1))
+        self.clock.set(retry_at)
+        await self.run_once(scheduler)
+        self.assertEqual((len(telegram.calls), len(mobile.calls)), (2, 1))
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM delivery_attempts WHERE reminder_id = ? AND channel = 'iphone' AND status = 'succeeded'",
+                (reminder.id,),
+            ).fetchone()[0],
+            1,
+        )
+        stored = self.repository.get_reminder(reminder.id)
+        self.assertEqual((stored.status, stored.delivery_state, stored.completed_at), ("due", "delivered", None))
 
     async def test_crash_after_remote_success_before_local_commit_demonstrates_at_least_once(self) -> None:
         reminder = self.reminder()

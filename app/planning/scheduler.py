@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from app.planning.delivery import DeliveryResult, ReminderChannelTransport
 from app.planning.errors import PlanningLeaseLostError, PlanningVersionConflictError
 from app.planning.models import (
+    DeliveryAttempt,
     MutationContext,
     REMINDER_DELIVERY_JOB_TYPE,
     REMINDER_OUTBOX_DEDUPE_PREFIX,
@@ -61,6 +62,13 @@ class SchedulerRun:
     reconciled_reminders: int
 
 
+@dataclass(frozen=True)
+class ChannelAttemptOutcome:
+    result: DeliveryResult
+    attempt: DeliveryAttempt
+    delivery_ordinal: int | None
+
+
 Hook = Callable[[Reminder, str], Awaitable[None] | None]
 
 
@@ -88,6 +96,7 @@ class DurableReminderScheduler:
         now_fn: Callable[[], str | datetime] = utc_now,
         jitter_fn: Callable[[int], float] | None = None,
         jitter_bound_seconds: float = DEFAULT_JITTER_SECONDS,
+        before_attempt_persist: Hook | None = None,
         before_provider_send: Hook | None = None,
         after_provider_send: Hook | None = None,
     ) -> None:
@@ -116,6 +125,7 @@ class DurableReminderScheduler:
         self._worker_id = worker_id or f"planning-scheduler-{id(self)}"
         self._jitter_fn = jitter_fn or (lambda _base: random.uniform(-jitter_bound_seconds, jitter_bound_seconds))
         self._jitter_bound_seconds = jitter_bound_seconds
+        self._before_attempt_persist = before_attempt_persist
         self._before_provider_send = before_provider_send
         self._after_provider_send = after_provider_send
         self._stop_event = asyncio.Event()
@@ -415,8 +425,13 @@ class DurableReminderScheduler:
             self._suppress_job(job, now, reminder)
             return
 
+        telegram_attempts = self._repository.count_delivery_attempts(
+            reminder_id=reminder.id,
+            channel="telegram",
+            delivery_cycle_id=job.delivery_cycle_id,
+        )
         attempt_window = job.attempt_window_started_at
-        if job.attempt_count > MAX_DELIVERY_ATTEMPTS or (
+        if telegram_attempts >= MAX_DELIVERY_ATTEMPTS or (
             attempt_window is not None
             and _as_datetime(now) >= _as_datetime(str(attempt_window)) + timedelta(seconds=DELIVERY_RETRY_WINDOW_SECONDS)
         ):
@@ -428,14 +443,14 @@ class DurableReminderScheduler:
             settings = await self._settings_provider()
 
         if settings.notify_telegram_enabled:
-            telegram_result = await self._attempt_channel(
+            telegram_outcome = await self._attempt_channel(
                 job,
                 reminder,
                 self._telegram_transport,
                 now,
             )
         else:
-            telegram_result = await self._attempt_channel(
+            telegram_outcome = await self._attempt_channel(
                 job,
                 reminder,
                 None,
@@ -445,17 +460,25 @@ class DurableReminderScheduler:
                     diagnostic="Telegram required delivery is disabled",
                 ),
             )
+        telegram_result = telegram_outcome.result
 
         optional_result: DeliveryResult | None = None
         if settings.notify_iphone_enabled and self._mobile_transport is not None:
             current = self._repository.get_reminder(reminder.id)
-            if self._is_due_and_active(current, now):
-                optional_result = await self._attempt_channel(
+            if (
+                self._is_due_and_active(current, now)
+                and not self._repository.has_successful_delivery_attempt(
+                    reminder_id=reminder.id,
+                    channel=self._mobile_transport.channel,
+                )
+            ):
+                optional_outcome = await self._attempt_channel(
                     job,
                     current,
                     self._mobile_transport,
                     now,
                 )
+                optional_result = optional_outcome.result
 
         current = self._repository.get_reminder(reminder.id)
         if not self._is_due_and_active(current, now):
@@ -465,7 +488,12 @@ class DurableReminderScheduler:
             self._commit_success(job, current, now, optional_result)
             return
         if telegram_result.kind == "retryable":
-            retry_at = self._next_retry_at(job, now, telegram_result)
+            retry_at = self._next_retry_at(
+                job,
+                now,
+                telegram_result,
+                telegram_attempt_ordinal=telegram_outcome.delivery_ordinal,
+            )
             if retry_at is not None:
                 self._commit_retry(job, current, now, retry_at, telegram_result)
                 return
@@ -479,12 +507,23 @@ class DurableReminderScheduler:
         now: str,
         *,
         forced_result: DeliveryResult | None = None,
-    ) -> DeliveryResult:
+    ) -> ChannelAttemptOutcome:
         channel = "telegram" if transport is None else transport.channel
+        if self._before_attempt_persist is not None:
+            await self._call_hook(self._before_attempt_persist, reminder, channel)
         attempt = self._repository.start_delivery_attempt(
             reminder_id=reminder.id,
             channel=channel,
             started_at=now,
+        )
+        delivery_ordinal = (
+            self._repository.count_delivery_attempts(
+                reminder_id=reminder.id,
+                channel="telegram",
+                delivery_cycle_id=attempt.delivery_cycle_id,
+            )
+            if channel == "telegram"
+            else None
         )
         if self._before_provider_send is not None:
             await self._call_hook(self._before_provider_send, reminder, channel)
@@ -499,7 +538,11 @@ class DurableReminderScheduler:
                 error_message="delivery suppressed before provider send",
             )
             self._suppress_job(job, now, current)
-            return DeliveryResult.permanent("delivery_suppressed", diagnostic="delivery suppressed")
+            return ChannelAttemptOutcome(
+                result=DeliveryResult.permanent("delivery_suppressed", diagnostic="delivery suppressed"),
+                attempt=attempt,
+                delivery_ordinal=delivery_ordinal,
+            )
 
         if forced_result is not None:
             result = forced_result
@@ -526,7 +569,11 @@ class DurableReminderScheduler:
             error_message=None if result.kind == "success" else result.diagnostic,
             provider_receipt=result.provider_receipt,
         )
-        return result
+        return ChannelAttemptOutcome(
+            result=result,
+            attempt=attempt,
+            delivery_ordinal=delivery_ordinal,
+        )
 
     @staticmethod
     async def _call_hook(hook: Hook, reminder: Reminder, channel: str) -> None:
@@ -567,10 +614,17 @@ class DurableReminderScheduler:
                 now=now,
             )
 
-    def _next_retry_at(self, job: Any, now: str, result: DeliveryResult) -> str | None:
-        if job.attempt_count >= MAX_DELIVERY_ATTEMPTS:
+    def _next_retry_at(
+        self,
+        job: Any,
+        now: str,
+        result: DeliveryResult,
+        *,
+        telegram_attempt_ordinal: int | None,
+    ) -> str | None:
+        if telegram_attempt_ordinal is None or telegram_attempt_ordinal >= MAX_DELIVERY_ATTEMPTS:
             return None
-        index = job.attempt_count - 1
+        index = telegram_attempt_ordinal - 1
         if index < 0 or index >= len(RETRY_DELAYS_SECONDS):
             return None
         base_delay = RETRY_DELAYS_SECONDS[index]

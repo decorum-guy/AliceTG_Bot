@@ -49,9 +49,11 @@ Migration `003_delivery_policy.sql` is forward-only and adds:
 | `outbox.dedupe_key` plus its partial unique index | One logical delivery job per reminder, including restart/multi-worker reconciliation. |
 | `outbox.reminder_id` | Foreign-key-like lookup from generic outbox work to the canonical reminder state during atomic claims. |
 | `outbox.lease_token` | Lease generation identity so a stale worker cannot commit after expiry/reclaim. |
-| `outbox.attempt_window_started_at` | Durable start of the 24-hour retry window; manual retry can explicitly reset it. |
+| `outbox.attempt_window_started_at` | Durable start of the current 24-hour required-Telegram retry window; set only when the first Telegram attempt is persisted and reset by manual retry. |
 | `outbox.last_error_code` | Bounded machine-readable retry/incident classification without storing provider response bodies. |
+| `outbox.delivery_cycle_id` | Durable identity for the current required-Telegram retry window; it is not assigned by lease acquisition. |
 | `delivery_attempts.correlation_id` and its index | Durable per-attempt correlation across the local audit and one provider call. |
+| `delivery_attempts.delivery_cycle_id` and its index | Derives the required-Telegram retry ordinal from persisted attempts while preserving historical manual-retry rows. |
 | `outbox(reminder_id,status,available_at)` index | Efficient due/retry/reconciliation scans for reminder work. |
 
 No existing rows are deleted or rewritten by the migration.
@@ -86,7 +88,12 @@ cancel       cancelled             (future delivery suppressed)
 
 Telegram is the required delivery channel. Optional iPhone/HA delivery is an
 independent attempt: its success does not compensate for Telegram failure,
-and its failure does not undo a successful Telegram delivery. A Telegram
+and its failure does not undo a successful Telegram delivery. Each optional
+mobile cycle attempts every configured allowlisted HA notify service once;
+the aggregate succeeds when at least one configured service succeeds. A
+previous successful optional attempt is not repeated merely because Telegram
+is retrying, including after a trusted manual retry of failed Telegram. A
+Telegram
 success permits `delivery_state=delivered`, but never changes `status` to
 `completed`. The A2 legacy `fired -> completed/delivered` interpretation
 remains limited to migrated historical records.
@@ -94,7 +101,8 @@ remains limited to migrated historical records.
 ## Leases and startup recovery
 
 Claims run in `BEGIN IMMEDIATE` and atomically select one due/retry job,
-increment its attempt count, and write owner, expiry, and a fresh lease token.
+increment its lease-claim counter, and write owner, expiry, and a fresh lease
+token. Lease claims do not consume the delivery budget or shift retry timing.
 Only the owner/token pair can commit the attempt result. An expired lease is
 reclaimed by the next transaction; startup reconciliation also makes expired
 and overdue work recoverable immediately rather than waiting for a retry
@@ -107,8 +115,13 @@ ignored if the lease or canonical state is no longer valid.
 
 An attempt row is inserted before a provider call. Attempt numbers are
 sequential per reminder/channel and include start/finish timestamps, bounded
-error code/message, safe receipt, and correlation ID. Provider diagnostics are
-redacted and bounded; titles and arbitrary response bodies are not persisted.
+error code/message, safe receipt, correlation ID, and delivery-cycle ID. The
+required Telegram retry ordinal and 24-hour window are derived from persisted
+Telegram attempt rows in the active delivery cycle. A settings/runtime failure
+or lease reclaim before the attempt row is created consumes no Telegram
+attempt; a crash after the row is created conservatively counts it. Provider
+diagnostics are redacted and bounded; titles and arbitrary response bodies are
+not persisted.
 
 Retryable Telegram failures use the approved sequence:
 
