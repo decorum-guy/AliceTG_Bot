@@ -1,0 +1,19 @@
+{
+  "domain": "task",
+  "id": "e1c5a7b9-4d32-4f60-8a21-9b7e3c5d1f08",
+  "title": "Update project brief",
+  "due_date": "2026-08-16",
+  "due_time": "14:05",
+  "timezone": "Europe/Moscow",
+  "priority": "high",
+  "project_id": "a8f2c4d6-1b39-4e57-9c02-7d5a3b8e6f14",
+  "status": "open",
+  "source": "operator",
+  "source_ref": "fixture:task:timed",
+  "completed_at": null,
+  "archived_at": null,
+  "version": 3,
+  "created_at": "2026-08-11T07:15:00Z",
+  "updated_at": "2026-08-11T07:20:00Z",
+  "audit_correlation_id": "f7d2b4a6-8c10-4e35-9a72-1b6d5f3c8e04"
+}

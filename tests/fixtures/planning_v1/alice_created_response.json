@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "planning.v1",
+  "kind": "created",
+  "speech": "Сохранено.",
+  "end_session": true,
+  "pending_confirmation_id": null,
+  "object": {
+    "domain": "reminder",
+    "id": "2f0b8a2e-5a88-4b42-9e1a-7f9c3e6d1a04",
+    "title": "Review sample document",
+    "due_at_utc": "2026-08-14T07:30:00Z",
+    "timezone": "Europe/Moscow",
+    "status": "pending",
+    "source": "alice",
+    "source_ref": "fixture:alice:001",
+    "created_by": "fixture-alice",
+    "delivery_state": "not_due",
+    "version": 1,
+    "created_at": "2026-08-11T07:55:00Z",
+    "updated_at": "2026-08-11T07:55:00Z",
+    "audit_correlation_id": "8f2a4c6e-1b73-4d90-9c25-7a5e3b8d6f04"
+  },
+  "correlation_id": "9a3c5e7f-1b62-4d80-8f24-6c5e3a7b9d01",
+  "actor": {
+    "id": "fixture-alice",
+    "type": "service",
+    "surface": "ha"
+  }
+}

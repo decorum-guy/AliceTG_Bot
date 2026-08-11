@@ -1,0 +1,17 @@
+{
+  "domain": "task",
+  "id": "b4dd2c5e-9c67-4a2d-8f10-7a6c4e2b1d03",
+  "title": "Unsafe execution fixture",
+  "priority": "normal",
+  "status": "open",
+  "source": "panel-agent",
+  "version": 1,
+  "created_at": "2026-08-11T08:10:00Z",
+  "updated_at": "2026-08-11T08:10:00Z",
+  "audit_correlation_id": "c6e8f1a3-4b95-4d02-9f27-6a5e3b8d7c04",
+  "command": "echo unsafe",
+  "path": "/tmp/unsafe",
+  "url": "https://example.invalid/unsafe",
+  "host": "example.invalid",
+  "executable": "unsafe-tool"
+}

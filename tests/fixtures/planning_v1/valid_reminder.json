@@ -1,0 +1,21 @@
+{
+  "domain": "reminder",
+  "id": "2f0b8a2e-5a88-4b42-9e1a-7f9c3e6d1a04",
+  "title": "Review sample document",
+  "notes": "Use the approved checklist.",
+  "due_at_utc": "2026-08-14T07:30:00Z",
+  "timezone": "Europe/Moscow",
+  "status": "pending",
+  "source": "telegram",
+  "source_ref": "fixture:reminder:001",
+  "created_by": "fixture-operator",
+  "completed_at": null,
+  "cancelled_at": null,
+  "delivery_state": "not_due",
+  "next_attempt_at": null,
+  "final_failure_at": null,
+  "version": 1,
+  "created_at": "2026-08-11T07:00:00Z",
+  "updated_at": "2026-08-11T07:00:00Z",
+  "audit_correlation_id": "93e7c7e2-3d0d-4f82-b1f1-44f1e1a5c0d8"
+}

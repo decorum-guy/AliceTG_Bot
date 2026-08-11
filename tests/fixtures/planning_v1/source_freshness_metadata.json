@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "planning.v1",
+  "kind": "list",
+  "domain": "calendar_event",
+  "items": [
+    {
+      "domain": "calendar_event",
+      "id": "5a8c2e4f-7d10-4b63-9f25-1e6a3c8d0b47",
+      "title": "Provider sync check",
+      "all_day": false,
+      "start_at_utc": "2026-08-19T09:00:00Z",
+      "end_at_utc": "2026-08-19T10:00:00Z",
+      "timezone": "Europe/Moscow",
+      "provider_id": "fixture-calendar-provider",
+      "provider_calendar_id": "fixture-calendar",
+      "sync_state": "synced",
+      "source": "calendar-provider",
+      "source_ref": "fixture:event:timed",
+      "version": 2,
+      "created_at": "2026-08-11T07:35:00Z",
+      "updated_at": "2026-08-11T07:40:00Z",
+      "audit_correlation_id": "e9a2c4f6-8b10-4d37-9c25-1a6e3f5b7d08"
+    }
+  ],
+  "generatedAt": "2026-08-19T09:01:00Z",
+  "sourceStatus": "current",
+  "lastSyncedAt": "2026-08-19T08:59:00Z",
+  "staleAfter": "2026-08-19T09:05:00Z",
+  "correlation_id": "1b6d3f5a-7c92-4e08-9f14-2a6d8c5b7e03"
+}
