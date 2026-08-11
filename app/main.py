@@ -99,9 +99,9 @@ async def create_app() -> web.Application:
         planning_db_path=settings.planning_db_path,
         cutover_enabled=settings.planning_reminder_cutover_enabled,
     )
-    if settings.planning_api_enabled and planning_database is None:
-        # A4 has its own disabled-by-default API gate.  Opening the Planning
-        # database here does not enable the A2 reminder cutover or A3 worker.
+    if (settings.planning_api_enabled or settings.planning_alice_interpret_enabled) and planning_database is None:
+        # A4/A5a have their own disabled-by-default API gates.  Opening the
+        # Planning database here does not enable the A2 cutover or A3 worker.
         planning_database = PlanningDatabase(settings.planning_db_path)
     admin_mode_manager = AdminModeManager()
     telegram_messages = TelegramMessages(bot)
