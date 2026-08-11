@@ -29,6 +29,8 @@ TASK_PRIORITIES = frozenset({"none", "low", "normal", "high"})
 TASK_STATUSES = frozenset({"open", "completed", "archived"})
 EVENT_SYNC_STATES = frozenset({"local_only", "pending", "synced", "stale", "conflict", "error"})
 OUTBOX_STATUSES = frozenset({"queued", "leased", "succeeded", "failed", "cancelled"})
+REMINDER_DELIVERY_JOB_TYPE = "planning.reminder.delivery.v1"
+REMINDER_OUTBOX_DEDUPE_PREFIX = "planning.reminder:"
 
 UTC_TIMESTAMP_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
@@ -382,6 +384,27 @@ class OutboxJob:
     updated_at: str
     last_error: str | None = None
     correlation_id: str | None = None
+    dedupe_key: str | None = None
+    reminder_id: str | None = None
+    lease_token: str | None = None
+    attempt_window_started_at: str | None = None
+    last_error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryAttempt:
+    id: str
+    reminder_id: str
+    channel: str
+    attempt_number: int
+    status: Literal["queued", "started", "succeeded", "failed"]
+    started_at: str | None
+    finished_at: str | None
+    error_code: str | None
+    error_message: str | None
+    provider_receipt: str | None
+    correlation_id: str
+    created_at: str
 
 
 @dataclass(frozen=True)

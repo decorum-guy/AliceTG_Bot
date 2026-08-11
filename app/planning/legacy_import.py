@@ -16,6 +16,7 @@ from app.planning.db import PlanningDatabase
 from app.planning.errors import PlanningNotFoundError, PlanningValidationError
 from app.planning.models import (
     MutationContext,
+    REMINDER_DELIVERY_JOB_TYPE,
     Reminder,
     new_uuid4,
     utc_now,
@@ -836,6 +837,8 @@ class PlanningReminderStoreAdapter:
                 due_at_utc=due_at_utc,
                 timezone=LEGACY_IMPORT_TIMEZONE,
                 context=context,
+                outbox_job_type=REMINDER_DELIVERY_JOB_TYPE,
+                outbox_payload={"chat_id": chat_id},
             )
             self.database.connection.execute(
                 """

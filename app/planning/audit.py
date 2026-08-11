@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 from app.planning.db import PlanningDatabase
 from app.planning.errors import PlanningTransactionRequiredError, PlanningValidationError
@@ -91,9 +91,16 @@ def reject_secret_fields(value: Any, *, field: str = "value", depth: int = 0) ->
 class AuditWriter:
     """Writes bounded audit rows using the caller's surrounding transaction."""
 
-    def __init__(self, database: PlanningDatabase, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        database: PlanningDatabase,
+        *,
+        fail: bool = False,
+        now_fn: Callable[[], str] = utc_now,
+    ) -> None:
         self.database = database
         self.fail = fail
+        self._now_fn = now_fn
 
     def record(
         self,
@@ -148,7 +155,7 @@ class AuditWriter:
                 event_correlation_id,
                 before_json,
                 after_json,
-                utc_now(),
+                self._now_fn(),
             ),
         )
         return audit_id
