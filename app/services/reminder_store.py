@@ -42,6 +42,75 @@ class ReminderSettings:
     notify_iphone_enabled: bool = False
 
 
+class ReminderSettingsStore:
+    """Legacy settings-only boundary used while reminder records move to Planning."""
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._lock = asyncio.Lock()
+
+    async def get_settings(self) -> ReminderSettings:
+        async with self._lock:
+            return self._settings_from_document(self._read_document())
+
+    async def update_settings(
+        self,
+        *,
+        voice_enabled: bool | None = None,
+        voice_station_entity_id: str | None = None,
+        notify_telegram_enabled: bool | None = None,
+        notify_iphone_enabled: bool | None = None,
+    ) -> ReminderSettings:
+        async with self._lock:
+            document = self._read_document()
+            settings = self._settings_from_document(document)
+            if voice_enabled is not None:
+                settings.voice_enabled = voice_enabled
+            if voice_station_entity_id is not None:
+                settings.voice_station_entity_id = voice_station_entity_id
+            if notify_telegram_enabled is not None:
+                settings.notify_telegram_enabled = notify_telegram_enabled
+            if notify_iphone_enabled is not None:
+                settings.notify_iphone_enabled = notify_iphone_enabled
+            document["settings"] = asdict(settings)
+            await asyncio.to_thread(self._save_document, document)
+            return ReminderSettings(**asdict(settings))
+
+    def _read_document(self) -> dict[str, object]:
+        if not self._path.exists():
+            return {"settings": asdict(ReminderSettings()), "reminders": []}
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Reminder settings storage could not be read") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("Reminder settings storage has an invalid top-level shape")
+        return data
+
+    @staticmethod
+    def _settings_from_document(document: dict[str, object]) -> ReminderSettings:
+        settings = document.get("settings")
+        if not isinstance(settings, dict):
+            return ReminderSettings()
+        return ReminderSettings(
+            voice_enabled=bool(settings.get("voice_enabled", True)),
+            voice_station_entity_id=str(
+                settings.get("voice_station_entity_id") or DEFAULT_REMINDER_VOICE_STATION
+            ),
+            notify_telegram_enabled=bool(settings.get("notify_telegram_enabled", True)),
+            notify_iphone_enabled=bool(settings.get("notify_iphone_enabled", False)),
+        )
+
+    def _save_document(self, document: dict[str, object]) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
+            tmp_path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(self._path)
+        except OSError as exc:
+            raise RuntimeError("Reminder settings storage could not be saved") from exc
+
+
 class ReminderStore:
     def __init__(self, path: str) -> None:
         self._path = Path(path)

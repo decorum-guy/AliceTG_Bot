@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,7 +115,7 @@ class PlanningDatabase:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {self.config.busy_timeout_ms}")
-        journal_mode = str(connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
+        journal_mode = self._enable_wal(connection)
         if self.path != ":memory:" and journal_mode != "wal":
             connection.close()
             raise PlanningConfigurationError("Planning SQLite database did not enable WAL mode")
@@ -127,6 +128,20 @@ class PlanningDatabase:
                 # Permission hardening is best effort on filesystems that do not expose chmod.
                 pass
         return connection
+
+    @staticmethod
+    def _enable_wal(connection: sqlite3.Connection) -> str:
+        """Enable WAL while tolerating a concurrent first opener/migrator."""
+
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                return str(connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    connection.close()
+                    raise
+                time.sleep(0.01)
 
     @property
     def connection(self) -> sqlite3.Connection:

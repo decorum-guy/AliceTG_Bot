@@ -1,7 +1,8 @@
 """Internal durable Planning storage foundation.
 
-This package is intentionally not wired into the bot runtime in A1. Later
-phases may use these repositories behind the frozen Planning v1 contract.
+The generic A1 repositories remain provider-neutral. A2's legacy reminder
+import and compatibility adapter live in the separate ``legacy_import``
+boundary and are enabled only by an explicit cutover gate.
 """
 
 from app.planning.audit import AuditWriter, bounded_redacted_json, reject_secret_fields
