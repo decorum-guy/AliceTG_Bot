@@ -27,11 +27,21 @@ from app.planning import (
     reject_secret_fields,
 )
 from app.planning.migrations import Migration, MigrationRunner
+from app.planning.models import SOURCE_VALUES
 
 
 REQUEST_HASH = "sha256:" + "a" * 64
 OTHER_REQUEST_HASH = "sha256:" + "b" * 64
 CREATED_AT = "2026-08-15T10:00:00Z"
+FROZEN_A0_SOURCE_VALUES = {
+    "alice",
+    "telegram",
+    "panel-agent",
+    "operator",
+    "ticktick",
+    "calendar-provider",
+    "system",
+}
 CONTEXT = MutationContext(
     audience="operator",
     actor_id="fixture-operator",
@@ -212,6 +222,34 @@ class PlanningStorageTests(unittest.TestCase):
                 context=CONTEXT,
             )
 
+    def test_repository_sources_match_frozen_a0_contract(self) -> None:
+        self.assertEqual(set(SOURCE_VALUES), FROZEN_A0_SOURCE_VALUES)
+        expected_sources = {
+            "ha": "alice",
+            "panel-agent": "panel-agent",
+            "telegram": "telegram",
+            "operator": "operator",
+            "system": "system",
+        }
+        audiences = {
+            "ha": "ha",
+            "panel-agent": "panel-agent",
+            "telegram": "operator",
+            "operator": "operator",
+            "system": "operator",
+        }
+        for surface, expected_source in expected_sources.items():
+            with self.subTest(surface=surface):
+                context = MutationContext(
+                    audience=audiences[surface],
+                    actor_id=f"fixture-{surface}",
+                    actor_type="service" if surface in {"ha", "system"} else "operator",
+                    surface=surface,
+                )
+                task = self.repository.create_task(title=f"Source {surface}", context=context)
+                self.assertIn(task.source, FROZEN_A0_SOURCE_VALUES)
+                self.assertEqual(task.source, expected_source)
+
     def test_calendar_event_representations_and_exclusive_end(self) -> None:
         all_day = self.repository.create_calendar_event(
             title="All day",
@@ -252,6 +290,40 @@ class PlanningStorageTests(unittest.TestCase):
                 timezone="Europe/Moscow",
                 context=CONTEXT,
             )
+
+    def test_recurrence_is_rejected_on_create_and_update(self) -> None:
+        before = self.database.connection.execute("SELECT COUNT(*) FROM calendar_events").fetchone()[0]
+        with self.assertRaises(PlanningValidationError):
+            self.repository.create_calendar_event(
+                title="Recurrence rejected",
+                all_day=True,
+                start_date="2026-08-15",
+                end_date_exclusive="2026-08-16",
+                timezone="Europe/Moscow",
+                recurrence_rule="FREQ=DAILY",
+                context=CONTEXT,
+            )
+        self.assertEqual(
+            self.database.connection.execute("SELECT COUNT(*) FROM calendar_events").fetchone()[0],
+            before,
+        )
+        event = self.repository.create_calendar_event(
+            title="Non-recurring event",
+            all_day=True,
+            start_date="2026-08-15",
+            end_date_exclusive="2026-08-16",
+            timezone="Europe/Moscow",
+            context=CONTEXT,
+        )
+        with self.assertRaises(PlanningValidationError):
+            self.repository.update_calendar_event(
+                event.id,
+                expected_version=event.version,
+                recurrence_rule="FREQ=WEEKLY",
+                context=CONTEXT,
+            )
+        restored = self.repository.get_calendar_event(event.id)
+        self.assertEqual(restored, event)
 
     def test_sql_constraints_protect_shape_and_foreign_keys(self) -> None:
         with self.assertRaises(sqlite3.IntegrityError):

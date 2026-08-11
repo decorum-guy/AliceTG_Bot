@@ -13,12 +13,15 @@ from app.planning.errors import PlanningValidationError
 AUDIENCES = frozenset({"ha", "panel-agent", "operator"})
 ACTOR_TYPES = frozenset({"user", "service", "operator"})
 SURFACES = frozenset({"ha", "panel-agent", "telegram", "operator", "system"})
+SOURCE_VALUES = frozenset(
+    {"alice", "telegram", "panel-agent", "operator", "ticktick", "calendar-provider", "system"}
+)
 SOURCE_BY_SURFACE = {
     "ha": "alice",
     "panel-agent": "panel-agent",
     "telegram": "telegram",
     "operator": "operator",
-    "system": "operator",
+    "system": "system",
 }
 REMINDER_STATUSES = frozenset({"pending", "due", "completed", "cancelled"})
 DELIVERY_STATES = frozenset({"not_due", "queued", "retrying", "delivered", "failed"})
@@ -493,7 +496,8 @@ def validate_event_shape(
     validate_timezone(timezone_name, "calendar_event.timezone")
     if sync_state not in EVENT_SYNC_STATES:
         raise PlanningValidationError("calendar_event.sync_state has an invalid enum")
-    validate_optional_text(recurrence_rule, "calendar_event.recurrence_rule", max_length=2000)
+    if recurrence_rule is not None:
+        raise PlanningValidationError("calendar_event.recurrence_rule is disabled in Planning v1")
     validate_optional_text(provider_id, "calendar_event.provider_id", max_length=256)
     validate_optional_text(provider_calendar_id, "calendar_event.provider_calendar_id", max_length=256)
     if all_day:
