@@ -15,6 +15,14 @@ class PlanningValidationError(PlanningError, ValueError):
     pass
 
 
+class PlanningLocalTimeError(PlanningValidationError):
+    """A local wall-clock value cannot be resolved deterministically."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 class PlanningNotFoundError(PlanningError):
     pass
 

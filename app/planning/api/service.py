@@ -3,9 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Callable, Mapping
-from zoneinfo import ZoneInfo
 
 from app.planning.api.auth import (
     AuthenticatedPlanningContext,
@@ -13,11 +11,15 @@ from app.planning.api.auth import (
 )
 from app.planning.api.envelopes import FreshnessEnvelopeBuilder
 from app.planning.api.errors import PlanningApiError
+from app.planning.capabilities import planning_capability_metadata
+from app.planning.events import EventService
 from app.planning.models import REMINDER_DELIVERY_JOB_TYPE, MutationContext, new_uuid4, utc_now, validate_timezone
 from app.planning.errors import (
     PlanningIdempotencyInProgressError,
 )
+from app.planning.projects import ProjectService
 from app.planning.repositories import PlanningRepository
+from app.planning.tasks import TaskService
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,9 @@ class PlanningApiService:
         self.repository = repository or PlanningRepository(database, now_fn=now_fn)
         self.envelopes = FreshnessEnvelopeBuilder(now_fn=now_fn, stale_after_seconds=stale_after_seconds)
         self.default_timezone = default_timezone
+        self.task_service = TaskService(database, repository=self.repository, now_fn=now_fn)
+        self.event_service = EventService(database, repository=self.repository, now_fn=now_fn)
+        self.project_service = ProjectService(database, repository=self.repository, now_fn=now_fn)
 
     def list_reminders(
         self,
@@ -97,10 +102,10 @@ class PlanningApiService:
         offset: int,
         correlation_id: str,
     ) -> dict[str, Any]:
-        today = self._today()
-        items = self.repository.list_tasks(
+        items = self.task_service.list_view(
             view=view,
-            today=today,
+            reference_time_utc=self.envelopes.now(),
+            caller_timezone=self.default_timezone,
             project_id=project_id,
             limit=limit + 1,
             offset=offset,
@@ -123,9 +128,10 @@ class PlanningApiService:
         offset: int,
         correlation_id: str,
     ) -> dict[str, Any]:
-        items = self.repository.list_calendar_events(
+        items = self.event_service.query_range(
             from_utc=from_utc,
             to_utc=to_utc,
+            caller_timezone=self.default_timezone,
             limit=limit + 1,
             offset=offset,
         )
@@ -145,7 +151,7 @@ class PlanningApiService:
         offset: int,
         correlation_id: str,
     ) -> dict[str, Any]:
-        items = self.repository.list_projects(limit=limit + 1, offset=offset)
+        items = self.project_service.list_active(limit=limit + 1, offset=offset)
         return self.envelopes.list_response(
             domain="project",
             items=[item.to_dict() for item in items[:limit]],
@@ -163,6 +169,7 @@ class PlanningApiService:
             storage_status = "unavailable"
         return self.envelopes.status_response(
             capabilities=capabilities_for_audience(audience),
+            capability_metadata=planning_capability_metadata().to_dict(),
             storage_status=storage_status,
             correlation_id=correlation_id,
         )
@@ -304,7 +311,7 @@ class PlanningApiService:
             object_id=None,
             body=payload,
             expected_version=None,
-            operation=lambda context: self.repository.create_task(context=context, **dict(payload)),
+            operation=lambda context: self.task_service.create(context=context, **dict(payload)),
         )
 
     def patch_task(
@@ -319,7 +326,7 @@ class PlanningApiService:
         def operation(context: MutationContext) -> Any:
             current = self.repository.get_task(task_id)
             self._require_active(current, "Task is not editable.")
-            return self.repository.update_task(
+            return self.task_service.update(
                 task_id,
                 expected_version=expected_version,
                 context=context,
@@ -384,8 +391,8 @@ class PlanningApiService:
             current = self.repository.get_task(task_id)
             self._require_active(current, "Task state does not allow this action.")
             if action == "complete":
-                return self.repository.complete_task(task_id, expected_version=expected_version, context=context)
-            return self.repository.archive_task(task_id, expected_version=expected_version, context=context)
+                return self.task_service.complete(task_id, expected_version=expected_version, context=context)
+            return self.task_service.archive(task_id, expected_version=expected_version, context=context)
 
         return self._mutate(
             auth=auth,
@@ -411,9 +418,8 @@ class PlanningApiService:
             object_id=None,
             body=payload,
             expected_version=None,
-            operation=lambda context: self.repository.create_calendar_event(
+            operation=lambda context: self.event_service.create(
                 context=context,
-                sync_state="local_only",
                 **{key: value for key, value in payload.items() if key != "recurrence_rule"},
             ),
         )
@@ -430,7 +436,7 @@ class PlanningApiService:
         def operation(context: MutationContext) -> Any:
             current = self.repository.get_calendar_event(event_id)
             self._require_active(current, "Calendar event is not editable.")
-            return self.repository.update_calendar_event(
+            return self.event_service.update(
                 event_id,
                 expected_version=expected_version,
                 context=context,
@@ -458,7 +464,7 @@ class PlanningApiService:
         def operation(context: MutationContext) -> Any:
             current = self.repository.get_calendar_event(event_id)
             self._require_active(current, "Calendar event is already deleted.")
-            return self.repository.delete_calendar_event(
+            return self.event_service.delete(
                 event_id,
                 expected_version=expected_version,
                 context=context,
@@ -485,6 +491,12 @@ class PlanningApiService:
         expected_version: int | None,
         operation: Callable[[MutationContext], Any],
     ) -> StoredMutationResponse:
+        # Keep the thin service facades aligned with the repository attribute.
+        # A few deployment/test harnesses intentionally swap the repository
+        # after construction to inject audit failures.
+        self.task_service.repository = self.repository
+        self.event_service.repository = self.repository
+        self.project_service.repository = self.repository
         request_hash = self._request_hash(
             auth=auth,
             route_key=route_key,
@@ -525,10 +537,6 @@ class PlanningApiService:
                 correlation_id=correlation_id,
             )
             return StoredMutationResponse(response_json=response_json, status=200, replay=False)
-
-    def _today(self) -> str:
-        now = datetime.fromisoformat(self.envelopes.now()[:-1] + "+00:00")
-        return now.astimezone(ZoneInfo(self.default_timezone)).date().isoformat()
 
     @staticmethod
     def _require_active(value: Any, message: str) -> None:

@@ -17,6 +17,7 @@ from app.planning.errors import (
     PlanningIdempotencyConflictError,
     PlanningIdempotencyInProgressError,
     PlanningLeaseLostError,
+    PlanningLocalTimeError,
     PlanningMigrationError,
     PlanningNewerSchemaError,
     PlanningNotFoundError,
@@ -41,8 +42,19 @@ from app.planning.models import (
     SyncConflict,
     SyncCursor,
     Task,
+    resolve_local_datetime,
 )
 from app.planning.repositories import PlanningRepository
+from app.planning.capabilities import (
+    EventCapabilityMetadata,
+    PlanningCapabilityMetadata,
+    ProjectCapabilityMetadata,
+    TaskCapabilityMetadata,
+    planning_capability_metadata,
+)
+from app.planning.events import EventService
+from app.planning.projects import ProjectService
+from app.planning.tasks import TaskService
 from app.planning.telegram_actions import (
     IssuedTelegramAction,
     TelegramActionToken,
@@ -60,18 +72,21 @@ from app.planning.telegram_ui import (
 __all__ = [
     "AuditWriter",
     "CalendarEvent",
+    "EventCapabilityMetadata",
     "DeliveryAttempt",
     "DEFAULT_PLANNING_DB_PATH",
     "IdempotencyClaim",
     "MutationContext",
     "OutboxJob",
     "PlanningConfigurationError",
+    "PlanningCapabilityMetadata",
     "PlanningDatabase",
     "PlanningDatabaseConfig",
     "PlanningError",
     "PlanningIdempotencyConflictError",
     "PlanningIdempotencyInProgressError",
     "PlanningLeaseLostError",
+    "PlanningLocalTimeError",
     "PlanningMigrationError",
     "PlanningNewerSchemaError",
     "PlanningNotFoundError",
@@ -85,11 +100,18 @@ __all__ = [
     "TelegramActionTokenExpiredError",
     "TelegramActionTokenUnknownError",
     "Project",
+    "ProjectCapabilityMetadata",
     "ProviderMapping",
     "Reminder",
     "SyncConflict",
     "SyncCursor",
     "Task",
+    "TaskCapabilityMetadata",
+    "TaskService",
+    "EventService",
+    "ProjectService",
+    "resolve_local_datetime",
+    "planning_capability_metadata",
     "IssuedTelegramAction",
     "PlanningActionOutcome",
     "PlanningButton",

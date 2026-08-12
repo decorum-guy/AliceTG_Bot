@@ -98,10 +98,11 @@ class FreshnessEnvelopeBuilder:
         self,
         *,
         capabilities: Mapping[str, list[str]],
+        capability_metadata: Mapping[str, Mapping[str, Any]] | None = None,
         storage_status: str,
         correlation_id: str,
     ) -> dict[str, Any]:
-        return {
+        response: dict[str, Any] = {
             "schemaVersion": "planning.v1",
             "kind": "status",
             "apiVersion": "v1",
@@ -110,6 +111,11 @@ class FreshnessEnvelopeBuilder:
             **self.freshness(),
             "correlation_id": correlation_id,
         }
+        if capability_metadata is not None:
+            response["capabilityMetadata"] = {
+                key: dict(value) for key, value in capability_metadata.items()
+            }
+        return response
 
     def error_response(
         self,

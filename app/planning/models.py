@@ -3,11 +3,11 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.planning.errors import PlanningValidationError
+from app.planning.errors import PlanningLocalTimeError, PlanningValidationError
 
 
 AUDIENCES = frozenset({"ha", "panel-agent", "operator"})
@@ -97,6 +97,51 @@ def validate_local_time(value: str, field: str = "time") -> str:
     if not isinstance(value, str) or LOCAL_TIME_PATTERN.fullmatch(value) is None:
         raise PlanningValidationError(f"{field} must be HH:MM or HH:MM:SS")
     return value
+
+
+def resolve_local_datetime(
+    *,
+    local_date: str | date,
+    local_time: str,
+    timezone_name: str,
+    field: str = "local_datetime",
+) -> datetime:
+    """Resolve one local wall-clock value without guessing across DST.
+
+    ``zoneinfo`` accepts both sides of a fall-back transition through its
+    ``fold`` flag and silently normalises spring-forward gaps.  Planning must
+    not choose either side or normalise a nonexistent value, so both folds are
+    round-tripped and exactly one valid instant is required.
+    """
+
+    if isinstance(local_date, date) and not isinstance(local_date, datetime):
+        selected_date = local_date
+    else:
+        selected_date = date.fromisoformat(validate_date(str(local_date), f"{field}.date"))
+    validate_local_time(local_time, f"{field}.time")
+    validate_timezone(timezone_name, f"{field}.timezone")
+    parts = [int(part) for part in local_time.split(":")]
+    selected_time = time(parts[0], parts[1], parts[2] if len(parts) == 3 else 0)
+    naive = datetime.combine(selected_date, selected_time)
+    zone = ZoneInfo(timezone_name)
+    candidates: list[datetime] = []
+    for fold in (0, 1):
+        local = naive.replace(tzinfo=zone, fold=fold)
+        utc_value = local.astimezone(timezone.utc)
+        round_trip = utc_value.astimezone(zone).replace(tzinfo=None)
+        if round_trip == naive and utc_value not in candidates:
+            candidates.append(utc_value)
+    if not candidates:
+        raise PlanningLocalTimeError(
+            "nonexistent_local_time",
+            f"{field} does not exist in {timezone_name} because of a DST transition",
+        )
+    if len(candidates) > 1:
+        raise PlanningLocalTimeError(
+            "ambiguous_local_time",
+            f"{field} is ambiguous in {timezone_name}; an explicit disambiguation is required",
+        )
+    return candidates[0]
 
 
 def validate_text(value: str, field: str, *, max_length: int, allow_empty: bool = False) -> str:
@@ -488,14 +533,23 @@ def validate_task_shape(
         raise PlanningValidationError("task.priority has an invalid enum")
     if status not in TASK_STATUSES:
         raise PlanningValidationError("task.status has an invalid enum")
-    if due_date is not None:
+    if due_date is None:
+        if due_time is not None or timezone_name is not None:
+            raise PlanningValidationError("task due_time/timezone require due_date")
+    elif due_time is None:
         validate_date(due_date, "task.due_date")
-    if due_time is not None:
-        if due_date is None or timezone_name is None:
-            raise PlanningValidationError("task.due_time requires due_date and timezone")
-        validate_local_time(due_time, "task.due_time")
-    if timezone_name is not None:
-        validate_timezone(timezone_name, "task.timezone")
+        if timezone_name is not None:
+            raise PlanningValidationError("date-only task must not contain timezone")
+    else:
+        validate_date(due_date, "task.due_date")
+        if timezone_name is None:
+            raise PlanningValidationError("timed task requires timezone")
+        resolve_local_datetime(
+            local_date=due_date,
+            local_time=due_time,
+            timezone_name=timezone_name,
+            field="task.due",
+        )
     if project_id is not None:
         validate_uuid4(project_id, "task.project_id")
 
