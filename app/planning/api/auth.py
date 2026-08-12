@@ -40,6 +40,9 @@ ROUTE_PERMISSIONS: dict[str, frozenset[str]] = {
     # This is the only A5a write-capable ingress for Home Assistant.  HA does
     # not receive generic Planning domain CRUD access.
     "POST /alice/interpret": frozenset({"ha"}),
+    # Parse preview is a panel-agent-only, read-only computation.  It never
+    # reaches the Alice adapter or a Planning mutation path.
+    "POST /parse": frozenset({"panel-agent"}),
 }
 _SPECIAL_ROUTE_PERMISSIONS = {"__not_found__": frozenset(_AUDIENCE_VALUES)}
 

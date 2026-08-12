@@ -21,6 +21,7 @@ from app.planning.api.schemas import (
     parse_event_patch,
     parse_event_query,
     parse_object_id,
+    parse_parse_preview_request,
     parse_project_query,
     parse_reminder_create,
     parse_reminder_patch,
@@ -40,6 +41,7 @@ from app.planning.errors import (
     PlanningVersionConflictError,
 )
 from app.planning.models import new_uuid4
+from app.planning.parser import PlanningParser
 
 
 LOGGER = logging.getLogger(__name__)
@@ -379,6 +381,21 @@ async def _get_status(request: web.Request, auth: AuthenticatedPlanningContext) 
     return _json_response(payload, correlation_id=correlation_id)
 
 
+async def _parse_preview(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    del auth
+    parser_input = parse_parse_preview_request(await read_json_body(request))
+    # This route deliberately calls the canonical parser directly.  It does
+    # not construct or invoke AliceInterpretationService, repository services,
+    # idempotency, audit, outbox, or provider adapters.
+    parsed = PlanningParser().parse(parser_input)
+    correlation_id = new_uuid4()
+    payload = _service(request).envelopes.parse_preview_response(
+        result=parsed,
+        correlation_id=correlation_id,
+    )
+    return _json_response(payload, correlation_id=correlation_id)
+
+
 async def _alice_interpret(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
     service = request.app.get("planning_alice_service")
     if not isinstance(service, AliceInterpretationService):
@@ -504,6 +521,7 @@ def setup_planning_routes(
     )
     app.router.add_get(f"{PLANNING_PREFIX}/projects", _route(_get_projects, "GET /projects"))
     app.router.add_get(f"{PLANNING_PREFIX}/status", _route(_get_status, "GET /status"))
+    app.router.add_post(f"{PLANNING_PREFIX}/parse", _route(_parse_preview, "POST /parse"))
     if include_alice_route:
         app.router.add_post(
             f"{PLANNING_PREFIX}/alice/interpret",
