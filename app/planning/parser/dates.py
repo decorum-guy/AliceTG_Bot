@@ -6,7 +6,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from app.planning.models import validate_timezone, validate_utc_timestamp
+from app.planning.errors import PlanningLocalTimeError
+from app.planning.models import resolve_local_datetime, validate_timezone, validate_utc_timestamp
 from app.planning.parser.normalize import matching_text
 
 
@@ -354,21 +355,29 @@ def parse_single_clock(text: str) -> ClockSpec | None:
 
 
 def local_datetime_to_utc(local_date: date, clock: ClockSpec, timezone_name: str) -> LocalTimeResult:
-    validate_timezone(timezone_name, "timezone")
-    naive = datetime.combine(local_date, time(hour=clock.minutes // 60, minute=clock.minutes % 60))
-    zone = ZoneInfo(timezone_name)
-    candidates: list[datetime] = []
-    for fold in (0, 1):
-        local = naive.replace(tzinfo=zone, fold=fold)
-        utc_value = local.astimezone(timezone.utc)
-        round_trip = utc_value.astimezone(zone).replace(tzinfo=None)
-        if round_trip == naive and utc_value not in candidates:
-            candidates.append(utc_value)
-    if not candidates:
-        return LocalTimeResult(None, "nonexistent_local_time", "Указанное местное время не существует из-за перехода на летнее время.")
-    if len(candidates) > 1:
-        return LocalTimeResult(None, "ambiguous_local_time", "Указанное местное время встречается дважды; уточните часовой пояс или смещение.")
-    return LocalTimeResult(candidates[0])
+    try:
+        return LocalTimeResult(
+            resolve_local_datetime(
+                local_date=local_date,
+                local_time=clock.value,
+                timezone_name=timezone_name,
+                field="local time",
+            )
+        )
+    except PlanningLocalTimeError as exc:
+        if exc.code == "nonexistent_local_time":
+            return LocalTimeResult(
+                None,
+                exc.code,
+                "Указанное местное время не существует из-за перехода на летнее время.",
+            )
+        if exc.code == "ambiguous_local_time":
+            return LocalTimeResult(
+                None,
+                exc.code,
+                "Указанное местное время встречается дважды; уточните часовой пояс или смещение.",
+            )
+        raise
 
 
 def local_day_bounds(local_date: date, timezone_name: str) -> tuple[str, str]:

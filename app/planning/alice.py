@@ -4,11 +4,12 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from app.planning.errors import PlanningIdempotencyInProgressError
+from app.planning.events import EventService
 from app.planning.models import (
     REMINDER_DELIVERY_JOB_TYPE,
     MutationContext,
@@ -17,6 +18,7 @@ from app.planning.models import (
 )
 from app.planning.parser import Candidate, ParseResult, ParserInput, PlanningParser
 from app.planning.parser.normalize import normalize_for_idempotency
+from app.planning.tasks import TaskService
 from app.planning.repositories import PlanningRepository
 
 if TYPE_CHECKING:
@@ -96,10 +98,6 @@ def _as_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00")
 
 
-def _utc_string(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def _ru_date(value: str) -> str:
     selected = datetime.strptime(value, "%Y-%m-%d").date()
     return f"{selected.day} {RU_MONTHS[selected.month - 1]} {selected.year} года"
@@ -120,6 +118,8 @@ class AliceInterpretationService:
         validate_text(idempotency_secret, "planning.alice_idempotency_secret", max_length=512)
         self.database = database
         self.repository = repository or PlanningRepository(database, now_fn=now_fn or _utc_now)
+        self.task_service = TaskService(database, repository=self.repository, now_fn=now_fn or _utc_now)
+        self.event_service = EventService(database, repository=self.repository, now_fn=now_fn or _utc_now)
         self.parser = parser or PlanningParser()
         self.idempotency_secret = idempotency_secret.encode("utf-8")
 
@@ -201,7 +201,7 @@ class AliceInterpretationService:
                     outbox_payload={},
                 )
             elif candidate.domain == "task":
-                object_value = self.repository.create_task(
+                object_value = self.task_service.create(
                     title=str(fields["title"]),
                     notes=None,
                     due_date=fields.get("due_date"),
@@ -212,7 +212,7 @@ class AliceInterpretationService:
                     context=context,
                 )
             elif candidate.domain == "calendar_event":
-                object_value = self.repository.create_calendar_event(
+                object_value = self.event_service.create(
                     title=str(fields["title"]),
                     all_day=bool(fields["all_day"]),
                     timezone=str(fields["timezone"]),
@@ -256,8 +256,18 @@ class AliceInterpretationService:
         result: dict[str, Any]
         if query == "tasks_today":
             date_value = str(fields["date"])
-            tasks = self.repository.list_tasks(view="today", today=date_value, limit=1001, offset=0)
-            overdue = self.repository.list_tasks(view="overdue", today=date_value, limit=1001, offset=0)
+            tasks = self.task_service.today(
+                reference_time_utc=request.reference_time_utc,
+                caller_timezone=request.timezone,
+                limit=1001,
+                offset=0,
+            )
+            overdue = self.task_service.overdue(
+                reference_time_utc=request.reference_time_utc,
+                caller_timezone=request.timezone,
+                limit=1001,
+                offset=0,
+            )
             result = {
                 "query": query,
                 "date": date_value,
@@ -279,39 +289,13 @@ class AliceInterpretationService:
             }
             speech = self._reminders_speech(reminders, request.timezone)
         elif query == "events_day":
-            from_utc = str(fields["from_utc"])
-            to_utc = str(fields["to_utc"])
-            # The generic repository range is UTC-based, while all-day event
-            # dates are intentionally local calendar dates.  Widen the SQL
-            # read by one UTC day, then apply the exact local-day predicate
-            # here so Moscow (and DST zones) do not lose an all-day event at
-            # the UTC boundary.
-            widened_to_utc = _utc_string(_as_datetime(to_utc) + timedelta(days=1))
-            events = self.repository.list_calendar_events(
-                from_utc=from_utc,
-                to_utc=widened_to_utc,
+            date_value = str(fields["date"])
+            events = self.event_service.query_local_day(
+                local_date=date_value,
+                caller_timezone=request.timezone,
                 limit=1001,
                 offset=0,
             )
-            date_value = str(fields["date"])
-            events = [
-                item
-                for item in events
-                if (
-                    item.all_day
-                    and item.start_date is not None
-                    and item.end_date_exclusive is not None
-                    and item.start_date <= date_value < item.end_date_exclusive
-                )
-                or (
-                    not item.all_day
-                    and item.start_at_utc is not None
-                    and item.end_at_utc is not None
-                    and item.start_at_utc < to_utc
-                    and item.end_at_utc > from_utc
-                )
-            ]
-            events.sort(key=lambda item: (0 if item.all_day else 1, item.start_date or item.start_at_utc or "", item.id))
             result = {
                 "query": query,
                 "date": date_value,

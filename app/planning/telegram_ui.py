@@ -3,14 +3,16 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Callable, Literal
 from zoneinfo import ZoneInfo
 
 from app.messages import planning as planning_messages
+from app.planning.events import EventService
 from app.planning.errors import PlanningNotFoundError, PlanningValidationError
 from app.planning.models import CalendarEvent, MutationContext, Reminder, Task, utc_now, validate_timezone
 from app.planning.repositories import PlanningRepository
+from app.planning.tasks import TaskService
 from app.planning.telegram_actions import (
     TelegramActionToken,
     TelegramActionTokenStore,
@@ -109,6 +111,8 @@ class PlanningTelegramService:
         validate_action_token_ttl(action_token_ttl_seconds)
         self.database = database
         self.repository = repository or PlanningRepository(database, now_fn=now_fn)
+        self.task_service = TaskService(database, repository=self.repository, now_fn=now_fn)
+        self.event_service = EventService(database, repository=self.repository, now_fn=now_fn)
         self.default_timezone = default_timezone
         self._zone = ZoneInfo(default_timezone)
         self._now_fn = now_fn
@@ -218,10 +222,11 @@ class PlanningTelegramService:
         page = _validate_page(page)
         if view not in {"today", "overdue", "upcoming"}:
             raise PlanningValidationError("Planning task view is not allowlisted")
-        today = self._local_date(now).isoformat()
-        tasks = self.repository.list_tasks(
+        now_value = now or self._now_fn()
+        tasks = self.task_service.list_view(
             view=view,
-            today=today,
+            reference_time_utc=now_value,
+            caller_timezone=self.default_timezone,
             limit=PLANNING_PAGE_SIZE + 1,
             offset=page * PLANNING_PAGE_SIZE,
         )
@@ -273,20 +278,28 @@ class PlanningTelegramService:
         page = _validate_page(page)
         if view not in {"today", "tomorrow", "upcoming"}:
             raise PlanningValidationError("Planning event view is not allowlisted")
-        local_start, local_end = self._event_date_range(view, now)
-        from_utc = self._local_midnight_utc(local_start)
-        to_utc = self._local_midnight_utc(local_end)
-        # Fetch a bounded window before applying the caller-timezone sort so a
-        # UTC-order tie around midnight cannot hide a local-day event.
-        events = self.repository.list_calendar_events(
-            from_utc=from_utc,
-            to_utc=to_utc,
-            from_local_date=local_start.isoformat(),
-            to_local_date=local_end.isoformat(),
-            limit=1001,
-            offset=0,
-        )
-        events.sort(key=self._event_sort_key)
+        now_value = now or self._now_fn()
+        if view == "today":
+            events = self.event_service.today(
+                reference_time_utc=now_value,
+                caller_timezone=self.default_timezone,
+                limit=1001,
+                offset=0,
+            )
+        elif view == "tomorrow":
+            events = self.event_service.tomorrow(
+                reference_time_utc=now_value,
+                caller_timezone=self.default_timezone,
+                limit=1001,
+                offset=0,
+            )
+        else:
+            events = self.event_service.upcoming(
+                reference_time_utc=now_value,
+                caller_timezone=self.default_timezone,
+                limit=1001,
+                offset=0,
+            )
         start_index = page * PLANNING_PAGE_SIZE
         visible = events[start_index : start_index + PLANNING_PAGE_SIZE]
         entries = [
@@ -469,38 +482,9 @@ class PlanningTelegramService:
             return f"planning:events:{view}:{page}"
         raise ValueError("invalid Planning navigation target")
 
-    def _local_date(self, now: str | None) -> date:
-        now_value = now or self._now_fn()
-        return self._utc_datetime(now_value).astimezone(self._zone).date()
-
-    def _event_date_range(self, view: str, now: str | None) -> tuple[date, date]:
-        today = self._local_date(now)
-        if view == "today":
-            start = today
-            end = today + timedelta(days=1)
-        elif view == "tomorrow":
-            start = today + timedelta(days=1)
-            end = today + timedelta(days=2)
-        else:
-            start = today + timedelta(days=2)
-            end = today + timedelta(days=367)
-        return start, end
-
-    def _local_midnight_utc(self, value: date) -> str:
-        local = datetime.combine(value, datetime_time.min, tzinfo=self._zone)
-        return local.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
     @staticmethod
     def _utc_datetime(value: str) -> datetime:
         return datetime.fromisoformat(value[:-1] + "+00:00")
-
-    def _event_sort_key(self, event: CalendarEvent) -> tuple[date, int, str, str]:
-        if event.all_day:
-            assert event.start_date is not None
-            return (date.fromisoformat(event.start_date), 0, "", event.id)
-        assert event.start_at_utc is not None
-        start = self._utc_datetime(event.start_at_utc).astimezone(self._zone)
-        return (start.date(), 1, start.time().isoformat(), event.id)
 
 
 def _validate_page(page: int) -> int:
