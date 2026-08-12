@@ -61,12 +61,20 @@ default target; it is an interval, not a user-selected time of day.
 
 ## Online backup format
 
-The source is copied with Python's `sqlite3.Connection.backup()` API. SQLite
-continues to serve reads and writes; A8 never copies the live database file
-with a filesystem `copy` and never pauses the bot for a normal backup. The
-target is a standalone SQLite snapshot, so it does not depend on the source
-WAL file and no source WAL file is packaged or checkpointed for finalization.
-The manifest records this explicit WAL policy.
+The source is copied with Python's `sqlite3.Connection.backup()` API. For the
+persisted file database, A8 opens a dedicated bounded-timeout source
+connection to the configured Planning database path and closes it after the
+snapshot. The live `PlanningDatabase` mutation lock is not held during the
+copy, so normal repository writes can commit while the native snapshot is in
+progress. SQLite WAL coordinates the source snapshot with those writes. The
+`:memory:` test fallback remains serialized because a second connection cannot
+see the same in-memory database.
+
+A8 never copies the live database file with a filesystem `copy` and never
+pauses the bot for a normal backup. The target is a standalone SQLite
+snapshot, so it does not depend on the source WAL file and no source WAL file
+is packaged or checkpointed for finalization. The manifest records this
+explicit WAL policy.
 
 Each package is named like:
 
@@ -147,8 +155,10 @@ temporary copy and reports the aggregate count. Operators must refresh
 Telegram menus after any approved disaster recovery; A8 does not promise that
 pre-restore callbacks remain usable.
 
-The verifier checks the durable reminder/outbox relationship, duplicate logical
-outbox keys, and a due-job count. The deterministic recovery proof additionally
+The verifier checks the durable reminder/outbox relationship only for active
+`pending`/`due` reminders whose undelivered state still expects delivery;
+historical `completed`/`cancelled`/tombstoned reminders do not need a live job.
+It also checks duplicate logical outbox keys and a due-job count. The deterministic recovery proof additionally
 opens a restored copy with a fake Telegram transport and injected clock,
 delivers one due job, reopens the database, and proves a second worker run does
 not send it again.

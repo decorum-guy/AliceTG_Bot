@@ -650,6 +650,7 @@ def _semantic_checks(database: PlanningDatabase, now: str) -> int:
         FROM reminders AS r
         LEFT JOIN outbox AS o ON o.reminder_id = r.id
         WHERE r.deleted_at IS NULL
+          AND r.status IN ('pending', 'due')
           AND r.delivery_state IN ('not_due', 'queued', 'retrying')
           AND o.id IS NULL
         """

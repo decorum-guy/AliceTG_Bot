@@ -15,6 +15,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import patch
 
 from app.planning import MutationContext, PlanningDatabase, PlanningRepository
 from app.planning.backup import (
@@ -30,6 +31,7 @@ from app.planning.backup import (
     _write_package_zip,
 )
 from app.planning.delivery import DeliveryResult
+from app.planning.legacy_import import LegacyReminderImporter
 from app.planning.models import REMINDER_DELIVERY_JOB_TYPE
 from app.planning.scheduler import DurableReminderScheduler
 from app.planning.telegram_actions import TelegramActionTokenStore
@@ -231,7 +233,6 @@ class PlanningBackupA8Tests(unittest.TestCase):
         self.reminder()
         service = self.service()
         previous = service.backup()
-        from unittest.mock import patch
 
         with patch(
             "app.planning.backup._encrypt_file",
@@ -404,6 +405,112 @@ class PlanningBackupA8Tests(unittest.TestCase):
                 manifest = json.loads(archive.read("manifest.json"))
             self.assertEqual(manifest["table_counts"]["idempotency_keys"], 0)
         self.assertEqual(self.verifier().verify(result.package_name).table_counts["idempotency_keys"], 0)
+
+    def test_online_backup_allows_live_repository_commit_before_backup_finishes(self) -> None:
+        self.reminder(title="A8 committed seed")
+        progress_reached = threading.Event()
+        release_backup = threading.Event()
+        backup_finished = threading.Event()
+        backup_errors: list[BaseException] = []
+        result_holder: list[Any] = []
+
+        def progress(_status: int, _remaining: int, _total: int) -> None:
+            if progress_reached.is_set():
+                return
+            progress_reached.set()
+            if not release_backup.wait(5):
+                raise RuntimeError("backup release barrier timed out")
+
+        actual_online_backup = self.database.online_backup
+
+        def controlled_online_backup(destination: sqlite3.Connection) -> None:
+            actual_online_backup(destination, pages=1, sleep=0, progress=progress)
+
+        def backup_worker() -> None:
+            try:
+                result_holder.append(self.service().backup())
+            except BaseException as exc:  # pragma: no cover - assertion below reports unexpected worker failure.
+                backup_errors.append(exc)
+            finally:
+                backup_finished.set()
+
+        with patch.object(self.database, "online_backup", side_effect=controlled_online_backup):
+            thread = threading.Thread(target=backup_worker)
+            thread.start()
+            self.assertTrue(progress_reached.wait(5))
+
+            # This is the real PlanningRepository path, not an independent raw
+            # sqlite connection. It must commit while the backup progress hook
+            # is holding the native snapshot in flight.
+            self.reminder(title="A8 committed during backup")
+            self.assertFalse(backup_finished.is_set())
+
+            release_backup.set()
+            thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(backup_errors, [])
+        self.assertEqual(len(result_holder), 1)
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM reminders").fetchone()[0], 2)
+        self.assertEqual(self.database.integrity_check(), "ok")
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM pragma_foreign_key_check").fetchone()[0], 0)
+
+        package_name = result_holder[0].package_name
+        restored_path = self._extract_database(self.backup_dir / package_name)
+        restored = sqlite3.connect(restored_path)
+        try:
+            self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(restored.execute("SELECT COUNT(*) FROM pragma_foreign_key_check").fetchone()[0], 0)
+            snapshot_counts = (
+                restored.execute("SELECT COUNT(*) FROM reminders").fetchone()[0],
+                restored.execute("SELECT COUNT(*) FROM outbox").fetchone()[0],
+            )
+            self.assertIn(snapshot_counts, {(1, 1), (2, 2)})
+        finally:
+            restored.close()
+        self.assertTrue(self.verifier().verify(package_name).to_dict()["ok"])
+
+    def test_restore_accepts_a2_cancelled_not_due_without_active_outbox(self) -> None:
+        source_document = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "planning_legacy" / "reminders_valid.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cancelled_source = self.root / "cancelled-reminder.json"
+        cancelled_source.write_text(
+            json.dumps(
+                {
+                    "settings": source_document.get("settings", {}),
+                    "reminders": [
+                        reminder
+                        for reminder in source_document["reminders"]
+                        if reminder.get("status") == "cancelled"
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        LegacyReminderImporter(self.database).import_file(cancelled_source)
+        cancelled = self.database.connection.execute(
+            "SELECT status, delivery_state, deleted_at FROM reminders WHERE status = 'cancelled'"
+        ).fetchone()
+        self.assertEqual((cancelled["status"], cancelled["delivery_state"]), ("cancelled", "not_due"))
+        self.assertIsNotNone(cancelled["deleted_at"])
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+
+        package_name = self.service().backup().package_name
+        verified = self.verifier().verify(package_name)
+        self.assertTrue(verified.to_dict()["ok"])
+        self.assertEqual(verified.resumable_due_jobs, 0)
+
+    def test_restore_rejects_active_missing_outbox_relationship(self) -> None:
+        reminder = self.reminder()
+        with self.database.transaction():
+            self.database.connection.execute("DELETE FROM outbox WHERE reminder_id = ?", (reminder.id,))
+
+        package_name = self.service().backup().package_name
+        with self.assertRaisesRegex(PlanningBackupVerificationError, "reminder_outbox_relationship"):
+            self.verifier().verify(package_name)
 
     def test_restore_verifier_invalidates_restored_capabilities_without_touching_original(self) -> None:
         reminder = self.reminder()

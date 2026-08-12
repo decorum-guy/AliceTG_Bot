@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Callable, Iterator, Mapping
 
 from app.planning.errors import PlanningConfigurationError
 
@@ -158,21 +158,62 @@ class PlanningDatabase:
         *,
         pages: int = 1_000,
         sleep: float = 0.01,
+        progress: Callable[[int, int, int], None] | None = None,
     ) -> None:
         """Copy a consistent snapshot using SQLite's online backup API.
 
-        The destination is owned by the caller.  The database lock only
-        serialises this connection with mutations made through this
-        ``PlanningDatabase`` instance; SQLite's backup API also coordinates
-        with writers in other processes through the database's WAL protocol.
+        The destination is owned by the caller.  File-backed databases use a
+        dedicated source connection so the live repository lock is not held
+        while SQLite copies the snapshot.  SQLite's backup API coordinates
+        with writers through the database's WAL protocol.  The in-memory
+        fallback is intentionally serialized because there is no second
+        connection that can see the same SQLite database.
+
+        ``progress`` is the native SQLite backup progress callback.  It is
+        useful for deterministic coordination tests and does not change the
+        snapshot semantics.
         """
 
         if pages <= 0:
             raise ValueError("online backup pages must be positive")
         if sleep < 0:
             raise ValueError("online backup sleep must not be negative")
-        with self._lock:
-            self._connection.backup(destination, pages=pages, sleep=sleep)
+        if self.path == ":memory:":
+            with self._lock:
+                self._connection.backup(destination, pages=pages, sleep=sleep, progress=progress)
+            return
+
+        source = self._open_online_backup_source()
+        try:
+            source.backup(destination, pages=pages, sleep=sleep, progress=progress)
+        finally:
+            source.close()
+
+    def _open_online_backup_source(self) -> sqlite3.Connection:
+        """Open a bounded, dedicated source connection for a file snapshot."""
+
+        source = sqlite3.connect(
+            str(Path(self.path)),
+            timeout=self.config.busy_timeout_ms / 1000,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        try:
+            source.execute(f"PRAGMA busy_timeout = {self.config.busy_timeout_ms}")
+            source.execute("PRAGMA foreign_keys = ON")
+            source.execute("PRAGMA query_only = ON")
+            journal_mode = str(source.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if journal_mode != "wal":
+                raise PlanningConfigurationError("Planning SQLite backup source is not in WAL mode")
+            source.execute("PRAGMA synchronous = NORMAL")
+            source.execute("PRAGMA temp_store = MEMORY")
+            return source
+        except BaseException:
+            try:
+                source.close()
+            except sqlite3.Error:
+                pass
+            raise
 
     @property
     def in_transaction(self) -> bool:

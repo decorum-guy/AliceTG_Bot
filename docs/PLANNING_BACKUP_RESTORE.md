@@ -28,7 +28,9 @@ python -m app.planning.backup backup
 ```
 
 The command uses SQLite's native online backup API, so normal Planning reads
-and writes continue. It writes a standalone encrypted AES-256-GCM package
+and writes continue. File-backed snapshots use a dedicated source connection
+to the configured Planning database, not the live repository connection or
+its mutation lock. It writes a standalone encrypted AES-256-GCM package
 atomically. It does not copy a live database file, package a source WAL, pause
 the bot, or include application/private ephemeral files.
 
@@ -54,9 +56,12 @@ python -m app.planning.backup verify planning-<timestamp>-schema4-<id>.sqlite3.a
 Verification decrypts into a temporary isolated directory, checks the
 authenticated package, exact members, manifest SHA/size, schema compatibility,
 aggregate counts, SQLite `integrity_check`, `foreign_key_check`, and bounded
-Planning semantic invariants. Older supported schemas may be migrated only in
-that temporary copy. A newer schema fails closed. The encrypted source package
-and live database are not changed.
+Planning semantic invariants. The reminder/outbox relationship is required
+only for active `pending`/`due` reminders with undelivered work; historical
+terminal `cancelled`/`completed` reminders do not require an active delivery
+job. Older supported schemas may be migrated only in that temporary copy. A
+newer schema fails closed. The encrypted source package and live database are
+not changed.
 
 The verifier uses no Telegram or Home Assistant transport. It invalidates
 unconsumed action capabilities only in the temporary restored copy and reports
