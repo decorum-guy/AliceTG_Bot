@@ -442,6 +442,7 @@ def setup_planning_routes(
             database,
             default_timezone=str(getattr(settings, "planning_default_timezone", "Europe/Moscow")),
             stale_after_seconds=int(getattr(settings, "planning_api_stale_after_seconds", 300)),
+            health_service=app.get("planning_health_service"),
         )
         app["planning_api_service"] = service
     app["planning_authenticator"] = PlanningAuthenticator.from_settings(

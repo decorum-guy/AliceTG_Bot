@@ -68,6 +68,18 @@ from app.planning.telegram_ui import (
     PlanningTelegramRateLimited,
     PlanningView,
 )
+from app.planning.backup import (
+    BackupListEntry,
+    BackupResult,
+    PlanningBackupConfigurationError,
+    PlanningBackupError,
+    PlanningBackupService,
+    PlanningBackupVerificationError,
+    PlanningBackupVerifier,
+    RestoreVerificationResult,
+)
+from app.planning.health import PlanningHealthService, PlanningIncident
+from app.planning.operations import PlanningOperationsState, PlanningOperationsStateStore
 
 __all__ = [
     "AuditWriter",
@@ -118,6 +130,18 @@ __all__ = [
     "PlanningTelegramRateLimited",
     "PlanningTelegramService",
     "PlanningView",
+    "BackupListEntry",
+    "BackupResult",
+    "PlanningBackupConfigurationError",
+    "PlanningBackupError",
+    "PlanningBackupService",
+    "PlanningBackupVerificationError",
+    "PlanningBackupVerifier",
+    "RestoreVerificationResult",
+    "PlanningHealthService",
+    "PlanningIncident",
+    "PlanningOperationsState",
+    "PlanningOperationsStateStore",
     "TelegramActionToken",
     "TelegramActionTokenStore",
     "TelegramMutationRateLimiter",

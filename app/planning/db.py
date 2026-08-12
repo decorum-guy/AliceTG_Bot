@@ -112,22 +112,28 @@ class PlanningDatabase:
                 isolation_level=None,
                 check_same_thread=False,
             )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(f"PRAGMA busy_timeout = {self.config.busy_timeout_ms}")
-        journal_mode = self._enable_wal(connection)
-        if self.path != ":memory:" and journal_mode != "wal":
-            connection.close()
-            raise PlanningConfigurationError("Planning SQLite database did not enable WAL mode")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA temp_store = MEMORY")
-        if self.path != ":memory:":
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(f"PRAGMA busy_timeout = {self.config.busy_timeout_ms}")
+            journal_mode = self._enable_wal(connection)
+            if self.path != ":memory:" and journal_mode != "wal":
+                raise PlanningConfigurationError("Planning SQLite database did not enable WAL mode")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            if self.path != ":memory:":
+                try:
+                    Path(self.path).chmod(0o600)
+                except OSError:
+                    # Permission hardening is best effort on filesystems that do not expose chmod.
+                    pass
+            return connection
+        except BaseException:
             try:
-                Path(self.path).chmod(0o600)
-            except OSError:
-                # Permission hardening is best effort on filesystems that do not expose chmod.
+                connection.close()
+            except sqlite3.Error:
                 pass
-        return connection
+            raise
 
     @staticmethod
     def _enable_wal(connection: sqlite3.Connection) -> str:
@@ -139,13 +145,34 @@ class PlanningDatabase:
                 return str(connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
-                    connection.close()
                     raise
                 time.sleep(0.01)
 
     @property
     def connection(self) -> sqlite3.Connection:
         return self._connection
+
+    def online_backup(
+        self,
+        destination: sqlite3.Connection,
+        *,
+        pages: int = 1_000,
+        sleep: float = 0.01,
+    ) -> None:
+        """Copy a consistent snapshot using SQLite's online backup API.
+
+        The destination is owned by the caller.  The database lock only
+        serialises this connection with mutations made through this
+        ``PlanningDatabase`` instance; SQLite's backup API also coordinates
+        with writers in other processes through the database's WAL protocol.
+        """
+
+        if pages <= 0:
+            raise ValueError("online backup pages must be positive")
+        if sleep < 0:
+            raise ValueError("online backup sleep must not be negative")
+        with self._lock:
+            self._connection.backup(destination, pages=pages, sleep=sleep)
 
     @property
     def in_transaction(self) -> bool:
