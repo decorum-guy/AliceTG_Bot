@@ -63,6 +63,15 @@ class SchedulerRun:
 
 
 @dataclass(frozen=True)
+class SchedulerHeartbeat:
+    """In-process observation of the real durable scheduler loop."""
+
+    heartbeat_at: str | None
+    last_iteration_finished_at: str | None
+    last_iteration_succeeded: bool | None
+
+
+@dataclass(frozen=True)
 class ChannelAttemptOutcome:
     result: DeliveryResult
     attempt: DeliveryAttempt
@@ -130,6 +139,9 @@ class DurableReminderScheduler:
         self._after_provider_send = after_provider_send
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._heartbeat_at: str | None = None
+        self._last_iteration_finished_at: str | None = None
+        self._last_iteration_succeeded: bool | None = None
 
     @property
     def worker_id(self) -> str:
@@ -138,6 +150,14 @@ class DurableReminderScheduler:
     @property
     def repository(self) -> PlanningRepository:
         return self._repository
+
+    @property
+    def heartbeat(self) -> SchedulerHeartbeat:
+        return SchedulerHeartbeat(
+            heartbeat_at=self._heartbeat_at,
+            last_iteration_finished_at=self._last_iteration_finished_at,
+            last_iteration_succeeded=self._last_iteration_succeeded,
+        )
 
     async def startup(self, now: str | datetime | None = None) -> SchedulerRun:
         """Reconcile and process overdue work immediately on startup."""
@@ -161,12 +181,18 @@ class DurableReminderScheduler:
 
     async def run_forever(self) -> None:
         while not self._stop_event.is_set():
+            self._heartbeat_at = utc_now()
+            self._last_iteration_succeeded = None
             try:
                 await self.run_once()
+                self._last_iteration_succeeded = True
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._last_iteration_succeeded = False
                 LOGGER.exception("Durable reminder scheduler iteration failed")
+            finally:
+                self._last_iteration_finished_at = utc_now()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval_seconds)
             except asyncio.TimeoutError:

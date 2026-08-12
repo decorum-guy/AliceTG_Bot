@@ -57,12 +57,14 @@ class PlanningApiService:
         now_fn: Callable[[], str] = utc_now,
         default_timezone: str = "Europe/Moscow",
         stale_after_seconds: int = 300,
+        health_service: Any | None = None,
     ) -> None:
         validate_timezone(default_timezone, "planning.default_timezone")
         self.database = database
         self.repository = repository or PlanningRepository(database, now_fn=now_fn)
         self.envelopes = FreshnessEnvelopeBuilder(now_fn=now_fn, stale_after_seconds=stale_after_seconds)
         self.default_timezone = default_timezone
+        self.health_service = health_service
         self.task_service = TaskService(database, repository=self.repository, now_fn=now_fn)
         self.event_service = EventService(database, repository=self.repository, now_fn=now_fn)
         self.project_service = ProjectService(database, repository=self.repository, now_fn=now_fn)
@@ -167,12 +169,15 @@ class PlanningApiService:
             self.database.connection.execute("SELECT 1").fetchone()
         except Exception:
             storage_status = "unavailable"
-        return self.envelopes.status_response(
+        response = self.envelopes.status_response(
             capabilities=capabilities_for_audience(audience),
             capability_metadata=planning_capability_metadata().to_dict(),
             storage_status=storage_status,
             correlation_id=correlation_id,
         )
+        if self.health_service is not None:
+            response["planningHealth"] = self.health_service.snapshot(correlation_id=correlation_id)
+        return response
 
     def create_reminder(
         self,

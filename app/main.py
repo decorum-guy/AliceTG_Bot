@@ -13,8 +13,10 @@ from aiohttp import web
 from app.config import Settings
 from app.handlers import admin_modes, coffee, common, planning, reminders, start, tea, water
 from app.planning.legacy_import import build_reminder_store
+from app.planning.backup import PlanningBackupError, PlanningBackupService
 from app.planning.delivery import HomeAssistantMobileTransport, TelegramDeliveryTransport
-from app.planning.db import PlanningDatabase
+from app.planning.db import PlanningDatabase, PlanningDatabaseConfig
+from app.planning.health import PlanningHealthService
 from app.planning.scheduler import DurableReminderScheduler, validate_scheduler_modes
 from app.planning.telegram_ui import PlanningTelegramService
 from app.services.admin_modes import AdminModeManager
@@ -102,10 +104,19 @@ async def create_app() -> web.Application:
         planning_db_path=settings.planning_db_path,
         cutover_enabled=settings.planning_reminder_cutover_enabled,
     )
-    if (settings.planning_api_enabled or settings.planning_alice_interpret_enabled) and planning_database is None:
+    if (
+        settings.planning_api_enabled
+        or settings.planning_alice_interpret_enabled
+        or settings.planning_backup_enabled
+    ) and planning_database is None:
         # A4/A5a have their own disabled-by-default API gates.  Opening the
         # Planning database here does not enable the A2 cutover or A3 worker.
-        planning_database = PlanningDatabase(settings.planning_db_path)
+        planning_database = PlanningDatabase(
+            config=PlanningDatabaseConfig(
+                path=settings.planning_db_path,
+                environment=settings.planning_environment,
+            )
+        )
     planning_telegram_service: PlanningTelegramService | None = None
     if settings.planning_telegram_ui_enabled:
         if planning_database is None:
@@ -136,6 +147,42 @@ async def create_app() -> web.Application:
             batch_size=settings.planning_scheduler_batch_size,
             jitter_bound_seconds=settings.planning_scheduler_jitter_seconds,
         )
+    planning_backup_service: PlanningBackupService | None = None
+    if settings.planning_backup_enabled and planning_database is not None:
+        try:
+            planning_backup_service = PlanningBackupService(
+                planning_database,
+                backup_dir=settings.planning_backup_dir,
+                encryption_key=settings.planning_backup_encryption_key,
+                retention_count=settings.planning_backup_retention_count,
+                application_version=settings.app_version,
+                application_commit=settings.app_commit,
+                environment=settings.planning_environment,
+            )
+        except PlanningBackupError as exc:
+            LOGGER.error(
+                "Planning backup subsystem unavailable: code=%s category=%s",
+                exc.code,
+                exc.category,
+            )
+    planning_health_service = PlanningHealthService(
+        planning_database,
+        scheduler=durable_reminder_scheduler,
+        scheduler_enabled=settings.planning_durable_scheduler_enabled,
+        scheduler_heartbeat_stale_after_seconds=max(
+            15.0,
+            settings.planning_scheduler_poll_interval_seconds * 3
+            + settings.planning_scheduler_jitter_seconds
+            + 5.0,
+        ),
+        backup_dir=settings.planning_backup_dir,
+        backup_enabled=settings.planning_backup_enabled,
+        backup_service_ready=planning_backup_service is not None,
+        backup_interval_seconds=settings.planning_backup_interval_seconds,
+        application_version=settings.app_version,
+        application_commit=settings.app_commit,
+        state_store=planning_backup_service.state_store if planning_backup_service is not None else None,
+    )
     reminder_workflow = ReminderWorkflow(
         reminder_store,
         telegram_messages,
@@ -206,6 +253,8 @@ async def create_app() -> web.Application:
     app["planning_database"] = planning_database
     app["planning_telegram_service"] = planning_telegram_service
     app["durable_reminder_scheduler"] = durable_reminder_scheduler
+    app["planning_backup_service"] = planning_backup_service
+    app["planning_health_service"] = planning_health_service
     app["coffee_alert_scheduler"] = coffee_alert_scheduler
     app["pushward_coffee_activity"] = pushward_coffee_activity
     app["pushward_coffee_widget"] = pushward_coffee_widget

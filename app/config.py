@@ -84,6 +84,12 @@ class Settings:
     planning_scheduler_lease_seconds: int = 60
     planning_scheduler_batch_size: int = 10
     planning_scheduler_jitter_seconds: float = 5.0
+    planning_environment: str = "development"
+    planning_backup_enabled: bool = False
+    planning_backup_dir: str = "/app/data/backups/planning"
+    planning_backup_encryption_key: str = ""
+    planning_backup_retention_count: int = 14
+    planning_backup_interval_seconds: int = 86_400
     pushward_coffee_activity_enabled: bool = False
     pushward_coffee_activity_slug: str = "ha-coffee-machine"
     pushward_error_log_path: str = "/app/data/pushward_errors.log"
@@ -129,6 +135,29 @@ class Settings:
         planning_jitter_seconds = float(os.getenv("PLANNING_SCHEDULER_JITTER_SECONDS", "5"))
         if planning_lease_seconds <= 0 or planning_batch_size <= 0 or planning_jitter_seconds < 0:
             raise RuntimeError("Planning scheduler lease, batch size and jitter must be valid positive values")
+        planning_environment = (
+            os.getenv("PLANNING_ENV")
+            or os.getenv("APP_ENV")
+            or os.getenv("ENVIRONMENT")
+            or "development"
+        ).strip() or "development"
+        planning_backup_enabled = _bool_env("PLANNING_BACKUP_ENABLED", False)
+        planning_backup_dir = os.getenv(
+            "PLANNING_BACKUP_DIR",
+            "/app/data/backups/planning",
+        ).strip() or "/app/data/backups/planning"
+        planning_backup_encryption_key = os.getenv("PLANNING_BACKUP_ENCRYPTION_KEY", "").strip()
+        planning_backup_retention_count = int(os.getenv("PLANNING_BACKUP_RETENTION_COUNT", "14"))
+        planning_backup_interval_seconds = int(os.getenv("PLANNING_BACKUP_INTERVAL_SECONDS", "86400"))
+        if not 1 <= planning_backup_retention_count <= 365:
+            raise RuntimeError("PLANNING_BACKUP_RETENTION_COUNT must be between 1 and 365")
+        if planning_backup_interval_seconds < 300:
+            raise RuntimeError("PLANNING_BACKUP_INTERVAL_SECONDS must be at least 300 seconds")
+        if planning_backup_enabled and planning_environment.strip().lower() in {"production", "prod"}:
+            if not os.path.isabs(planning_backup_dir) or _is_ephemeral_path(planning_backup_dir):
+                raise RuntimeError(
+                    "production Planning backups require an absolute persisted PLANNING_BACKUP_DIR"
+                )
         planning_api_enabled = _bool_env("PLANNING_API_ENABLED", False)
         planning_ha_secret = os.getenv("PLANNING_HA_SECRET", "").strip()
         planning_panel_agent_secret = os.getenv("PLANNING_PANEL_AGENT_SECRET", "").strip()
@@ -147,6 +176,17 @@ class Settings:
         planning_telegram_callback_rate_limit = int(
             os.getenv("PLANNING_TELEGRAM_CALLBACK_RATE_LIMIT_PER_MINUTE", "30")
         )
+        telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        internal_webhook_secret = os.getenv("INTERNAL_WEBHOOK_SECRET", "").strip()
+        if planning_backup_encryption_key and planning_backup_encryption_key in {
+            telegram_bot_token,
+            internal_webhook_secret,
+            planning_ha_secret,
+            planning_panel_agent_secret,
+            planning_operator_secret,
+            planning_alice_idempotency_secret,
+        }:
+            raise RuntimeError("PLANNING_BACKUP_ENCRYPTION_KEY must be a dedicated secret")
         if not 60 <= planning_telegram_action_token_ttl_seconds <= 3600:
             raise RuntimeError(
                 "PLANNING_TELEGRAM_ACTION_TOKEN_TTL_SECONDS must be between 60 and 3600"
@@ -230,6 +270,12 @@ class Settings:
             planning_scheduler_lease_seconds=planning_lease_seconds,
             planning_scheduler_batch_size=planning_batch_size,
             planning_scheduler_jitter_seconds=planning_jitter_seconds,
+            planning_environment=planning_environment,
+            planning_backup_enabled=planning_backup_enabled,
+            planning_backup_dir=planning_backup_dir,
+            planning_backup_encryption_key=planning_backup_encryption_key,
+            planning_backup_retention_count=planning_backup_retention_count,
+            planning_backup_interval_seconds=planning_backup_interval_seconds,
             pushward_coffee_activity_enabled=_bool_env("PUSHWARD_COFFEE_ACTIVITY_ENABLED", False),
             pushward_coffee_activity_slug=os.getenv("PUSHWARD_COFFEE_ACTIVITY_SLUG", "ha-coffee-machine").strip()
             or "ha-coffee-machine",
@@ -290,3 +336,17 @@ def _ha_mobile_notify_services_from_env() -> tuple[str, ...]:
         return services
     fallback = os.getenv("HA_MOBILE_NOTIFY_SERVICE", "").strip()
     return (fallback,) if fallback else ()
+
+
+def _is_ephemeral_path(value: str) -> bool:
+    path = os.path.realpath(value)
+    prefixes = (
+        "/tmp/",
+        "/private/tmp/",
+        "/var/tmp/",
+        "/private/var/folders/",
+        "/dev/shm/",
+    )
+    return path in {"/tmp", "/private/tmp", "/var/tmp", "/dev/shm"} or any(
+        path.startswith(prefix) for prefix in prefixes
+    )
