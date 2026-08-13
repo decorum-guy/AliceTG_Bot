@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping
 
 from app.planning.api.auth import AuthenticatedPlanningContext
 from app.planning.models import validate_utc_timestamp, utc_now
+from app.planning.parser import ParseResult
 
 
 def _normalise_now(value: str | datetime) -> str:
@@ -141,5 +142,22 @@ class FreshnessEnvelopeBuilder:
             },
             **self.freshness(),
             "actor": dict(selected_actor),
+            "correlation_id": correlation_id,
+        }
+
+    @staticmethod
+    def parse_preview_response(*, result: ParseResult, correlation_id: str) -> dict[str, Any]:
+        """Return the strict, non-mutating parser preview envelope."""
+
+        candidate = result.candidate
+        return {
+            "schemaVersion": "planning.v1",
+            "kind": "parse_preview",
+            "candidate": None if candidate is None else candidate.to_dict(),
+            "confidence": result.confidence,
+            "ambiguities": [item.to_dict() for item in result.ambiguities],
+            "requires_confirmation": result.requires_confirmation,
+            "normalized_text": result.normalized_text,
+            "error_code": result.error_code,
             "correlation_id": correlation_id,
         }

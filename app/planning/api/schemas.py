@@ -20,6 +20,7 @@ from app.planning.models import (
     validate_uuid4,
     validate_task_shape,
 )
+from app.planning.parser import ParserInput
 
 
 MAX_BODY_BYTES = 64 * 1024
@@ -514,6 +515,30 @@ def parse_alice_interpret_request(body: Mapping[str, Any]) -> AliceInterpretRequ
         timezone=_required_timezone(_required(body, "timezone"), "timezone"),
         locale=locale,
         correlation_id=_optional_text(body.get("correlation_id"), "correlation_id", max_length=256),
+    )
+
+
+def parse_parse_preview_request(body: Mapping[str, Any]) -> ParserInput:
+    """Parse the fixed, surface-neutral Planning parser preview input."""
+
+    body = _require_object(body)
+    _assert_keys(
+        body,
+        {"text", "reference_time_utc", "timezone", "locale"},
+        context="Planning parse preview",
+    )
+    _assert_not_server_owned(body)
+    locale = _required_text(body.get("locale", "ru-RU"), "locale", max_length=16)
+    if locale != "ru-RU":
+        raise _validation("Planning parse preview supports only locale ru-RU.")
+    return ParserInput(
+        utterance=_required_text(_required(body, "text"), "text", max_length=2000),
+        reference_time_utc=_required_timestamp(
+            _required(body, "reference_time_utc"),
+            "reference_time_utc",
+        ),
+        timezone=_required_timezone(_required(body, "timezone"), "timezone"),
+        locale=locale,
     )
 
 
