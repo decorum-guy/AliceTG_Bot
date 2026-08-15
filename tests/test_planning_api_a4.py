@@ -129,6 +129,52 @@ class PlanningApiA4Tests(unittest.IsolatedAsyncioTestCase):
         )
         return response, await response.json()
 
+    async def _create_event(self, *, key: str, body: dict[str, object]) -> tuple[object, dict]:
+        response = await self._request(
+            "POST",
+            f"{PLANNING_PREFIX}/events",
+            headers={"Idempotency-Key": key},
+            json_body=body,
+        )
+        return response, await response.json()
+
+    def _planning_state_snapshot(self) -> dict[str, list[tuple[object, ...]]]:
+        tables = (
+            "calendar_events",
+            "audit_events",
+            "idempotency_keys",
+            "outbox",
+            "provider_mappings",
+            "sync_cursors",
+            "sync_conflicts",
+        )
+        return {
+            table: [
+                tuple(row)
+                for row in self.database.connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            ]
+            for table in tables
+        }
+
+    def _seed_external_event(self):
+        return self.service.repository.create_calendar_event(
+            title="Provider-owned event",
+            all_day=False,
+            timezone="Europe/Moscow",
+            start_at_utc="2026-08-15T09:00:00Z",
+            end_at_utc="2026-08-15T10:00:00Z",
+            sync_state="synced",
+            provider_id="provider-event-1",
+            provider_calendar_id="provider-calendar-1",
+            source_ref="provider:event:1",
+            context=MutationContext(
+                audience="operator",
+                actor_id="provider-fixture",
+                actor_type="operator",
+                surface="operator",
+            ),
+        )
+
     async def test_authentication_and_audience_matrix(self) -> None:
         missing = await self.client.get(f"{PLANNING_PREFIX}/status")
         self.assertEqual(missing.status, 401)
@@ -722,6 +768,244 @@ class PlanningApiA4Tests(unittest.IsolatedAsyncioTestCase):
 
         listed = await self._request("GET", f"{PLANNING_PREFIX}/tasks?view=today")
         self.assertEqual(listed.status, 200)
+
+    async def test_event_read_by_id_is_canonical_read_only_and_audience_scoped(self) -> None:
+        _, timed = await self._create_event(
+            key="read-event-timed",
+            body={
+                "title": "Read timed",
+                "notes": "Timed notes",
+                "location": "Timed location",
+                "all_day": False,
+                "timezone": "Europe/Moscow",
+                "start_at_utc": "2026-08-14T09:00:00Z",
+                "end_at_utc": "2026-08-14T10:00:00Z",
+            },
+        )
+        _, all_day = await self._create_event(
+            key="read-event-all-day",
+            body={
+                "title": "Read all day",
+                "all_day": True,
+                "timezone": "Europe/Moscow",
+                "start_date": "2026-08-14",
+                "end_date_exclusive": "2026-08-16",
+            },
+        )
+        _, deleted = await self._create_event(
+            key="read-event-deleted",
+            body={
+                "title": "Read deleted",
+                "all_day": True,
+                "timezone": "Europe/Moscow",
+                "start_date": "2026-08-17",
+                "end_date_exclusive": "2026-08-18",
+            },
+        )
+        deleted_response = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/events/{deleted['object']['id']}",
+            headers={"Idempotency-Key": "read-event-delete", "If-Match": "1"},
+        )
+        deleted_payload = await deleted_response.json()
+        self.assertEqual(deleted_response.status, 200)
+        self.assertEqual(deleted_payload["object"]["version"], 2)
+        external_event = self._seed_external_event()
+        before_reads = self._planning_state_snapshot()
+
+        with patch.object(self.service.event_service, "get", wraps=self.service.event_service.get) as get_event:
+            panel = await self._request("GET", f"{PLANNING_PREFIX}/events/{timed['object']['id']}")
+        panel_payload = await panel.json()
+        self.assertEqual(panel.status, 200)
+        self.assertEqual(panel.headers["Cache-Control"], "no-store")
+        self.assertEqual(panel_payload["schemaVersion"], "planning.v1")
+        self.assertEqual(panel_payload["kind"], "object")
+        self.assertEqual(panel_payload["domain"], "calendar_event")
+        self.assertEqual(panel_payload["object"], timed["object"])
+        self.assertEqual(get_event.call_args.args, (timed["object"]["id"],))
+        self.assertEqual(
+            {
+                key: panel_payload["object"][key]
+                for key in ("all_day", "timezone", "start_at_utc", "end_at_utc", "start_date", "end_date_exclusive")
+            },
+            {
+                "all_day": False,
+                "timezone": "Europe/Moscow",
+                "start_at_utc": "2026-08-14T09:00:00Z",
+                "end_at_utc": "2026-08-14T10:00:00Z",
+                "start_date": None,
+                "end_date_exclusive": None,
+            },
+        )
+
+        operator = await self._request(
+            "GET",
+            f"{PLANNING_PREFIX}/events/{all_day['object']['id']}",
+            audience="operator",
+            secret=OPERATOR_SECRET,
+        )
+        operator_payload = await operator.json()
+        self.assertEqual(operator.status, 200)
+        self.assertEqual(operator_payload["object"], all_day["object"])
+        self.assertEqual(
+            {
+                key: operator_payload["object"][key]
+                for key in ("all_day", "timezone", "start_at_utc", "end_at_utc", "start_date", "end_date_exclusive")
+            },
+            {
+                "all_day": True,
+                "timezone": "Europe/Moscow",
+                "start_at_utc": None,
+                "end_at_utc": None,
+                "start_date": "2026-08-14",
+                "end_date_exclusive": "2026-08-16",
+            },
+        )
+
+        deleted_read = await self._request("GET", f"{PLANNING_PREFIX}/events/{deleted['object']['id']}")
+        deleted_read_payload = await deleted_read.json()
+        self.assertEqual(deleted_read.status, 200)
+        self.assertEqual(deleted_read_payload["object"], deleted_payload["object"])
+        self.assertIsNotNone(deleted_read_payload["object"]["deleted_at"])
+        self.assertEqual(deleted_read_payload["object"]["version"], 2)
+
+        external_id = external_event.id
+        external_read = await self._request("GET", f"{PLANNING_PREFIX}/events/{external_id}")
+        external_payload = await external_read.json()
+        self.assertEqual(external_read.status, 200)
+        self.assertEqual(external_payload["object"]["id"], external_id)
+        self.assertEqual(external_payload["object"]["sync_state"], "synced")
+        self.assertEqual(external_payload["object"]["provider_id"], "provider-event-1")
+        self.assertEqual(external_payload["object"]["provider_calendar_id"], "provider-calendar-1")
+        self.assertEqual(external_payload["object"]["version"], 1)
+
+        ha = await self._request(
+            "GET",
+            f"{PLANNING_PREFIX}/events/{timed['object']['id']}",
+            audience="ha",
+            secret=HA_SECRET,
+        )
+        self.assertEqual(ha.status, 403)
+        self.assertEqual((await ha.json())["error"]["code"], "audience_forbidden")
+
+        with_query = await self._request("GET", f"{PLANNING_PREFIX}/events/{timed['object']['id']}?view=today")
+        self.assertEqual(with_query.status, 400)
+        self.assertEqual((await with_query.json())["error"]["code"], "validation_error")
+
+        missing_id = str(uuid.uuid4())
+        missing = await self._request("GET", f"{PLANNING_PREFIX}/events/{missing_id}")
+        self.assertEqual(missing.status, 404)
+        self.assertEqual((await missing.json())["error"]["code"], "not_found")
+        malformed = await self._request("GET", f"{PLANNING_PREFIX}/events/not-a-uuid")
+        self.assertEqual(malformed.status, 400)
+        self.assertEqual((await malformed.json())["error"]["code"], "validation_error")
+        self.assertEqual(self._planning_state_snapshot(), before_reads)
+
+    async def test_event_mutations_are_local_only_and_fail_closed_without_writes(self) -> None:
+        _, local = await self._create_event(
+            key="local-event-safety",
+            body={
+                "title": "Local event",
+                "all_day": False,
+                "timezone": "Europe/Moscow",
+                "start_at_utc": "2026-08-15T11:00:00Z",
+                "end_at_utc": "2026-08-15T12:00:00Z",
+            },
+        )
+        self.assertEqual(
+            (local["object"]["sync_state"], local["object"]["provider_id"], local["object"]["provider_calendar_id"]),
+            ("local_only", None, None),
+        )
+        patched = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers={"Idempotency-Key": "local-event-patch", "If-Match": "1"},
+            json_body={"title": "Patched local event"},
+        )
+        patched_payload = await patched.json()
+        self.assertEqual(patched.status, 200)
+        self.assertEqual(patched_payload["object"]["title"], "Patched local event")
+        self.assertEqual(patched_payload["object"]["version"], 2)
+        self.assertEqual(patched_payload["object"]["provider_id"], None)
+        self.assertEqual(patched_payload["object"]["provider_calendar_id"], None)
+        deleted = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers={"Idempotency-Key": "local-event-delete", "If-Match": "2"},
+        )
+        deleted_payload = await deleted.json()
+        self.assertEqual(deleted.status, 200)
+        self.assertIsNotNone(deleted_payload["object"]["deleted_at"])
+        self.assertEqual(deleted_payload["object"]["version"], 3)
+
+        external = self._seed_external_event()
+        before_rejection = self._planning_state_snapshot()
+        rejected_patch = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/events/{external.id}",
+            headers={"Idempotency-Key": "external-event-patch", "If-Match": "1"},
+            json_body={"title": "must not change"},
+        )
+        rejected_patch_payload = await rejected_patch.json()
+        self.assertEqual(rejected_patch.status, 409)
+        self.assertEqual(rejected_patch_payload["error"]["code"], "event_not_local_only")
+        after_patch_rejection = self.service.repository.get_calendar_event(external.id)
+        self.assertEqual(after_patch_rejection.to_dict(), external.to_dict())
+        self.assertEqual(self._planning_state_snapshot(), before_rejection)
+
+        rejected_delete = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/events/{external.id}",
+            headers={"Idempotency-Key": "external-event-delete", "If-Match": "1"},
+        )
+        rejected_delete_payload = await rejected_delete.json()
+        self.assertEqual(rejected_delete.status, 409)
+        self.assertEqual(rejected_delete_payload["error"]["code"], "event_not_local_only")
+        after_delete_rejection = self.service.repository.get_calendar_event(external.id)
+        self.assertEqual(after_delete_rejection.deleted_at, None)
+        self.assertEqual(after_delete_rejection.version, 1)
+        self.assertEqual(after_delete_rejection.provider_id, "provider-event-1")
+        self.assertEqual(after_delete_rejection.provider_calendar_id, "provider-calendar-1")
+        self.assertEqual(self._planning_state_snapshot(), before_rejection)
+
+    async def test_event_idempotency_replay_cannot_bypass_local_only_guard(self) -> None:
+        _, local = await self._create_event(
+            key="replay-guard-event",
+            body={
+                "title": "Replay guard",
+                "all_day": True,
+                "timezone": "Europe/Moscow",
+                "start_date": "2026-08-19",
+                "end_date_exclusive": "2026-08-20",
+            },
+        )
+        first_patch = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers={"Idempotency-Key": "replay-guard-patch", "If-Match": "1"},
+            json_body={"title": "First patch"},
+        )
+        self.assertEqual(first_patch.status, 200)
+        with self.database.transaction():
+            self.database.connection.execute(
+                """
+                UPDATE calendar_events
+                SET sync_state = 'synced', provider_id = ?, provider_calendar_id = ?
+                WHERE id = ?
+                """,
+                ("provider-after-first-write", "calendar-after-first-write", local["object"]["id"]),
+            )
+        before_replay = self._planning_state_snapshot()
+        replay = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers={"Idempotency-Key": "replay-guard-patch", "If-Match": "1"},
+            json_body={"title": "First patch"},
+        )
+        replay_payload = await replay.json()
+        self.assertEqual(replay.status, 409)
+        self.assertEqual(replay_payload["error"]["code"], "event_not_local_only")
+        self.assertEqual(self._planning_state_snapshot(), before_replay)
 
     async def test_projects_are_read_only_and_project_filter_is_bounded(self) -> None:
         project = self.service.repository.create_project(

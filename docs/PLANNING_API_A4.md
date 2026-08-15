@@ -24,6 +24,7 @@ POST   /tasks/{id}/complete
 DELETE /tasks/{id}
 
 GET    /events?from=&to=&limit=&offset=
+GET    /events/{id}
 POST   /events
 PATCH  /events/{id}
 DELETE /events/{id}
@@ -60,6 +61,7 @@ own, and a body `audience` field is rejected.
 | --- | --- | --- | --- |
 | Read reminders/tasks/events/projects/status | yes | yes | yes |
 | Read task by ID (canonical mutation readback) | no | yes | yes |
+| Read event by ID (canonical reconciliation readback) | no | yes | yes |
 | Reminder create/edit/complete/cancel | no | yes | yes |
 | Task create/edit/complete/archive | no | yes | yes |
 | Local event create/edit/delete | no | yes | yes |
@@ -141,6 +143,21 @@ trusted panel-agent and operator clients. It uses the task service's
 canonical object lookup and returns open, completed, archived, dated, or
 undated tasks without changing storage, lifecycle, audit, idempotency, or
 outbox state. It accepts no query parameters.
+
+`GET /events/{id}` is the corresponding bounded canonical event readback for
+trusted panel-agent and operator clients. It uses `EventService.get`, returns
+active, tombstoned, local-only, or provider-owned canonical events without
+normalizing away provider identity, and accepts no query parameters. It has
+`Cache-Control: no-store` and has no write side effects.
+
+Event PATCH and DELETE are local-only mutations. Before either operation can
+reach idempotency replay or a repository write, the canonical event must
+satisfy the exact predicate `sync_state == "local_only"` and
+`provider_id is None` and `provider_calendar_id is None`. The same predicate
+is enforced again by `EventService.update` and `EventService.delete` for
+defense in depth. A provider-owned target returns `409` with the stable
+`event_not_local_only` code; it is never converted to local ownership or
+tombstoned through this surface.
 
 ## Envelopes and status
 
