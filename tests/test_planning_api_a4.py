@@ -591,6 +591,138 @@ class PlanningApiA4Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(archived_payload["object"]["deleted_at"])
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 3)
 
+    async def test_task_read_by_id_is_bounded_and_audience_scoped(self) -> None:
+        _, created = await self._create_task(key="read-by-id-open", title="Read by id")
+        task_id = created["object"]["id"]
+        before = {
+            table: self.database.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("tasks", "audit_events", "idempotency_keys", "outbox")
+        }
+
+        with patch.object(self.service.task_service, "get", wraps=self.service.task_service.get) as get_task:
+            panel = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{task_id}")
+        panel_payload = await panel.json()
+
+        self.assertEqual(panel.status, 200)
+        self.assertEqual(panel.headers["Cache-Control"], "no-store")
+        self.assertEqual(panel_payload["schemaVersion"], "planning.v1")
+        self.assertEqual(panel_payload["kind"], "object")
+        self.assertEqual(panel_payload["domain"], "task")
+        self.assertEqual(panel_payload["object"], created["object"])
+        self.assertEqual(panel_payload["object"]["version"], 1)
+        self.assertEqual(get_task.call_args.args, (task_id,))
+
+        operator = await self._request(
+            "GET",
+            f"{PLANNING_PREFIX}/tasks/{task_id}",
+            audience="operator",
+            secret=OPERATOR_SECRET,
+        )
+        operator_payload = await operator.json()
+        self.assertEqual(operator.status, 200)
+        self.assertEqual(operator_payload["object"], created["object"])
+
+        ha = await self._request(
+            "GET",
+            f"{PLANNING_PREFIX}/tasks/{task_id}",
+            audience="ha",
+            secret=HA_SECRET,
+        )
+        self.assertEqual(ha.status, 403)
+        self.assertEqual((await ha.json())["error"]["code"], "audience_forbidden")
+
+        with_query = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{task_id}?view=today")
+        self.assertEqual(with_query.status, 400)
+        self.assertEqual((await with_query.json())["error"]["code"], "validation_error")
+
+        after = {
+            table: self.database.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("tasks", "audit_events", "idempotency_keys", "outbox")
+        }
+        self.assertEqual(after, before)
+
+    async def test_task_read_by_id_preserves_terminal_and_temporal_shapes(self) -> None:
+        _, undated = await self._create_task(key="read-undated", title="Undated")
+        _, date_only = await self._create_task(
+            key="read-date-only",
+            title="Date only",
+            due_date="2026-08-14",
+        )
+        _, timed = await self._create_task(
+            key="read-timed",
+            title="Timed",
+            due_date="2026-08-14",
+            due_time="09:30",
+            timezone="Europe/Moscow",
+        )
+
+        completed = await self._request(
+            "POST",
+            f"{PLANNING_PREFIX}/tasks/{date_only['object']['id']}/complete",
+            headers={"Idempotency-Key": "read-complete", "If-Match": "1"},
+            json_body={},
+        )
+        archived = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/tasks/{timed['object']['id']}",
+            headers={"Idempotency-Key": "read-archive", "If-Match": "1"},
+        )
+        self.assertEqual(completed.status, 200)
+        self.assertEqual(archived.status, 200)
+
+        for label, task, expected_status in (
+            ("undated", undated, "open"),
+            ("date-only", date_only, "completed"),
+            ("timed", timed, "archived"),
+        ):
+            response = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{task['object']['id']}")
+            payload = await response.json()
+            with self.subTest(task=label):
+                self.assertEqual(response.status, 200)
+                self.assertEqual(payload["object"]["status"], expected_status)
+                self.assertEqual(payload["object"]["version"], 1 if label == "undated" else 2)
+                self.assertEqual(payload["object"]["source"], "panel-agent")
+
+        undated_response = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{undated['object']['id']}")
+        undated_payload = await undated_response.json()
+        self.assertIsNone(undated_payload["object"]["due_date"])
+        self.assertIsNone(undated_payload["object"]["due_time"])
+        self.assertIsNone(undated_payload["object"]["timezone"])
+
+        date_only_response = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{date_only['object']['id']}")
+        date_only_payload = await date_only_response.json()
+        self.assertEqual(date_only_payload["object"]["due_date"], "2026-08-14")
+        self.assertIsNone(date_only_payload["object"]["due_time"])
+        self.assertIsNone(date_only_payload["object"]["timezone"])
+        self.assertIsNotNone(date_only_payload["object"]["completed_at"])
+
+        timed_response = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{timed['object']['id']}")
+        timed_payload = await timed_response.json()
+        self.assertEqual(timed_payload["object"]["due_date"], "2026-08-14")
+        self.assertEqual(timed_payload["object"]["due_time"], "09:30")
+        self.assertEqual(timed_payload["object"]["timezone"], "Europe/Moscow")
+        self.assertIsNotNone(timed_payload["object"]["archived_at"])
+        self.assertIsNotNone(timed_payload["object"]["deleted_at"])
+
+    async def test_task_read_by_id_not_found_invalid_and_unmatched_paths_are_bounded(self) -> None:
+        missing_id = str(uuid.uuid4())
+        missing = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{missing_id}")
+        missing_payload = await missing.json()
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(missing_payload["error"]["code"], "not_found")
+        self.assertNotIn(missing_id, json.dumps(missing_payload))
+
+        malformed = await self._request("GET", f"{PLANNING_PREFIX}/tasks/not-a-uuid")
+        self.assertEqual(malformed.status, 400)
+        self.assertEqual((await malformed.json())["error"]["code"], "validation_error")
+
+        unmatched = await self._request("GET", f"{PLANNING_PREFIX}/tasks/{missing_id}/extra")
+        self.assertEqual(unmatched.status, 404)
+        self.assertEqual((await unmatched.json())["error"]["code"], "route_not_found")
+
+        listed = await self._request("GET", f"{PLANNING_PREFIX}/tasks?view=today")
+        self.assertEqual(listed.status, 200)
+
     async def test_projects_are_read_only_and_project_filter_is_bounded(self) -> None:
         project = self.service.repository.create_project(
             name="Synthetic project",

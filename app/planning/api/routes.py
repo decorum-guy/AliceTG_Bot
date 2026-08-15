@@ -262,6 +262,19 @@ async def _get_tasks(request: web.Request, auth: AuthenticatedPlanningContext) -
     return _json_response(payload, correlation_id=correlation_id)
 
 
+async def _get_task(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    task_id = parse_object_id(request.match_info["task_id"], domain="task")
+    if request.query_string:
+        raise PlanningApiError(
+            code="validation_error",
+            message="This Planning task read does not accept query parameters.",
+            status=400,
+        )
+    correlation_id = new_uuid4()
+    payload = _service(request).get_task(task_id=task_id, correlation_id=correlation_id)
+    return _json_response(payload, correlation_id=correlation_id)
+
+
 async def _create_task(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
     key, _ = validate_mutation_headers(request, expected_version=False)
     payload = parse_task_create(await read_json_body(request))
@@ -496,6 +509,10 @@ def setup_planning_routes(
         _route(_cancel_reminder, "POST /reminders/{id}/cancel"),
     )
     app.router.add_get(f"{PLANNING_PREFIX}/tasks", _route(_get_tasks, "GET /tasks"))
+    app.router.add_get(
+        f"{PLANNING_PREFIX}/tasks/{{task_id}}",
+        _route(_get_task, "GET /tasks/{id}"),
+    )
     app.router.add_post(f"{PLANNING_PREFIX}/tasks", _route(_create_task, "POST /tasks"))
     app.router.add_patch(
         f"{PLANNING_PREFIX}/tasks/{{task_id}}",

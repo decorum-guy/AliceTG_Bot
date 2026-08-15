@@ -121,6 +121,16 @@ class PlanningApiService:
             has_more=len(items) > limit,
         )
 
+    def get_task(self, *, task_id: str, correlation_id: str) -> dict[str, Any]:
+        """Return one canonical task, including terminal and undated rows."""
+
+        task = self.task_service.get(task_id)
+        return self.envelopes.object_response(
+            domain="task",
+            object_value=task.to_dict(),
+            correlation_id=correlation_id,
+        )
+
     def list_events(
         self,
         *,
