@@ -24,6 +24,7 @@ POST   /tasks/{id}/complete
 DELETE /tasks/{id}
 
 GET    /events?from=&to=&limit=&offset=
+GET    /events/{id}
 POST   /events
 PATCH  /events/{id}
 DELETE /events/{id}
@@ -60,6 +61,7 @@ own, and a body `audience` field is rejected.
 | --- | --- | --- | --- |
 | Read reminders/tasks/events/projects/status | yes | yes | yes |
 | Read task by ID (canonical mutation readback) | no | yes | yes |
+| Read event by ID (canonical reconciliation readback) | no | yes | yes |
 | Reminder create/edit/complete/cancel | no | yes | yes |
 | Task create/edit/complete/archive | no | yes | yes |
 | Local event create/edit/delete | no | yes | yes |
@@ -141,6 +143,26 @@ trusted panel-agent and operator clients. It uses the task service's
 canonical object lookup and returns open, completed, archived, dated, or
 undated tasks without changing storage, lifecycle, audit, idempotency, or
 outbox state. It accepts no query parameters.
+
+`GET /events/{id}` is the corresponding bounded canonical event readback for
+trusted panel-agent and operator clients. It uses `EventService.get`, returns
+active, tombstoned, local-only, or provider-owned canonical events without
+normalizing away provider identity, and accepts no query parameters. It has
+`Cache-Control: no-store` and has no write side effects.
+
+Event PATCH and DELETE are local-only mutations. For a new mutation, after a
+new idempotency claim is established and before any domain write, the
+canonical event must satisfy the exact predicate `sync_state == "local_only"`
+and `provider_id is None` and `provider_calendar_id is None`. The same
+predicate is enforced again by `EventService.update` and
+`EventService.delete` for defense in depth. A rejected new mutation rolls
+back the transaction, including its tentative idempotency claim, and a
+provider-owned target returns `409` with the stable
+`event_not_local_only` code.
+
+Exact stored idempotency replays remain governed by the A4 replay contract.
+They return the original response before evaluating a new-mutation
+precondition and do not execute a second domain mutation.
 
 ## Envelopes and status
 

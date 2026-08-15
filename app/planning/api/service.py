@@ -12,7 +12,7 @@ from app.planning.api.auth import (
 from app.planning.api.envelopes import FreshnessEnvelopeBuilder
 from app.planning.api.errors import PlanningApiError
 from app.planning.capabilities import planning_capability_metadata
-from app.planning.events import EventService
+from app.planning.events import EventService, require_native_local_only_event
 from app.planning.models import REMINDER_DELIVERY_JOB_TYPE, MutationContext, new_uuid4, utc_now, validate_timezone
 from app.planning.errors import (
     PlanningIdempotencyInProgressError,
@@ -154,6 +154,16 @@ class PlanningApiService:
             limit=limit,
             offset=offset,
             has_more=len(items) > limit,
+        )
+
+    def get_event(self, *, event_id: str, correlation_id: str) -> dict[str, Any]:
+        """Return one canonical event, including tombstones and provider identity."""
+
+        event = self.event_service.get(event_id)
+        return self.envelopes.object_response(
+            domain="calendar_event",
+            object_value=event.to_dict(),
+            correlation_id=correlation_id,
         )
 
     def list_projects(
@@ -448,8 +458,14 @@ class PlanningApiService:
         expected_version: int,
         payload: Mapping[str, Any],
     ) -> StoredMutationResponse:
+        def precondition() -> None:
+            current = self.event_service.get(event_id)
+            require_native_local_only_event(current)
+            self._require_active(current, "Calendar event is not editable.")
+
         def operation(context: MutationContext) -> Any:
-            current = self.repository.get_calendar_event(event_id)
+            current = self.event_service.get(event_id)
+            require_native_local_only_event(current)
             self._require_active(current, "Calendar event is not editable.")
             return self.event_service.update(
                 event_id,
@@ -465,6 +481,7 @@ class PlanningApiService:
             object_id=event_id,
             body=payload,
             expected_version=expected_version,
+            precondition=precondition,
             operation=operation,
         )
 
@@ -476,8 +493,14 @@ class PlanningApiService:
         event_id: str,
         expected_version: int,
     ) -> StoredMutationResponse:
+        def precondition() -> None:
+            current = self.event_service.get(event_id)
+            require_native_local_only_event(current)
+            self._require_active(current, "Calendar event is already deleted.")
+
         def operation(context: MutationContext) -> Any:
-            current = self.repository.get_calendar_event(event_id)
+            current = self.event_service.get(event_id)
+            require_native_local_only_event(current)
             self._require_active(current, "Calendar event is already deleted.")
             return self.event_service.delete(
                 event_id,
@@ -492,6 +515,7 @@ class PlanningApiService:
             object_id=event_id,
             body={},
             expected_version=expected_version,
+            precondition=precondition,
             operation=operation,
         )
 
@@ -504,6 +528,7 @@ class PlanningApiService:
         object_id: str | None,
         body: Mapping[str, Any],
         expected_version: int | None,
+        precondition: Callable[[], None] | None = None,
         operation: Callable[[MutationContext], Any],
     ) -> StoredMutationResponse:
         # Keep the thin service facades aligned with the repository attribute.
@@ -534,6 +559,9 @@ class PlanningApiService:
                 )
             if not claim.is_new:
                 raise PlanningIdempotencyInProgressError(auth.audience, key)
+
+            if precondition is not None:
+                precondition()
 
             correlation_id = new_uuid4()
             context = auth.mutation_context(correlation_id=correlation_id)

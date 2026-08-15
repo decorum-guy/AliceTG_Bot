@@ -8,8 +8,13 @@ from pathlib import Path
 from app.planning import MutationContext, PlanningDatabase, PlanningRepository
 from app.planning.api.service import PlanningApiService
 from app.planning.capabilities import planning_capability_metadata
-from app.planning.errors import PlanningLocalTimeError, PlanningValidationError, PlanningVersionConflictError
-from app.planning.events import EventService, propose_default_event_end
+from app.planning.errors import (
+    PlanningEventNotLocalOnlyError,
+    PlanningLocalTimeError,
+    PlanningValidationError,
+    PlanningVersionConflictError,
+)
+from app.planning.events import EventService, is_native_local_only_event, propose_default_event_end
 from app.planning.tasks import TaskService
 
 
@@ -376,6 +381,35 @@ class PlanningDomainServicesA7Tests(unittest.TestCase):
                 start_time="01:30",
                 timezone="Europe/Berlin",
             )
+
+    def test_provider_events_cannot_be_mutated_or_conformed_to_local(self) -> None:
+        external = self.repository.create_calendar_event(
+            title="provider-owned",
+            all_day=False,
+            timezone="Europe/Moscow",
+            start_at_utc="2026-08-12T10:00:00Z",
+            end_at_utc="2026-08-12T11:00:00Z",
+            sync_state="synced",
+            provider_id="provider-1",
+            provider_calendar_id="calendar-1",
+            context=CONTEXT,
+        )
+        self.assertFalse(is_native_local_only_event(external))
+        before = external.to_dict()
+        with self.assertRaises(PlanningEventNotLocalOnlyError):
+            self.events.update(
+                external.id,
+                expected_version=external.version,
+                title="must not change",
+                context=CONTEXT,
+            )
+        with self.assertRaises(PlanningEventNotLocalOnlyError):
+            self.events.delete(external.id, expected_version=external.version, context=CONTEXT)
+        restored = self.events.get(external.id)
+        self.assertEqual(restored.to_dict(), before)
+        self.assertEqual(restored.sync_state, "synced")
+        self.assertEqual(restored.provider_id, "provider-1")
+        self.assertEqual(restored.provider_calendar_id, "calendar-1")
 
     def test_capability_metadata_is_closed_truthful_and_status_content_free(self) -> None:
         metadata = planning_capability_metadata()

@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from app.planning.errors import PlanningValidationError
+from app.planning.errors import PlanningEventNotLocalOnlyError, PlanningValidationError
 from app.planning.models import (
     CalendarEvent,
     MutationContext,
@@ -54,6 +54,25 @@ def _event_sort_key(event: CalendarEvent, caller_timezone: str) -> tuple[int, st
         ZoneInfo(caller_timezone)
     )
     return (1, local_start.isoformat(), event.id)
+
+
+def is_native_local_only_event(event: CalendarEvent) -> bool:
+    """Return whether an event is owned by native local Planning."""
+
+    return (
+        event.sync_state == "local_only"
+        and event.provider_id is None
+        and event.provider_calendar_id is None
+    )
+
+
+def require_native_local_only_event(event: CalendarEvent) -> None:
+    """Fail closed unless the canonical event has native local ownership."""
+
+    if not is_native_local_only_event(event):
+        raise PlanningEventNotLocalOnlyError(
+            "calendar event mutation requires a native local-only event"
+        )
 
 
 @dataclass(frozen=True)
@@ -168,6 +187,7 @@ class EventService:
         start_date: str | None | object = _UNSET,
         end_date_exclusive: str | None | object = _UNSET,
     ) -> CalendarEvent:
+        require_native_local_only_event(self.get(event_id))
         fields = {
             name: value
             for name, value in {
@@ -197,6 +217,7 @@ class EventService:
         return self.repository.get_calendar_event(event_id)
 
     def delete(self, event_id: str, *, expected_version: int, context: MutationContext) -> CalendarEvent:
+        require_native_local_only_event(self.get(event_id))
         return self.repository.delete_calendar_event(event_id, expected_version=expected_version, context=context)
 
     tombstone = delete

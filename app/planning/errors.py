@@ -27,6 +27,12 @@ class PlanningNotFoundError(PlanningError):
     pass
 
 
+class PlanningEventNotLocalOnlyError(PlanningError):
+    """A provider-owned event cannot be mutated through the local API."""
+
+    pass
+
+
 class PlanningTransactionRequiredError(PlanningError):
     pass
 

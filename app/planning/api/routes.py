@@ -34,6 +34,7 @@ from app.planning.api.schemas import (
 )
 from app.planning.api.service import PlanningApiService, StoredMutationResponse
 from app.planning.errors import (
+    PlanningEventNotLocalOnlyError,
     PlanningIdempotencyConflictError,
     PlanningIdempotencyInProgressError,
     PlanningNotFoundError,
@@ -93,6 +94,12 @@ def _error_response(
 
 
 def _domain_error(exc: Exception) -> PlanningApiError:
+    if isinstance(exc, PlanningEventNotLocalOnlyError):
+        return PlanningApiError(
+            code="event_not_local_only",
+            message="Only native local-only calendar events can be mutated through Planning.",
+            status=409,
+        )
     if isinstance(exc, PlanningVersionConflictError):
         details: dict[str, Any] = {
             "domain": exc.domain,
@@ -157,6 +164,7 @@ async def _dispatch(request: web.Request, route_key: str, handler: Handler) -> w
     except PlanningApiError as exc:
         return _error_response(request, error=exc, actor=actor, correlation_id=correlation_id)
     except (
+        PlanningEventNotLocalOnlyError,
         PlanningVersionConflictError,
         PlanningIdempotencyConflictError,
         PlanningIdempotencyInProgressError,
@@ -337,6 +345,19 @@ async def _get_events(request: web.Request, auth: AuthenticatedPlanningContext) 
         offset=offset,
         correlation_id=correlation_id,
     )
+    return _json_response(payload, correlation_id=correlation_id)
+
+
+async def _get_event(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    event_id = parse_object_id(request.match_info["event_id"], domain="calendar_event")
+    if request.query_string:
+        raise PlanningApiError(
+            code="validation_error",
+            message="This Planning event read does not accept query parameters.",
+            status=400,
+        )
+    correlation_id = new_uuid4()
+    payload = _service(request).get_event(event_id=event_id, correlation_id=correlation_id)
     return _json_response(payload, correlation_id=correlation_id)
 
 
@@ -527,6 +548,10 @@ def setup_planning_routes(
         _route(_delete_task, "DELETE /tasks/{id}"),
     )
     app.router.add_get(f"{PLANNING_PREFIX}/events", _route(_get_events, "GET /events"))
+    app.router.add_get(
+        f"{PLANNING_PREFIX}/events/{{event_id}}",
+        _route(_get_event, "GET /events/{id}"),
+    )
     app.router.add_post(f"{PLANNING_PREFIX}/events", _route(_create_event, "POST /events"))
     app.router.add_patch(
         f"{PLANNING_PREFIX}/events/{{event_id}}",
