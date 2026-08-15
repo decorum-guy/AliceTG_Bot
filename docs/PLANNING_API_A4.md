@@ -150,14 +150,19 @@ active, tombstoned, local-only, or provider-owned canonical events without
 normalizing away provider identity, and accepts no query parameters. It has
 `Cache-Control: no-store` and has no write side effects.
 
-Event PATCH and DELETE are local-only mutations. Before either operation can
-reach idempotency replay or a repository write, the canonical event must
-satisfy the exact predicate `sync_state == "local_only"` and
-`provider_id is None` and `provider_calendar_id is None`. The same predicate
-is enforced again by `EventService.update` and `EventService.delete` for
-defense in depth. A provider-owned target returns `409` with the stable
-`event_not_local_only` code; it is never converted to local ownership or
-tombstoned through this surface.
+Event PATCH and DELETE are local-only mutations. For a new mutation, after a
+new idempotency claim is established and before any domain write, the
+canonical event must satisfy the exact predicate `sync_state == "local_only"`
+and `provider_id is None` and `provider_calendar_id is None`. The same
+predicate is enforced again by `EventService.update` and
+`EventService.delete` for defense in depth. A rejected new mutation rolls
+back the transaction, including its tentative idempotency claim, and a
+provider-owned target returns `409` with the stable
+`event_not_local_only` code.
+
+Exact stored idempotency replays remain governed by the A4 replay contract.
+They return the original response before evaluating a new-mutation
+precondition and do not execute a second domain mutation.
 
 ## Envelopes and status
 

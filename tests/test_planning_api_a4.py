@@ -968,24 +968,129 @@ class PlanningApiA4Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_delete_rejection.provider_calendar_id, "provider-calendar-1")
         self.assertEqual(self._planning_state_snapshot(), before_rejection)
 
-    async def test_event_idempotency_replay_cannot_bypass_local_only_guard(self) -> None:
+    async def test_event_delete_exact_replay_after_tombstone(self) -> None:
         _, local = await self._create_event(
-            key="replay-guard-event",
+            key="exact-delete-replay-event",
             body={
-                "title": "Replay guard",
+                "title": "Exact delete replay",
                 "all_day": True,
                 "timezone": "Europe/Moscow",
                 "start_date": "2026-08-19",
                 "end_date_exclusive": "2026-08-20",
             },
         )
-        first_patch = await self._request(
+        request_headers = {"Idempotency-Key": "exact-delete-replay", "If-Match": "1"}
+        first = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers=request_headers,
+        )
+        first_raw = await first.text()
+        first_payload = json.loads(first_raw)
+        self.assertEqual(first.status, 200)
+        canonical_after_first = self.service.repository.get_calendar_event(local["object"]["id"])
+        state_after_first = self._planning_state_snapshot()
+        self.assertEqual(first_payload["object"], canonical_after_first.to_dict())
+        self.assertEqual(canonical_after_first.version, 2)
+        self.assertIsNotNone(canonical_after_first.deleted_at)
+
+        with patch.object(self.service.event_service, "delete", wraps=self.service.event_service.delete) as delete:
+            replay = await self._request(
+                "DELETE",
+                f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+                headers=request_headers,
+            )
+        replay_raw = await replay.text()
+        replay_payload = json.loads(replay_raw)
+        self.assertEqual(replay.status, first.status)
+        self.assertEqual(replay_raw, first_raw)
+        self.assertEqual(replay_payload, first_payload)
+        self.assertEqual(replay_payload["correlation_id"], first_payload["correlation_id"])
+        self.assertFalse(delete.called)
+        self.assertEqual(self.service.repository.get_calendar_event(local["object"]["id"]).to_dict(), first_payload["object"])
+        self.assertEqual(self._planning_state_snapshot(), state_after_first)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE object_id = ? AND action = 'delete'",
+                (local["object"]["id"],),
+            ).fetchone()[0],
+            1,
+        )
+
+    async def test_event_patch_exact_replay_after_mutation(self) -> None:
+        _, local = await self._create_event(
+            key="exact-patch-replay-event",
+            body={
+                "title": "Exact patch replay",
+                "all_day": False,
+                "timezone": "Europe/Moscow",
+                "start_at_utc": "2026-08-19T09:00:00Z",
+                "end_at_utc": "2026-08-19T10:00:00Z",
+            },
+        )
+        request_headers = {"Idempotency-Key": "exact-patch-replay", "If-Match": "1"}
+        request_body = {"title": "Patched exactly once"}
+        first = await self._request(
             "PATCH",
             f"{PLANNING_PREFIX}/events/{local['object']['id']}",
-            headers={"Idempotency-Key": "replay-guard-patch", "If-Match": "1"},
-            json_body={"title": "First patch"},
+            headers=request_headers,
+            json_body=request_body,
         )
-        self.assertEqual(first_patch.status, 200)
+        first_raw = await first.text()
+        first_payload = json.loads(first_raw)
+        self.assertEqual(first.status, 200)
+        canonical_after_first = self.service.repository.get_calendar_event(local["object"]["id"])
+        state_after_first = self._planning_state_snapshot()
+        self.assertEqual(first_payload["object"], canonical_after_first.to_dict())
+        self.assertEqual(canonical_after_first.version, 2)
+        self.assertEqual(canonical_after_first.title, "Patched exactly once")
+
+        with patch.object(self.service.event_service, "update", wraps=self.service.event_service.update) as update:
+            replay = await self._request(
+                "PATCH",
+                f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+                headers=request_headers,
+                json_body=request_body,
+            )
+        replay_raw = await replay.text()
+        replay_payload = json.loads(replay_raw)
+        self.assertEqual(replay.status, first.status)
+        self.assertEqual(replay_raw, first_raw)
+        self.assertEqual(replay_payload, first_payload)
+        self.assertEqual(replay_payload["correlation_id"], first_payload["correlation_id"])
+        self.assertFalse(update.called)
+        self.assertEqual(self.service.repository.get_calendar_event(local["object"]["id"]).to_dict(), first_payload["object"])
+        self.assertEqual(self._planning_state_snapshot(), state_after_first)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE object_id = ? AND action = 'update'",
+                (local["object"]["id"],),
+            ).fetchone()[0],
+            1,
+        )
+
+    async def test_event_replay_returns_history_after_ownership_changes_but_new_key_is_rejected(self) -> None:
+        _, local = await self._create_event(
+            key="ownership-change-replay-event",
+            body={
+                "title": "Ownership change replay",
+                "all_day": True,
+                "timezone": "Europe/Moscow",
+                "start_date": "2026-08-21",
+                "end_date_exclusive": "2026-08-22",
+            },
+        )
+        request_headers = {"Idempotency-Key": "ownership-change-replay", "If-Match": "1"}
+        request_body = {"title": "Historical local response"}
+        first = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers=request_headers,
+            json_body=request_body,
+        )
+        first_raw = await first.text()
+        first_payload = json.loads(first_raw)
+        self.assertEqual(first.status, 200)
         with self.database.transaction():
             self.database.connection.execute(
                 """
@@ -995,16 +1100,31 @@ class PlanningApiA4Tests(unittest.IsolatedAsyncioTestCase):
                 """,
                 ("provider-after-first-write", "calendar-after-first-write", local["object"]["id"]),
             )
+        current_provider_event = self.service.repository.get_calendar_event(local["object"]["id"])
         before_replay = self._planning_state_snapshot()
         replay = await self._request(
             "PATCH",
             f"{PLANNING_PREFIX}/events/{local['object']['id']}",
-            headers={"Idempotency-Key": "replay-guard-patch", "If-Match": "1"},
-            json_body={"title": "First patch"},
+            headers=request_headers,
+            json_body=request_body,
         )
-        replay_payload = await replay.json()
-        self.assertEqual(replay.status, 409)
-        self.assertEqual(replay_payload["error"]["code"], "event_not_local_only")
+        replay_raw = await replay.text()
+        self.assertEqual(replay.status, 200)
+        self.assertEqual(replay_raw, first_raw)
+        self.assertEqual(json.loads(replay_raw), first_payload)
+        self.assertEqual(self.service.repository.get_calendar_event(local["object"]["id"]).to_dict(), current_provider_event.to_dict())
+        self.assertEqual(self._planning_state_snapshot(), before_replay)
+
+        rejected = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/events/{local['object']['id']}",
+            headers={"Idempotency-Key": "ownership-change-new-mutation", "If-Match": "2"},
+            json_body={"title": "must not change provider event"},
+        )
+        rejected_payload = await rejected.json()
+        self.assertEqual(rejected.status, 409)
+        self.assertEqual(rejected_payload["error"]["code"], "event_not_local_only")
+        self.assertEqual(self.service.repository.get_calendar_event(local["object"]["id"]).to_dict(), current_provider_event.to_dict())
         self.assertEqual(self._planning_state_snapshot(), before_replay)
 
     async def test_projects_are_read_only_and_project_filter_is_bounded(self) -> None:

@@ -545,8 +545,6 @@ class PlanningApiService:
             expected_version=expected_version,
         )
         with self.database.transaction():
-            if precondition is not None:
-                precondition()
             claim = self.repository.claim_idempotency(
                 audience=auth.audience,
                 key=key,
@@ -561,6 +559,9 @@ class PlanningApiService:
                 )
             if not claim.is_new:
                 raise PlanningIdempotencyInProgressError(auth.audience, key)
+
+            if precondition is not None:
+                precondition()
 
             correlation_id = new_uuid4()
             context = auth.mutation_context(correlation_id=correlation_id)
