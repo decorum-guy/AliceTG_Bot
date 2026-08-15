@@ -17,6 +17,7 @@ POST   /reminders/{id}/complete
 POST   /reminders/{id}/cancel
 
 GET    /tasks?view=today|overdue|upcoming&project_id=&limit=&offset=
+GET    /tasks/{id}
 POST   /tasks
 PATCH  /tasks/{id}
 POST   /tasks/{id}/complete
@@ -58,6 +59,7 @@ own, and a body `audience` field is rejected.
 | Route class | `ha` | `panel-agent` | `operator` |
 | --- | --- | --- | --- |
 | Read reminders/tasks/events/projects/status | yes | yes | yes |
+| Read task by ID (canonical mutation readback) | no | yes | yes |
 | Reminder create/edit/complete/cancel | no | yes | yes |
 | Task create/edit/complete/archive | no | yes | yes |
 | Local event create/edit/delete | no | yes | yes |
@@ -133,6 +135,12 @@ Task DELETE is an archive/tombstone transition.  Reminder cancel and event
 DELETE are logical tombstones; physical rows remain for audit/history.  Normal
 active list views exclude tombstones, while an explicit reminder
 `state=cancelled` query is the bounded cancelled audit view.
+
+`GET /tasks/{id}` is a bounded read-only canonical readback surface for
+trusted panel-agent and operator clients. It uses the task service's
+canonical object lookup and returns open, completed, archived, dated, or
+undated tasks without changing storage, lifecycle, audit, idempotency, or
+outbox state. It accepts no query parameters.
 
 ## Envelopes and status
 

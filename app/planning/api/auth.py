@@ -27,6 +27,7 @@ ROUTE_PERMISSIONS: dict[str, frozenset[str]] = {
     "POST /reminders/{id}/complete": frozenset({"panel-agent", "operator"}),
     "POST /reminders/{id}/cancel": frozenset({"panel-agent", "operator"}),
     "GET /tasks": frozenset({"ha", "panel-agent", "operator"}),
+    "GET /tasks/{id}": frozenset({"panel-agent", "operator"}),
     "POST /tasks": frozenset({"panel-agent", "operator"}),
     "PATCH /tasks/{id}": frozenset({"panel-agent", "operator"}),
     "POST /tasks/{id}/complete": frozenset({"panel-agent", "operator"}),
