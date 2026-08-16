@@ -31,6 +31,7 @@ def _format_timestamp(value: datetime) -> str:
 class FreshnessEnvelopeBuilder:
     now_fn: Callable[[], str | datetime] = utc_now
     stale_after_seconds: int = 300
+    sources_fn: Callable[[], list[Mapping[str, Any]]] | None = None
 
     def __post_init__(self) -> None:
         if self.stale_after_seconds <= 0:
@@ -50,6 +51,11 @@ class FreshnessEnvelopeBuilder:
             "staleAfter": stale_after,
         }
 
+    def _source_metadata(self) -> dict[str, Any]:
+        if self.sources_fn is None:
+            return {}
+        return {"sources": [dict(source) for source in self.sources_fn()]}
+
     def object_response(
         self,
         *,
@@ -63,6 +69,7 @@ class FreshnessEnvelopeBuilder:
             "domain": domain,
             "object": dict(object_value),
             **self.freshness(),
+            **self._source_metadata(),
             "correlation_id": correlation_id,
         }
         return response
@@ -84,6 +91,7 @@ class FreshnessEnvelopeBuilder:
             "items": [dict(item) for item in items],
             "generatedAt": self.now(),
             **self.freshness(),
+            **self._source_metadata(),
             "pagination": {
                 "limit": limit,
                 "offset": offset,
@@ -110,6 +118,7 @@ class FreshnessEnvelopeBuilder:
             "capabilities": {key: list(value) for key, value in capabilities.items()},
             "storageStatus": storage_status,
             **self.freshness(),
+            **self._source_metadata(),
             "correlation_id": correlation_id,
         }
         if capability_metadata is not None:
@@ -141,6 +150,7 @@ class FreshnessEnvelopeBuilder:
                 "retryable": retryable,
             },
             **self.freshness(),
+            **self._source_metadata(),
             "actor": dict(selected_actor),
             "correlation_id": correlation_id,
         }

@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - exercised by the missing-runtime guard
     Cipher = algorithms = modes = None  # type: ignore[assignment]
 
 
-BACKUP_SCHEMA_VERSION = 4
+BACKUP_SCHEMA_VERSION = 5
 BACKUP_MANIFEST_VERSION = 1
 BACKUP_PACKAGE_FORMAT = "planning-backup-a8"
 BACKUP_MAGIC = b"PLANNING-BACKUP-A8\x00"
@@ -74,6 +74,9 @@ _CORE_TABLES = (
     "legacy_reminder_imports",
     "legacy_reminder_mappings",
     "telegram_action_tokens",
+    "provider_sources",
+    "provider_calendars",
+    "provider_event_cache",
 )
 _EPHEMERAL_PREFIXES = (
     "/tmp/",

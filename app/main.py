@@ -17,6 +17,12 @@ from app.planning.backup import PlanningBackupError, PlanningBackupService
 from app.planning.delivery import HomeAssistantMobileTransport, TelegramDeliveryTransport
 from app.planning.db import PlanningDatabase, PlanningDatabaseConfig
 from app.planning.health import PlanningHealthService
+from app.planning.providers import (
+    AiohttpCalDavTransport,
+    ICloudCalDavProvider,
+    ICloudCalendarRefreshLoop,
+    ProviderCalendarCache,
+)
 from app.planning.scheduler import DurableReminderScheduler, validate_scheduler_modes
 from app.planning.telegram_ui import PlanningTelegramService
 from app.services.admin_modes import AdminModeManager
@@ -108,6 +114,7 @@ async def create_app() -> web.Application:
         settings.planning_api_enabled
         or settings.planning_alice_interpret_enabled
         or settings.planning_backup_enabled
+        or settings.planning_icloud_enabled
     ) and planning_database is None:
         # A4/A5a have their own disabled-by-default API gates.  Opening the
         # Planning database here does not enable the A2 cutover or A3 worker.
@@ -117,6 +124,50 @@ async def create_app() -> web.Application:
                 environment=settings.planning_environment,
             )
         )
+    planning_icloud_cache: ProviderCalendarCache | None = None
+    planning_icloud_refresh_loop: ICloudCalendarRefreshLoop | None = None
+    if planning_database is not None:
+        icloud_configured = bool(
+            settings.planning_icloud_account
+            and settings.planning_icloud_password
+            and settings.planning_icloud_caldav_url
+        )
+        icloud_provider = None
+        if icloud_configured:
+            try:
+                icloud_transport = AiohttpCalDavTransport(
+                    bootstrap_url=settings.planning_icloud_caldav_url,
+                    username=settings.planning_icloud_account,
+                    password=settings.planning_icloud_password,
+                )
+                icloud_provider = ICloudCalDavProvider(
+                    transport=icloud_transport,
+                    account_name=settings.planning_icloud_account,
+                    default_timezone=settings.planning_default_timezone,
+                )
+            except (ValueError, RuntimeError):
+                # Configuration is represented as provider-unavailable state;
+                # raw values are never included in this diagnostic path.
+                LOGGER.warning("iCloud calendar provider configuration is invalid")
+                icloud_configured = False
+        planning_icloud_cache = ProviderCalendarCache(
+            planning_database,
+            provider=icloud_provider,
+            provider_name="icloud",
+            account_id=(
+                ICloudCalDavProvider.account_id_for(settings.planning_icloud_account)
+                if settings.planning_icloud_account
+                else None
+            ),
+            display_label="iCloud",
+            enabled=settings.planning_icloud_enabled,
+            configured=icloud_configured,
+        )
+        if settings.planning_icloud_enabled and icloud_provider is not None:
+            planning_icloud_refresh_loop = ICloudCalendarRefreshLoop(
+                planning_icloud_cache,
+                interval_seconds=settings.planning_icloud_refresh_interval_seconds,
+            )
     planning_telegram_service: PlanningTelegramService | None = None
     if settings.planning_telegram_ui_enabled:
         if planning_database is None:
@@ -182,6 +233,7 @@ async def create_app() -> web.Application:
         application_version=settings.app_version,
         application_commit=settings.app_commit,
         state_store=planning_backup_service.state_store if planning_backup_service is not None else None,
+        provider_cache=planning_icloud_cache,
     )
     reminder_workflow = ReminderWorkflow(
         reminder_store,
@@ -255,6 +307,8 @@ async def create_app() -> web.Application:
     app["durable_reminder_scheduler"] = durable_reminder_scheduler
     app["planning_backup_service"] = planning_backup_service
     app["planning_health_service"] = planning_health_service
+    app["planning_icloud_cache"] = planning_icloud_cache
+    app["planning_icloud_refresh_loop"] = planning_icloud_refresh_loop
     app["coffee_alert_scheduler"] = coffee_alert_scheduler
     app["pushward_coffee_activity"] = pushward_coffee_activity
     app["pushward_coffee_widget"] = pushward_coffee_widget
@@ -262,6 +316,8 @@ async def create_app() -> web.Application:
     if settings.telegram_mode == "webhook":
         setup_telegram_routes(app, settings.webhook_path)
     setup_internal_routes(app)
+    if planning_icloud_refresh_loop is not None:
+        planning_icloud_refresh_loop.start()
     if durable_reminder_scheduler is not None:
         await durable_reminder_scheduler.start()
     else:
@@ -271,6 +327,8 @@ async def create_app() -> web.Application:
     coffee_timing_refresher.start()
 
     async def close_resources(_: web.Application) -> None:
+        if planning_icloud_refresh_loop is not None:
+            await planning_icloud_refresh_loop.close()
         if durable_reminder_scheduler is not None:
             await durable_reminder_scheduler.close()
         await coffee_timing_refresher.close()

@@ -58,11 +58,17 @@ class PlanningApiService:
         default_timezone: str = "Europe/Moscow",
         stale_after_seconds: int = 300,
         health_service: Any | None = None,
+        provider_cache: Any | None = None,
     ) -> None:
         validate_timezone(default_timezone, "planning.default_timezone")
         self.database = database
         self.repository = repository or PlanningRepository(database, now_fn=now_fn)
-        self.envelopes = FreshnessEnvelopeBuilder(now_fn=now_fn, stale_after_seconds=stale_after_seconds)
+        self.provider_cache = provider_cache
+        self.envelopes = FreshnessEnvelopeBuilder(
+            now_fn=now_fn,
+            stale_after_seconds=stale_after_seconds,
+            sources_fn=None if provider_cache is None else provider_cache.source_metadata,
+        )
         self.default_timezone = default_timezone
         self.health_service = health_service
         self.task_service = TaskService(database, repository=self.repository, now_fn=now_fn)

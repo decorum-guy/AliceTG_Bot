@@ -90,6 +90,11 @@ class Settings:
     planning_backup_encryption_key: str = ""
     planning_backup_retention_count: int = 14
     planning_backup_interval_seconds: int = 86_400
+    planning_icloud_enabled: bool = False
+    planning_icloud_account: str = ""
+    planning_icloud_password: str = ""
+    planning_icloud_caldav_url: str = ""
+    planning_icloud_refresh_interval_seconds: int = 300
     pushward_coffee_activity_enabled: bool = False
     pushward_coffee_activity_slug: str = "ha-coffee-machine"
     pushward_error_log_path: str = "/app/data/pushward_errors.log"
@@ -149,6 +154,13 @@ class Settings:
         planning_backup_encryption_key = os.getenv("PLANNING_BACKUP_ENCRYPTION_KEY", "").strip()
         planning_backup_retention_count = int(os.getenv("PLANNING_BACKUP_RETENTION_COUNT", "14"))
         planning_backup_interval_seconds = int(os.getenv("PLANNING_BACKUP_INTERVAL_SECONDS", "86400"))
+        planning_icloud_enabled = _bool_env("PLANNING_ICLOUD_ENABLED", False)
+        planning_icloud_account = os.getenv("PLANNING_ICLOUD_ACCOUNT", "").strip()
+        planning_icloud_password = os.getenv("PLANNING_ICLOUD_PASSWORD", "").strip()
+        planning_icloud_caldav_url = os.getenv("PLANNING_ICLOUD_CALDAV_URL", "").strip()
+        planning_icloud_refresh_interval_seconds = int(
+            os.getenv("PLANNING_ICLOUD_REFRESH_INTERVAL_SECONDS", "300")
+        )
         if not 1 <= planning_backup_retention_count <= 365:
             raise RuntimeError("PLANNING_BACKUP_RETENTION_COUNT must be between 1 and 365")
         if planning_backup_interval_seconds < 300:
@@ -185,6 +197,7 @@ class Settings:
             planning_panel_agent_secret,
             planning_operator_secret,
             planning_alice_idempotency_secret,
+            planning_icloud_password,
         }:
             raise RuntimeError("PLANNING_BACKUP_ENCRYPTION_KEY must be a dedicated secret")
         if not 60 <= planning_telegram_action_token_ttl_seconds <= 3600:
@@ -204,6 +217,8 @@ class Settings:
             )
         if planning_api_rate_limit <= 0 or planning_api_stale_after <= 0:
             raise RuntimeError("Planning API rate and freshness settings must be positive")
+        if not 60 <= planning_icloud_refresh_interval_seconds <= 3_600:
+            raise RuntimeError("PLANNING_ICLOUD_REFRESH_INTERVAL_SECONDS must be between 60 and 3600")
         if planning_api_enabled:
             if not planning_ha_secret or not planning_panel_agent_secret:
                 raise RuntimeError(
@@ -276,6 +291,11 @@ class Settings:
             planning_backup_encryption_key=planning_backup_encryption_key,
             planning_backup_retention_count=planning_backup_retention_count,
             planning_backup_interval_seconds=planning_backup_interval_seconds,
+            planning_icloud_enabled=planning_icloud_enabled,
+            planning_icloud_account=planning_icloud_account,
+            planning_icloud_password=planning_icloud_password,
+            planning_icloud_caldav_url=planning_icloud_caldav_url,
+            planning_icloud_refresh_interval_seconds=planning_icloud_refresh_interval_seconds,
             pushward_coffee_activity_enabled=_bool_env("PUSHWARD_COFFEE_ACTIVITY_ENABLED", False),
             pushward_coffee_activity_slug=os.getenv("PUSHWARD_COFFEE_ACTIVITY_SLUG", "ha-coffee-machine").strip()
             or "ha-coffee-machine",

@@ -57,6 +57,7 @@ class PlanningHealthService:
         now_fn: Callable[[], str] = utc_now,
         logger: logging.Logger | None = None,
         state_store: PlanningOperationsStateStore | None = None,
+        provider_cache: Any | None = None,
     ) -> None:
         if scheduler_heartbeat_stale_after_seconds <= 0:
             raise ValueError("scheduler heartbeat stale threshold must be positive")
@@ -75,6 +76,7 @@ class PlanningHealthService:
         self.now_fn = now_fn
         self.logger = logger or LOGGER
         self.state_store = state_store or PlanningOperationsStateStore(self.backup_dir)
+        self.provider_cache = provider_cache
         self._previous_incidents: dict[str, tuple[bool, int]] = {}
 
     def snapshot(self, *, correlation_id: str | None = None) -> dict[str, Any]:
@@ -88,14 +90,18 @@ class PlanningHealthService:
         incidents.extend(self._work_incidents(database_facts, now_dt))
         self._log_incident_transitions(incidents, correlation_id)
         active_incidents = [incident.to_dict() for incident in incidents if incident.active]
+        provider_facts = (
+            self.provider_cache.health_snapshot()
+            if self.provider_cache is not None
+            else {"providerStatus": "not_configured", "providerLastSyncAt": None, "providerErrorCode": None}
+        )
         return {
             "schemaVersion": "planning.operations.v1",
             "observedAt": observed_at,
             **database_facts,
             **scheduler_facts,
             **backup_facts,
-            "providerStatus": "not_configured",
-            "providerLastSyncAt": None,
+            **provider_facts,
             "capabilityMetadata": planning_capability_metadata().to_dict(),
             "applicationVersion": self.application_version,
             "applicationCommit": self.application_commit,

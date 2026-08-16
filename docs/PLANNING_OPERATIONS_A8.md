@@ -79,7 +79,7 @@ explicit WAL policy.
 Each package is named like:
 
 ```text
-planning-20260812T012345Z-schema4-<12-hex-random-chars>.sqlite3.a8
+planning-20260812T012345Z-schema5-<12-hex-random-chars>.sqlite3.a8
 ```
 
 The name contains only UTC creation time, schema version, and a collision-safe
