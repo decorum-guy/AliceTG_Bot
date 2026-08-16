@@ -17,6 +17,7 @@ from app.planning.providers.cache import ProviderCalendarCache
 from app.planning.providers.contracts import (
     CalendarWindow,
     ProviderAuthError,
+    ProviderFetchError,
     ProviderPayloadError,
     ProviderTimeoutError,
 )
@@ -205,6 +206,9 @@ def _multistatus(
     icals: list[str] | None = None,
     resource_hrefs: list[str] | None = None,
     missing_hrefs: set[str] | None = None,
+    resource_payloads: dict[str, str] | None = None,
+    direct_statuses: dict[str, int] | None = None,
+    no_data_hrefs: set[str] | None = None,
     outer_href: str | None = None,
     discovery_property: str | None = None,
     discovery_status: str | None = None,
@@ -249,17 +253,43 @@ def _multistatus(
 """ + second + b"</multistatus>"
     refs = resource_hrefs or [f"event-{index}.ics" for index, _ in enumerate(icals or [], start=1)]
     missing = missing_hrefs or set()
-    data = "".join(
-        (
-            f'<response><href>{href}</href><propstat><prop/><status>HTTP/1.1 404 Not Found</status>'
-            "</propstat></response>"
-            if href in missing
-            else f'<response><href>{href}</href><propstat><prop><getetag>"etag-{index}"</getetag>'
-            f"<c:calendar-data><![CDATA[{(icals or [])[index - 1]}]]></c:calendar-data></prop>"
+    payloads = resource_payloads or {}
+    direct_statuses = direct_statuses or {}
+    no_data = no_data_hrefs or set()
+    reasons = {200: "OK", 403: "Forbidden", 404: "Not Found", 410: "Gone"}
+
+    def status_line(status_code: int) -> str:
+        return f"HTTP/1.1 {status_code} {reasons.get(status_code, 'Status')}"
+
+    responses: list[str] = []
+    for index, href in enumerate(refs, start=1):
+        if href in missing:
+            responses.append(
+                f'<response><href>{href}</href><status>{status_line(direct_statuses.get(href, 404))}</status></response>'
+            )
+            continue
+        if href in no_data:
+            responses.append(
+                f'<response><href>{href}</href><status>{status_line(direct_statuses.get(href, 200))}</status></response>'
+            )
+            continue
+        payload = payloads.get(href)
+        if payload is None:
+            try:
+                payload = (icals or [])[index - 1]
+            except IndexError as exc:
+                raise AssertionError(f"missing fixture payload for {href}") from exc
+        direct_status = (
+            f'<status>{status_line(direct_statuses[href])}</status>'
+            if href in direct_statuses
+            else ""
+        )
+        responses.append(
+            f'<response><href>{href}</href>{direct_status}<propstat><prop><getetag>"etag-{index}"</getetag>'
+            f'<c:calendar-data><![CDATA[{payload}]]></c:calendar-data></prop>'
             "<status>HTTP/1.1 200 OK</status></propstat></response>"
         )
-        for index, href in enumerate(refs, start=1)
-    )
+    data = "".join(responses)
     return f'<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{data}</multistatus>'.encode()
 
 
@@ -279,6 +309,7 @@ class FixtureCalDavTransport:
         self.dense_only = False
         self.include_second_calendar = True
         self.discovery_variant = "normal"
+        self.multiget_mode = "normal"
 
     async def propfind(self, url: str, *, body: bytes, depth: str) -> bytes:
         self.calls.append(("PROPFIND", url, depth))
@@ -329,7 +360,11 @@ class FixtureCalDavTransport:
         if "calendar-multiget" in body.decode():
             requested = re.findall(r"<d:href>(.*?)</d:href>", body.decode())
             hrefs = [href for href in requested]
-            icals: list[str] = []
+            if self.multiget_mode == "omitted":
+                hrefs = hrefs[:-1]
+            elif self.multiget_mode == "duplicate":
+                hrefs = [hrefs[0], hrefs[0]]
+            payloads: dict[str, str] = {}
             missing: set[str] = set()
             for href in hrefs:
                 if (self.delete_second_event or not self.include_second_event) and href.endswith("event-5.ics"):
@@ -337,10 +372,39 @@ class FixtureCalDavTransport:
                     continue
                 try:
                     index = int(href.rsplit("event-", 1)[1].split(".ics", 1)[0]) - 1
-                    icals.append(resource_icals[index])
+                    payloads[href] = resource_icals[index]
                 except (IndexError, ValueError) as exc:
                     raise AssertionError(f"unexpected multiget href: {href}") from exc
-            return _multistatus(resource_hrefs=hrefs, icals=icals, missing_hrefs=missing)
+            direct_statuses: dict[str, int] = {}
+            no_data_hrefs: set[str] = set()
+            if requested and self.multiget_mode in {
+                "direct_404",
+                "direct_410",
+                "direct_403",
+                "direct_200_no_data",
+                "contradictory",
+            }:
+                target = requested[0]
+                direct_statuses[target] = {
+                    "direct_404": 404,
+                    "direct_410": 410,
+                    "direct_403": 403,
+                    "direct_200_no_data": 200,
+                    "contradictory": 404,
+                }[self.multiget_mode]
+                if self.multiget_mode in {"direct_404", "direct_410"}:
+                    payloads.pop(target, None)
+                    missing.add(target)
+                elif self.multiget_mode in {"direct_403", "direct_200_no_data"}:
+                    payloads.pop(target, None)
+                    no_data_hrefs.add(target)
+            return _multistatus(
+                resource_hrefs=hrefs,
+                resource_payloads=payloads,
+                missing_hrefs=missing,
+                direct_statuses=direct_statuses,
+                no_data_hrefs=no_data_hrefs,
+            )
         resource_hrefs = [f"event-{index}.ics" for index in range(1, len(resource_icals) + 1)]
         if self.delete_second_event or self.move_second_event_outside:
             resource_hrefs = resource_hrefs[:-1]
@@ -427,6 +491,52 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProviderPayloadError):
             await self.provider.discover_account()
         self.assertEqual([method for method, _, _ in self.transport.calls], ["PROPFIND", "PROPFIND"])
+
+    async def test_multiget_direct_response_statuses_fail_closed(self) -> None:
+        await self.cache.refresh(W1)
+        row = self.database.connection.execute(
+            "SELECT resource_ref, provider_calendar_id FROM provider_event_cache WHERE resource_ref IS NOT NULL LIMIT 1"
+        ).fetchone()
+        calendar = next(calendar for calendar in await self.provider.list_calendars() if calendar.provider_calendar_id == row["provider_calendar_id"])
+        resource_ref = row["resource_ref"]
+
+        self.transport.multiget_mode = "direct_404"
+        missing_404 = await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual([(item.resource_ref, item.status) for item in missing_404], [(resource_ref, "missing")])
+
+        self.transport.multiget_mode = "direct_410"
+        missing_410 = await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual([(item.resource_ref, item.status) for item in missing_410], [(resource_ref, "missing")])
+
+        self.transport.multiget_mode = "direct_403"
+        with self.assertRaises(ProviderFetchError) as forbidden:
+            await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual(forbidden.exception.code, "provider_resource_verification_failed")
+
+        self.transport.multiget_mode = "direct_200_no_data"
+        with self.assertRaises(ProviderPayloadError) as incomplete:
+            await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual(incomplete.exception.code, "provider_resource_verification_incomplete")
+
+        self.transport.multiget_mode = "normal"
+        present = await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual(present[0].status, "present")
+        self.assertTrue(present[0].events)
+
+        self.transport.multiget_mode = "contradictory"
+        with self.assertRaises(ProviderPayloadError) as contradictory:
+            await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual(contradictory.exception.code, "provider_resource_status_conflict")
+
+        self.transport.multiget_mode = "omitted"
+        with self.assertRaises(ProviderPayloadError) as omitted:
+            await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual(omitted.exception.code, "provider_resource_verification_incomplete")
+
+        self.transport.multiget_mode = "duplicate"
+        with self.assertRaises(ProviderPayloadError) as duplicate:
+            await self.provider.verify_resources(calendar, [resource_ref], W2)
+        self.assertEqual(duplicate.exception.code, "provider_resource_verification_duplicate")
 
     async def test_cache_combines_local_and_provider_events_and_stabilizes_identity(self) -> None:
         local = PlanningRepository(self.database).create_calendar_event(

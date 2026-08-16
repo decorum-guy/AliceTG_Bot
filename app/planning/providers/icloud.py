@@ -287,7 +287,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         trusted_refs = [_trusted_resource_ref(ref, calendar.fetch_ref) for ref in resource_refs]
         body = _calendar_multiget_body(trusted_refs)
         response = await self.transport.report(calendar.fetch_ref, body=body, depth="1")
-        resources = self._parse_calendar_resources(response, calendar.fetch_ref)
+        resources = self._parse_calendar_resources(response, calendar.fetch_ref, allow_empty=True)
         by_href = {resource.href: resource for resource in resources}
         if len(by_href) != len(resources) or set(by_href) != set(trusted_refs):
             raise ProviderPayloadError("provider_resource_verification_incomplete")
@@ -403,15 +403,25 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             )
         return results
 
-    def _parse_calendar_resources(self, payload: bytes, base_url: str) -> list[_CalendarResource]:
+    def _parse_calendar_resources(
+        self,
+        payload: bytes,
+        base_url: str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[_CalendarResource]:
         root = _xml_root(payload)
         results: list[_CalendarResource] = []
+        seen_hrefs: set[str] = set()
         for response in _xml_children(root, "response"):
             href = _direct_child_text(response, "href", namespace=_DAV)
             if not href:
                 raise ProviderPayloadError("provider_event_resource_missing")
             resource_ref = _trusted_resource_ref(urljoin(base_url, href), base_url)
-            status_code: int | None = None
+            if resource_ref in seen_hrefs:
+                raise ProviderPayloadError("provider_resource_verification_duplicate")
+            seen_hrefs.add(resource_ref)
+            status_code = _http_status_code(_direct_child_text(response, "status", namespace=_DAV))
             etag: str | None = None
             calendar_data: bytes | None = None
             for propstat in _direct_children(response, "propstat", namespace=_DAV):
@@ -420,7 +430,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                 if prop is None:
                     continue
                 prop_status = _http_status_code(status)
-                if prop_status is not None:
+                if status_code is None and prop_status is not None:
                     status_code = prop_status
                 if prop_status is not None and not 200 <= prop_status < 300:
                     continue
@@ -430,8 +440,10 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                 etag_element = _direct_child(prop, "getetag", namespace=_DAV)
                 if etag_element is not None and etag_element.text:
                     etag = etag_element.text.strip()
+            if status_code in {404, 410} and calendar_data is not None:
+                raise ProviderPayloadError("provider_resource_status_conflict")
             results.append(_CalendarResource(resource_ref, status_code, etag, calendar_data))
-        if not results:
+        if not results and not allow_empty:
             raise ProviderPayloadError("provider_calendar_data_missing")
         return results
 

@@ -144,11 +144,15 @@ A shifted rolling window is reconciled conservatively. For cached resources
 that are absent from the new time-range response, the adapter issues a bounded
 CalDAV `calendar-multiget` `REPORT` using the trusted resource href. An explicit
 successful resource read keeps the event (and marks the old cached occurrence
-stale), including when the event moved outside the requested window. An
-explicit 404/410 for that exact resource is the only deletion proof and may
-tombstone its provider-owned occurrences. Missing/ambiguous verification,
-timeouts, authentication failures, malformed payloads, and partial refreshes
-create zero tombstones. No CalDAV `DELETE` is issued.
+stale), including when the event moved outside the requested window. The
+multiget parser accepts both RFC-style response-level `DAV:status` and the
+existing `propstat` status path; an explicit 404/410 for that exact resource,
+with no successful calendar data, is the only deletion proof and may tombstone
+its provider-owned occurrences. A contradictory error status plus successful
+calendar data, omitted or duplicate requested hrefs, direct 200 without
+calendar data, and other non-2xx statuses fail closed. Missing/ambiguous
+verification, timeouts, authentication failures, malformed payloads, and
+partial refreshes create zero tombstones. No CalDAV `DELETE` is issued.
 
 A calendar-list refresh that no longer returns a previously known calendar
 marks that calendar `disabled` with `provider_calendar_disappeared` and marks
