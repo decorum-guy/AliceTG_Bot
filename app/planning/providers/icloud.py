@@ -862,7 +862,14 @@ def _trusted_resource_ref(resource_ref: str, base_url: str) -> str:
 
 
 def _propfind_body(properties: str, namespaces: dict[str, str]) -> bytes:
-    attrs = " ".join(f'xmlns:{prefix}="{uri}"' for prefix, uri in namespaces.items())
+    declared_namespaces = dict(namespaces)
+    supplied_dav_namespace = declared_namespaces.get("d")
+    if supplied_dav_namespace is not None and supplied_dav_namespace != _DAV:
+        raise ValueError("PROPFIND DAV namespace binding is invalid")
+    declared_namespaces["d"] = _DAV
+    attrs = " ".join(
+        f'xmlns:{prefix}="{uri}"' for prefix, uri in declared_namespaces.items()
+    )
     return f"<?xml version=\"1.0\" encoding=\"utf-8\"?><d:propfind {attrs}><d:prop>{properties}</d:prop></d:propfind>".encode()
 
 
