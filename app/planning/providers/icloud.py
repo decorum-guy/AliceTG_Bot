@@ -421,7 +421,10 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             if resource_ref in seen_hrefs:
                 raise ProviderPayloadError("provider_resource_verification_duplicate")
             seen_hrefs.add(resource_ref)
-            status_code = _http_status_code(_direct_child_text(response, "status", namespace=_DAV))
+            direct_status_code = _http_status_code(_direct_child_text(response, "status", namespace=_DAV))
+            status_code = direct_status_code
+            propstat_statuses: list[int] = []
+            successful_data_status: int | None = None
             etag: str | None = None
             calendar_data: bytes | None = None
             for propstat in _direct_children(response, "propstat", namespace=_DAV):
@@ -430,16 +433,19 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                 if prop is None:
                     continue
                 prop_status = _http_status_code(status)
-                if status_code is None and prop_status is not None:
-                    status_code = prop_status
+                if prop_status is not None:
+                    propstat_statuses.append(prop_status)
                 if prop_status is not None and not 200 <= prop_status < 300:
                     continue
                 data_element = _direct_child(prop, "calendar-data", namespace=_CALDAV)
                 if data_element is not None and data_element.text:
                     calendar_data = data_element.text.encode("utf-8")
+                    successful_data_status = prop_status
                 etag_element = _direct_child(prop, "getetag", namespace=_DAV)
                 if etag_element is not None and etag_element.text:
                     etag = etag_element.text.strip()
+            if status_code is None:
+                status_code = successful_data_status or (propstat_statuses[0] if propstat_statuses else None)
             if status_code in {404, 410} and calendar_data is not None:
                 raise ProviderPayloadError("provider_resource_status_conflict")
             results.append(_CalendarResource(resource_ref, status_code, etag, calendar_data))
