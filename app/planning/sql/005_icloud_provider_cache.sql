@@ -34,6 +34,8 @@ CREATE TABLE provider_event_cache (
     provider_event_id TEXT NOT NULL CHECK (length(provider_event_id) BETWEEN 1 AND 256),
     identity_key TEXT NOT NULL CHECK (length(identity_key) BETWEEN 1 AND 256),
     recurrence_instance_key TEXT NOT NULL CHECK (length(recurrence_instance_key) BETWEEN 1 AND 128),
+    -- Server-only trusted CalDAV resource reference; never API-facing.
+    resource_ref TEXT CHECK (resource_ref IS NULL OR length(resource_ref) BETWEEN 1 AND 512),
     window_start_utc TEXT NOT NULL,
     window_end_utc TEXT NOT NULL,
     last_seen_refresh TEXT NOT NULL CHECK (length(last_seen_refresh) = 36),

@@ -9,18 +9,20 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from xml.sax.saxutils import escape
 
 import aiohttp
 import recurring_ical_events
 from icalendar import Calendar
 
-from app.planning.models import validate_date, validate_timezone, validate_utc_timestamp
+from app.planning.models import validate_date, validate_timezone
 from app.planning.providers.contracts import (
     CalendarWindow,
     ExternalCalendar,
     ExternalCalendarEvent,
     ExternalCalendarProvider,
     ExternalProviderAccount,
+    ExternalResourceVerification,
     ProviderAdapterError,
     ProviderAuthError,
     ProviderFetchError,
@@ -31,7 +33,7 @@ from app.planning.providers.contracts import (
 
 _DAV = "DAV:"
 _CALDAV = "urn:ietf:params:xml:ns:caldav"
-_MAX_TEXT = 4_000
+_MAX_RESOURCE_VERIFICATIONS = 512
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6,8}$")
 
 
@@ -176,6 +178,14 @@ class _DiscoveredState:
     calendars: list[ExternalCalendar]
 
 
+@dataclass(frozen=True)
+class _CalendarResource:
+    href: str
+    status_code: int | None
+    etag: str | None
+    calendar_data: bytes | None
+
+
 class ICloudCalDavProvider(ExternalCalendarProvider):
     """iCloud/CalDAV adapter exposing discovery and event reads only."""
 
@@ -243,23 +253,104 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         assert self._state is not None
         body = _calendar_query_body(window)
         response = await self.transport.report(calendar.fetch_ref, body=body, depth="1")
-        ical_payloads = self._parse_calendar_data(response)
         results: list[ExternalCalendarEvent] = []
-        for payload in ical_payloads:
-            try:
-                calendar_data = Calendar.from_ical(payload)
-                occurrences = recurring_ical_events.of(calendar_data).between(window.start, window.end)
-                for component in occurrences:
-                    if len(results) >= self.max_events_per_calendar:
-                        raise ProviderPayloadError("provider_event_limit")
-                    if str(component.get("STATUS", "")).upper() == "CANCELLED":
-                        continue
-                    results.append(self._normalize_event(calendar, calendar_data, component))
-            except ProviderAdapterError:
-                raise
-            except Exception as exc:
-                raise ProviderPayloadError("provider_calendar_data_invalid") from exc
+        resources = self._parse_calendar_resources(response, calendar.fetch_ref)
+        for resource in resources:
+            if resource.status_code is not None and not 200 <= resource.status_code < 300:
+                raise ProviderFetchError("provider_read_failed")
+            if resource.calendar_data is None:
+                raise ProviderPayloadError("provider_calendar_data_missing")
+            results.extend(
+                self._normalize_calendar_payload(
+                    calendar,
+                    resource.calendar_data,
+                    window,
+                    resource_ref=resource.href,
+                    remaining_limit=self.max_events_per_calendar - len(results),
+                )
+            )
         return _deduplicate_occurrences(results)
+
+    async def verify_resources(
+        self,
+        calendar: ExternalCalendar,
+        resource_refs: list[str],
+        window: CalendarWindow,
+    ) -> list[ExternalResourceVerification]:
+        """Verify cached resource references with a bounded read-only multiget."""
+
+        window.validate()
+        if not resource_refs:
+            return []
+        if len(resource_refs) > _MAX_RESOURCE_VERIFICATIONS:
+            raise ProviderPayloadError("provider_resource_verification_limit")
+        trusted_refs = [_trusted_resource_ref(ref, calendar.fetch_ref) for ref in resource_refs]
+        body = _calendar_multiget_body(trusted_refs)
+        response = await self.transport.report(calendar.fetch_ref, body=body, depth="1")
+        resources = self._parse_calendar_resources(response, calendar.fetch_ref)
+        by_href = {resource.href: resource for resource in resources}
+        if len(by_href) != len(resources) or set(by_href) != set(trusted_refs):
+            raise ProviderPayloadError("provider_resource_verification_incomplete")
+        results: list[ExternalResourceVerification] = []
+        total_events = 0
+        for resource_ref in trusted_refs:
+            resource = by_href[resource_ref]
+            if resource.status_code in {404, 410} and resource.calendar_data is None:
+                results.append(ExternalResourceVerification(resource_ref, "missing"))
+                continue
+            if resource.status_code is not None and not 200 <= resource.status_code < 300:
+                raise ProviderFetchError("provider_resource_verification_failed")
+            if resource.calendar_data is None:
+                raise ProviderPayloadError("provider_resource_verification_incomplete")
+            events = self._normalize_calendar_payload(
+                calendar,
+                resource.calendar_data,
+                window,
+                resource_ref=resource.href,
+                remaining_limit=self.max_events_per_calendar - total_events,
+            )
+            total_events += len(events)
+            results.append(ExternalResourceVerification(resource_ref, "present", tuple(events)))
+        return results
+
+    def _normalize_calendar_payload(
+        self,
+        calendar: ExternalCalendar,
+        payload: bytes,
+        window: CalendarWindow,
+        *,
+        resource_ref: str,
+        remaining_limit: int,
+    ) -> list[ExternalCalendarEvent]:
+        if remaining_limit <= 0:
+            raise ProviderPayloadError("provider_event_limit")
+        try:
+            calendar_data = Calendar.from_ical(payload)
+            _guard_recurrence_complexity(
+                calendar_data,
+                window,
+                max_events=remaining_limit,
+            )
+            occurrences = recurring_ical_events.of(calendar_data).between(window.start, window.end)
+            results: list[ExternalCalendarEvent] = []
+            for component in occurrences:
+                if len(results) >= remaining_limit:
+                    raise ProviderPayloadError("provider_event_limit")
+                if str(component.get("STATUS", "")).upper() == "CANCELLED":
+                    continue
+                results.append(
+                    self._normalize_event(
+                        calendar,
+                        calendar_data,
+                        component,
+                        resource_ref=resource_ref,
+                    )
+                )
+            return results
+        except ProviderAdapterError:
+            raise
+        except Exception as exc:
+            raise ProviderPayloadError("provider_calendar_data_invalid") from exc
 
     async def _discover_principal_and_home(self) -> tuple[str, str]:
         bootstrap_url = getattr(self.transport, "bootstrap_url", None)
@@ -269,24 +360,32 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             bootstrap_url = "https://fixture.invalid/.well-known/caldav"
         principal_body = _propfind_body("<d:current-user-principal/>", {"d": _DAV})
         principal_response = await self.transport.propfind(bootstrap_url, body=principal_body, depth="0")
-        principal_href = _required_href(principal_response, "current-user-principal")
+        principal_href = _required_property_href(
+            principal_response,
+            property_name="current-user-principal",
+            namespace=_DAV,
+        )
         principal_url = urljoin(bootstrap_url, principal_href)
         home_body = _propfind_body("<x:calendar-home-set/>", {"x": _CALDAV})
         home_response = await self.transport.propfind(principal_url, body=home_body, depth="0")
-        home_href = _required_href(home_response, "calendar-home-set")
+        home_href = _required_property_href(
+            home_response,
+            property_name="calendar-home-set",
+            namespace=_CALDAV,
+        )
         return principal_url, urljoin(principal_url, home_href)
 
     def _parse_calendars(self, payload: bytes, base_url: str) -> list[ExternalCalendar]:
         root = _xml_root(payload)
         results: list[ExternalCalendar] = []
         for response in _xml_children(root, "response"):
-            href = _first_text(response, "href")
+            href = _direct_child_text(response, "href", namespace=_DAV)
             if not href:
                 continue
             resource_types = {element.tag.rsplit("}", 1)[-1] for element in response.iter()}
             if "calendar" not in resource_types:
                 continue
-            absolute_href = urljoin(base_url, href)
+            absolute_href = _trusted_resource_ref(urljoin(base_url, href), base_url)
             display_name = (_first_text(response, "displayname") or "Calendar")[:200]
             color = _first_text(response, "calendar-color")
             color = color if color and _COLOR_RE.fullmatch(color) else None
@@ -304,13 +403,34 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             )
         return results
 
-    def _parse_calendar_data(self, payload: bytes) -> list[bytes]:
+    def _parse_calendar_resources(self, payload: bytes, base_url: str) -> list[_CalendarResource]:
         root = _xml_root(payload)
-        results = [
-            (element.text or "").encode("utf-8")
-            for element in root.iter()
-            if element.tag.rsplit("}", 1)[-1] == "calendar-data" and element.text
-        ]
+        results: list[_CalendarResource] = []
+        for response in _xml_children(root, "response"):
+            href = _direct_child_text(response, "href", namespace=_DAV)
+            if not href:
+                raise ProviderPayloadError("provider_event_resource_missing")
+            resource_ref = _trusted_resource_ref(urljoin(base_url, href), base_url)
+            status_code: int | None = None
+            etag: str | None = None
+            calendar_data: bytes | None = None
+            for propstat in _direct_children(response, "propstat", namespace=_DAV):
+                status = _direct_child_text(propstat, "status", namespace=_DAV)
+                prop = _direct_child(propstat, "prop", namespace=_DAV)
+                if prop is None:
+                    continue
+                prop_status = _http_status_code(status)
+                if prop_status is not None:
+                    status_code = prop_status
+                if prop_status is not None and not 200 <= prop_status < 300:
+                    continue
+                data_element = _direct_child(prop, "calendar-data", namespace=_CALDAV)
+                if data_element is not None and data_element.text:
+                    calendar_data = data_element.text.encode("utf-8")
+                etag_element = _direct_child(prop, "getetag", namespace=_DAV)
+                if etag_element is not None and etag_element.text:
+                    etag = etag_element.text.strip()
+            results.append(_CalendarResource(resource_ref, status_code, etag, calendar_data))
         if not results:
             raise ProviderPayloadError("provider_calendar_data_missing")
         return results
@@ -320,6 +440,8 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         calendar: ExternalCalendar,
         source_calendar: Calendar,
         component: object,
+        *,
+        resource_ref: str,
     ) -> ExternalCalendarEvent:
         uid_value = _component_value(component, "UID")
         if not isinstance(uid_value, str) or not uid_value.strip():
@@ -362,6 +484,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                 end_at_utc=None,
                 start_date=validate_date(start_value.isoformat(), "provider.start_date"),
                 end_date_exclusive=validate_date(end_value.isoformat(), "provider.end_date_exclusive"),
+                resource_ref=resource_ref,
             )
         if not isinstance(start_value, datetime):
             raise ProviderPayloadError("provider_event_start_invalid")
@@ -390,6 +513,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             end_at_utc=_timestamp(end_utc),
             start_date=None,
             end_date_exclusive=None,
+            resource_ref=resource_ref,
         )
 
     async def close(self) -> None:
@@ -410,6 +534,126 @@ def _as_utc(value: datetime, timezone_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         value = value.replace(tzinfo=ZoneInfo(timezone_name))
     return value.astimezone(timezone.utc)
+
+
+def _guard_recurrence_complexity(calendar_data: Calendar, window: CalendarWindow, *, max_events: int) -> None:
+    """Reject recurrence objects whose safe upper bound exceeds the event cap."""
+
+    if max_events <= 0:
+        raise ProviderPayloadError("provider_event_limit")
+    total_bound = 0
+    for component in calendar_data.subcomponents:
+        if _local_component_name(component) != "VEVENT":
+            continue
+        component_bound = 1
+        recurrence = component.get("RRULE")
+        if recurrence is not None:
+            component_bound = _rrule_upper_bound(recurrence, window)
+        rdate = component.get("RDATE")
+        if rdate is not None:
+            component_bound += _ical_value_count(rdate)
+        total_bound += component_bound
+        if total_bound > max_events:
+            raise ProviderPayloadError("provider_event_limit")
+
+
+def _local_component_name(component: object) -> str:
+    name = getattr(component, "name", "")
+    return str(name).upper()
+
+
+def _rrule_upper_bound(recurrence: object, window: CalendarWindow) -> int:
+    raw = _ical_text(recurrence)
+    if raw.startswith("RRULE:"):
+        raw = raw[7:]
+    values: dict[str, list[str]] = {}
+    for part in raw.split(";"):
+        if not part or "=" not in part:
+            raise ProviderPayloadError("provider_recurrence_invalid")
+        key, value = part.split("=", 1)
+        values[key.upper()] = [item for item in value.split(",") if item]
+    frequency = (values.get("FREQ") or [""])[0].upper()
+    periods = {
+        "SECONDLY": 1.0,
+        "MINUTELY": 60.0,
+        "HOURLY": 3_600.0,
+        "DAILY": 86_400.0,
+        "WEEKLY": 604_800.0,
+        "MONTHLY": 28 * 86_400.0,
+        "YEARLY": 365 * 86_400.0,
+    }
+    if frequency not in periods:
+        raise ProviderPayloadError("provider_recurrence_invalid")
+    interval = _bounded_rule_integer(values.get("INTERVAL", ["1"])[0], "INTERVAL")
+    if interval <= 0:
+        raise ProviderPayloadError("provider_recurrence_invalid")
+    count_values = values.get("COUNT")
+    if count_values:
+        if len(count_values) != 1:
+            raise ProviderPayloadError("provider_recurrence_invalid")
+        upper_bound = _bounded_rule_integer(count_values[0], "COUNT")
+    else:
+        effective_end = window.end
+        until_values = values.get("UNTIL")
+        if until_values:
+            if len(until_values) != 1:
+                raise ProviderPayloadError("provider_recurrence_invalid")
+            until = _parse_rrule_until(until_values[0], window.start)
+            effective_end = min(effective_end, until)
+        duration_seconds = max(1.0, (effective_end - window.start).total_seconds())
+        periods_in_window = int(duration_seconds / (periods[frequency] * interval)) + 3
+        multiplier = 1
+        for key in (
+            "BYSECOND",
+            "BYMINUTE",
+            "BYHOUR",
+            "BYDAY",
+            "BYMONTHDAY",
+            "BYYEARDAY",
+            "BYWEEKNO",
+            "BYMONTH",
+        ):
+            multiplier *= max(1, len(values.get(key, [])))
+            if multiplier > 1_000_000:
+                return multiplier
+        upper_bound = periods_in_window * multiplier
+    return upper_bound
+
+
+def _bounded_rule_integer(value: str, field: str) -> int:
+    try:
+        selected = int(value)
+    except ValueError as exc:
+        raise ProviderPayloadError("provider_recurrence_invalid") from exc
+    if selected < 1:
+        raise ProviderPayloadError("provider_recurrence_invalid")
+    return selected
+
+
+def _parse_rrule_until(value: str, reference: datetime) -> datetime:
+    formats = ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S", "%Y%m%d")
+    for selected_format in formats:
+        try:
+            parsed = datetime.strptime(value, selected_format)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=reference.tzinfo)
+            return parsed
+        except ValueError:
+            continue
+    raise ProviderPayloadError("provider_recurrence_invalid")
+
+
+def _ical_value_count(value: object) -> int:
+    raw = _ical_text(value)
+    return max(1, sum(1 for item in raw.split(",") if item.strip()))
+
+
+def _ical_text(value: object) -> str:
+    to_ical = getattr(value, "to_ical", None)
+    if callable(to_ical):
+        encoded = to_ical()
+        return encoded.decode("utf-8") if isinstance(encoded, bytes) else str(encoded)
+    return str(value)
 
 
 def _semantic_timezone(property_value: object, source_calendar: Calendar, default_timezone: str) -> str:
@@ -507,19 +751,96 @@ def _xml_children(root: ET.Element, local_name: str) -> list[ET.Element]:
     return [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == local_name]
 
 
+def _namespace(tag: str) -> str | None:
+    return tag[1:].split("}", 1)[0] if tag.startswith("{") and "}" in tag else None
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _direct_children(root: ET.Element, local_name: str, *, namespace: str | None = None) -> list[ET.Element]:
+    return [
+        child
+        for child in list(root)
+        if _local_name(child.tag) == local_name
+        and (namespace is None or _namespace(child.tag) == namespace)
+    ]
+
+
+def _direct_child(root: ET.Element, local_name: str, *, namespace: str | None = None) -> ET.Element | None:
+    children = _direct_children(root, local_name, namespace=namespace)
+    return children[0] if children else None
+
+
+def _direct_child_text(root: ET.Element, local_name: str, *, namespace: str | None = None) -> str | None:
+    child = _direct_child(root, local_name, namespace=namespace)
+    return child.text.strip() if child is not None and child.text else None
+
+
 def _first_text(root: ET.Element, local_name: str) -> str | None:
     for element in root.iter():
-        if element.tag.rsplit("}", 1)[-1] == local_name and element.text:
+        if _local_name(element.tag) == local_name and element.text:
             return element.text.strip()
     return None
 
 
-def _required_href(payload: bytes, property_name: str) -> str:
+def _http_status_code(value: str | None) -> int | None:
+    if not value:
+        return None
+    parts = value.split()
+    if len(parts) < 2:
+        raise ProviderPayloadError("provider_propstat_invalid")
+    try:
+        return int(parts[1])
+    except ValueError as exc:
+        raise ProviderPayloadError("provider_propstat_invalid") from exc
+
+
+def _required_property_href(payload: bytes, *, property_name: str, namespace: str) -> str:
     root = _xml_root(payload)
-    href = _first_text(root, "href")
-    if not href:
+    hrefs: list[str] = []
+    unauthenticated = False
+    for response in _xml_children(root, "response"):
+        for propstat in _direct_children(response, "propstat", namespace=_DAV):
+            propstat_status = _http_status_code(
+                _direct_child_text(propstat, "status", namespace=_DAV)
+            )
+            if propstat_status is not None and not 200 <= propstat_status < 300:
+                continue
+            prop = _direct_child(propstat, "prop", namespace=_DAV)
+            if prop is None:
+                continue
+            for property_element in _direct_children(prop, property_name, namespace=namespace):
+                if _direct_child(property_element, "unauthenticated", namespace=_DAV) is not None:
+                    unauthenticated = True
+                hrefs.extend(
+                    child.text.strip()
+                    for child in _direct_children(property_element, "href", namespace=_DAV)
+                    if child.text
+                )
+    if unauthenticated:
+        raise ProviderAuthError("provider_authentication_failed")
+    unique_hrefs = sorted(set(hrefs))
+    if not unique_hrefs:
         raise ProviderPayloadError(f"provider_{property_name.replace('-', '_')}_missing")
-    return href
+    if len(unique_hrefs) != 1:
+        raise ProviderPayloadError(f"provider_{property_name.replace('-', '_')}_ambiguous")
+    return unique_hrefs[0]
+
+
+def _trusted_resource_ref(resource_ref: str, base_url: str) -> str:
+    parsed = urlsplit(resource_ref)
+    base = urlsplit(base_url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    base_host = (base.hostname or "").lower().rstrip(".")
+    if len(resource_ref) > 512:
+        raise ProviderPayloadError("provider_resource_ref_too_large")
+    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+        raise ProviderFetchError("provider_resource_ref_untrusted")
+    if not (host == base_host or host.endswith(".icloud.com") or host.endswith(".apple.com")):
+        raise ProviderFetchError("provider_resource_ref_untrusted")
+    return resource_ref
 
 
 def _propfind_body(properties: str, namespaces: dict[str, str]) -> bytes:
@@ -537,4 +858,14 @@ def _calendar_query_body(window: CalendarWindow) -> bytes:
         '<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">'
         f'<c:time-range start="{start}" end="{end}"/>'
         '</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>'
+    ).encode()
+
+
+def _calendar_multiget_body(resource_refs: list[str]) -> bytes:
+    hrefs = "".join(f"<d:href>{escape(resource_ref)}</d:href>" for resource_ref in resource_refs)
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+        '<d:prop><d:getetag/><c:calendar-data/></d:prop>'
+        f"{hrefs}</c:calendar-multiget>"
     ).encode()

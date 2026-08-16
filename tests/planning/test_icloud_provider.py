@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import tempfile
+import re
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from app.planning.api.service import PlanningApiService
 from app.planning.db import PlanningDatabase
@@ -12,15 +14,25 @@ from app.planning.events import EventService, is_native_local_only_event
 from app.planning.models import MutationContext
 from app.planning.repositories import PlanningRepository
 from app.planning.providers.cache import ProviderCalendarCache
-from app.planning.providers.contracts import CalendarWindow, ProviderTimeoutError
+from app.planning.providers.contracts import (
+    CalendarWindow,
+    ProviderAuthError,
+    ProviderPayloadError,
+    ProviderTimeoutError,
+)
 from app.planning.providers.icloud import ICloudCalDavProvider
 
 
 NOW = "2026-08-16T12:00:00Z"
-WINDOW = CalendarWindow(
+W1 = CalendarWindow(
     datetime(2026, 8, 16, tzinfo=timezone.utc),
     datetime(2026, 8, 23, tzinfo=timezone.utc),
 )
+W2 = CalendarWindow(
+    datetime(2026, 8, 17, tzinfo=timezone.utc),
+    datetime(2026, 8, 24, tzinfo=timezone.utc),
+)
+WINDOW = W1
 CONTEXT = MutationContext(
     audience="operator",
     actor_id="icloud-fixture",
@@ -88,19 +100,165 @@ END:VCALENDAR
 """
 
 
-def _multistatus(*, principal: str | None = None, home: str | None = None, calendars: bool = False, icals: list[str] | None = None) -> bytes:
+def _resource_icals(
+    calendar_number: int,
+    *,
+    include_second_event: bool = True,
+    shift_second_event: bool = False,
+    move_second_event_outside: bool = False,
+    dense_only: bool = False,
+) -> list[str]:
+    def wrap(body: str) -> str:
+        return f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Alice fixture//EN
+X-WR-TIMEZONE:Europe/Moscow
+{body}
+END:VCALENDAR
+"""
+
+    if dense_only:
+        return [
+            wrap(
+                f"""BEGIN:VEVENT
+UID:fixture-dense-{calendar_number}
+DTSTART;TZID=Europe/Moscow:20260817T100000
+DTEND;TZID=Europe/Moscow:20260817T100001
+RRULE:FREQ=SECONDLY;COUNT=100000000
+SUMMARY:Dense fixture
+END:VEVENT"""
+            )
+        ]
+    resources = [
+        wrap(
+            f"""BEGIN:VEVENT
+UID:fixture-timed-{calendar_number}
+DTSTART;TZID=Europe/Moscow:20260817T100000
+DTEND;TZID=Europe/Moscow:20260817T110000
+SUMMARY:Timed fixture {calendar_number}
+DESCRIPTION:owner private notes {calendar_number}
+LOCATION:owner private location {calendar_number}
+END:VEVENT"""
+        ),
+        wrap(
+            """BEGIN:VEVENT
+UID:fixture-day-{calendar_number}
+DTSTART;VALUE=DATE:20260818
+DTEND;VALUE=DATE:20260819
+SUMMARY:One day
+END:VEVENT""".replace("{calendar_number}", str(calendar_number))
+        ),
+        wrap(
+            """BEGIN:VEVENT
+UID:fixture-multi-{calendar_number}
+DTSTART;VALUE=DATE:20260819
+DTEND;VALUE=DATE:20260821
+SUMMARY:Multi day
+END:VEVENT""".replace("{calendar_number}", str(calendar_number))
+        ),
+        wrap(
+            f"""BEGIN:VEVENT
+UID:fixture-recurring-{calendar_number}
+DTSTART;TZID=Europe/Moscow:20260817T120000
+DTEND;TZID=Europe/Moscow:20260817T130000
+RRULE:FREQ=DAILY;COUNT=3
+SUMMARY:Recurring base
+END:VEVENT
+BEGIN:VEVENT
+UID:fixture-recurring-{calendar_number}
+RECURRENCE-ID;TZID=Europe/Moscow:20260818T120000
+DTSTART;TZID=Europe/Moscow:20260818T140000
+DTEND;TZID=Europe/Moscow:20260818T150000
+SUMMARY:Recurring exception
+END:VEVENT"""
+        ),
+    ]
+    if include_second_event:
+        start = "20260920T100000" if move_second_event_outside else (
+            "20260820T110000" if shift_second_event else "20260820T100000"
+        )
+        end = "20260920T110000" if move_second_event_outside else (
+            "20260820T120000" if shift_second_event else "20260820T110000"
+        )
+        title = "changed <b>literal</b>" if shift_second_event else "<b>literal</b>"
+        resources.append(
+            wrap(
+                f"""BEGIN:VEVENT
+UID:fixture-timed-extra-{calendar_number}
+DTSTART;TZID=Europe/Moscow:{start}
+DTEND;TZID=Europe/Moscow:{end}
+SUMMARY:{title}
+DESCRIPTION:private notes fixture
+LOCATION:private room fixture
+END:VEVENT"""
+            )
+        )
+    return resources
+
+
+def _multistatus(
+    *,
+    principal: str | None = None,
+    home: str | None = None,
+    calendars: bool = False,
+    include_second_calendar: bool = True,
+    icals: list[str] | None = None,
+    resource_hrefs: list[str] | None = None,
+    missing_hrefs: set[str] | None = None,
+    outer_href: str | None = None,
+    discovery_property: str | None = None,
+    discovery_status: str | None = None,
+    unauthenticated: bool = False,
+) -> bytes:
     if principal:
-        return f'<multistatus xmlns="DAV:"><response><propstat><prop><current-user-principal><href>{principal}</href></current-user-principal></prop></propstat></response></multistatus>'.encode()
+        property_value = (
+            "<current-user-principal><unauthenticated/></current-user-principal>"
+            if unauthenticated
+            else f"<current-user-principal><href>{principal}</href></current-user-principal>"
+        )
+        return (
+            f'<multistatus xmlns="DAV:"><response><href>{outer_href or "/wrong-resource/"}</href>'
+            f"<propstat><prop>{property_value}</prop>"
+            f"{f'<status>{discovery_status}</status>' if discovery_status else ''}"
+            f"</propstat></response></multistatus>"
+        ).encode()
     if home:
-        return f'<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><response><propstat><prop><c:calendar-home-set><href>{home}</href></c:calendar-home-set></prop></propstat></response></multistatus>'.encode()
+        property_value = f"<c:calendar-home-set><href>{home}</href></c:calendar-home-set>"
+        return (
+            f'<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+            f'<response><href>{outer_href or "/wrong-principal-resource/"}</href>'
+            f"<propstat><prop>{property_value}</prop>"
+            f"{f'<status>{discovery_status}</status>' if discovery_status else ''}"
+            f"</propstat></response></multistatus>"
+        ).encode()
+    if discovery_property:
+        namespace = ' xmlns:c="urn:ietf:params:xml:ns:caldav"' if discovery_property == "home" else ""
+        property_xml = (
+            "<c:calendar-home-set/>" if discovery_property == "home" else "<current-user-principal/>"
+        )
+        return (
+            f'<multistatus xmlns="DAV:"{namespace}><response><href>/outer-only/</href>'
+            f"<propstat><prop>{property_xml}</prop>"
+            f"{f'<status>{discovery_status}</status>' if discovery_status else ''}"
+            f"</propstat></response></multistatus>"
+        ).encode()
     if calendars:
+        second = b"""<response><href>/home/two/</href><propstat><prop><resourcetype><c:calendar/></resourcetype><displayname>Same name</displayname></prop></propstat></response>""" if include_second_calendar else b""
         return b"""<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:i="http://apple.com/ns/ical/">
 <response><href>/home/one/</href><propstat><prop><resourcetype><c:calendar/></resourcetype><displayname>Same name</displayname><i:calendar-color>#ff0000</i:calendar-color></prop></propstat></response>
-<response><href>/home/two/</href><propstat><prop><resourcetype><c:calendar/></resourcetype><displayname>Same name</displayname></prop></propstat></response>
-</multistatus>"""
+""" + second + b"</multistatus>"
+    refs = resource_hrefs or [f"event-{index}.ics" for index, _ in enumerate(icals or [], start=1)]
+    missing = missing_hrefs or set()
     data = "".join(
-        f"<response><href>/event-{index}.ics</href><propstat><prop><calendar-data><![CDATA[{value}]]></calendar-data></prop></propstat></response>"
-        for index, value in enumerate(icals or [], start=1)
+        (
+            f'<response><href>{href}</href><propstat><prop/><status>HTTP/1.1 404 Not Found</status>'
+            "</propstat></response>"
+            if href in missing
+            else f'<response><href>{href}</href><propstat><prop><getetag>"etag-{index}"</getetag>'
+            f"<c:calendar-data><![CDATA[{(icals or [])[index - 1]}]]></c:calendar-data></prop>"
+            "<status>HTTP/1.1 200 OK</status></propstat></response>"
+        )
+        for index, href in enumerate(refs, start=1)
     )
     return f'<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{data}</multistatus>'.encode()
 
@@ -110,23 +268,47 @@ class FixtureCalDavTransport:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
+        self.bodies: list[str] = []
         self.fail_next_report = False
         self.invalid_next_report = False
         self.auth_next_report = False
         self.include_second_event = True
         self.shift_second_event = False
+        self.move_second_event_outside = False
+        self.delete_second_event = False
+        self.dense_only = False
+        self.include_second_calendar = True
+        self.discovery_variant = "normal"
 
     async def propfind(self, url: str, *, body: bytes, depth: str) -> bytes:
         self.calls.append(("PROPFIND", url, depth))
         body_text = body.decode()
+        self.bodies.append(body_text)
         if "current-user-principal" in body_text:
-            return _multistatus(principal="/principal/")
+            if self.discovery_variant == "principal_missing":
+                return _multistatus(discovery_property="principal")
+            if self.discovery_variant == "principal_unauthenticated":
+                return _multistatus(principal="/principal/", unauthenticated=True)
+            if self.discovery_variant == "principal_non_2xx":
+                return _multistatus(
+                    principal="/principal/",
+                    discovery_status="HTTP/1.1 404 Not Found",
+                )
+            return _multistatus(principal="/principal/", outer_href="/outer-principal-resource/")
         if "calendar-home-set" in body_text:
-            return _multistatus(home="/home/")
-        return _multistatus(calendars=True)
+            if self.discovery_variant == "home_missing":
+                return _multistatus(discovery_property="home")
+            if self.discovery_variant == "home_non_2xx":
+                return _multistatus(
+                    home="/home/",
+                    discovery_status="HTTP/1.1 403 Forbidden",
+                )
+            return _multistatus(home="/home/", outer_href="/outer-home-resource/")
+        return _multistatus(calendars=True, include_second_calendar=self.include_second_calendar)
 
     async def report(self, url: str, *, body: bytes, depth: str) -> bytes:
         self.calls.append(("REPORT", url, depth))
+        self.bodies.append(body.decode())
         if self.fail_next_report:
             self.fail_next_report = False
             raise ProviderTimeoutError("fixture timeout")
@@ -135,18 +317,37 @@ class FixtureCalDavTransport:
             return b"not xml"
         if self.auth_next_report:
             self.auth_next_report = False
-            from app.planning.providers.contracts import ProviderAuthError
-
             raise ProviderAuthError("fixture auth failure")
         number = 1 if url.endswith("one/") else 2
+        resource_icals = _resource_icals(
+            number,
+            include_second_event=self.include_second_event,
+            shift_second_event=self.shift_second_event,
+            move_second_event_outside=self.move_second_event_outside,
+            dense_only=self.dense_only,
+        )
+        if "calendar-multiget" in body.decode():
+            requested = re.findall(r"<d:href>(.*?)</d:href>", body.decode())
+            hrefs = [href for href in requested]
+            icals: list[str] = []
+            missing: set[str] = set()
+            for href in hrefs:
+                if (self.delete_second_event or not self.include_second_event) and href.endswith("event-5.ics"):
+                    missing.add(href)
+                    continue
+                try:
+                    index = int(href.rsplit("event-", 1)[1].split(".ics", 1)[0]) - 1
+                    icals.append(resource_icals[index])
+                except (IndexError, ValueError) as exc:
+                    raise AssertionError(f"unexpected multiget href: {href}") from exc
+            return _multistatus(resource_hrefs=hrefs, icals=icals, missing_hrefs=missing)
+        resource_hrefs = [f"event-{index}.ics" for index in range(1, len(resource_icals) + 1)]
+        if self.delete_second_event or self.move_second_event_outside:
+            resource_hrefs = resource_hrefs[:-1]
+            resource_icals = resource_icals[:-1]
         return _multistatus(
-            icals=[
-                _ical(
-                    number,
-                    include_second_event=self.include_second_event,
-                    shift_second_event=self.shift_second_event,
-                )
-            ]
+            icals=resource_icals,
+            resource_hrefs=resource_hrefs,
         )
 
 
@@ -192,7 +393,40 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exception.start_at_utc, "2026-08-18T11:00:00Z")
         hostile = next(event for event in events if "literal" in event.title)
         self.assertEqual(hostile.title, "<b>literal</b>")
+        self.assertEqual(self.transport.calls[1][1], "https://fixture.invalid/principal/")
+        self.assertEqual(self.transport.calls[2][1], "https://fixture.invalid/home/")
         self.assertTrue(all(method in {"PROPFIND", "REPORT"} for method, _, _ in self.transport.calls))
+
+    async def test_property_scoped_discovery_rejects_unsafe_or_unsuccessful_results(self) -> None:
+        self.transport.calls.clear()
+        self.transport.discovery_variant = "principal_missing"
+        with self.assertRaises(ProviderPayloadError):
+            await self.provider.discover_account()
+        self.assertEqual(len(self.transport.calls), 1)
+
+        self.transport.calls.clear()
+        self.transport.discovery_variant = "principal_unauthenticated"
+        with self.assertRaises(ProviderAuthError):
+            await self.provider.discover_account()
+        self.assertEqual(len(self.transport.calls), 1)
+
+        self.transport.calls.clear()
+        self.transport.discovery_variant = "principal_non_2xx"
+        with self.assertRaises(ProviderPayloadError):
+            await self.provider.discover_account()
+        self.assertEqual(len(self.transport.calls), 1)
+
+        self.transport.calls.clear()
+        self.transport.discovery_variant = "home_missing"
+        with self.assertRaises(ProviderPayloadError):
+            await self.provider.discover_account()
+        self.assertEqual([method for method, _, _ in self.transport.calls], ["PROPFIND", "PROPFIND"])
+
+        self.transport.calls.clear()
+        self.transport.discovery_variant = "home_non_2xx"
+        with self.assertRaises(ProviderPayloadError):
+            await self.provider.discover_account()
+        self.assertEqual([method for method, _, _ in self.transport.calls], ["PROPFIND", "PROPFIND"])
 
     async def test_cache_combines_local_and_provider_events_and_stabilizes_identity(self) -> None:
         local = PlanningRepository(self.database).create_calendar_event(
@@ -270,8 +504,8 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.transport.invalid_next_report = True
         malformed = await self.cache.refresh(WINDOW)
         self.assertEqual(malformed.status, "stale")
-        self.assertEqual(malformed.error_code, "provider_payload_invalid")
-        self.assertEqual(self.cache.health_snapshot()["providerErrorCode"], "provider_payload_invalid")
+        self.assertEqual(malformed.error_code, "provider_xml_invalid")
+        self.assertEqual(self.cache.health_snapshot()["providerErrorCode"], "provider_xml_invalid")
 
         self.transport.auth_next_report = True
         auth = await self.cache.refresh(WINDOW)
@@ -285,7 +519,7 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failure_is_stale_cache_and_successful_disappearance_tombstones_only_provider_rows(self) -> None:
-        await self.cache.refresh(WINDOW)
+        await self.cache.refresh(W1)
         before_native = PlanningRepository(self.database).create_calendar_event(
             title="Native remains",
             all_day=True,
@@ -295,7 +529,7 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
             context=CONTEXT,
         )
         self.transport.fail_next_report = True
-        failed = await self.cache.refresh(WINDOW)
+        failed = await self.cache.refresh(W2)
         self.assertEqual(failed.status, "stale")
         self.assertEqual(failed.error_code, "provider_timeout")
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM calendar_events WHERE deleted_at IS NOT NULL").fetchone()[0], 0)
@@ -303,11 +537,98 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cache.source_metadata()[1]["status"], "stale")
 
         self.transport.include_second_event = False
-        recovered = await self.cache.refresh(WINDOW)
+        recovered = await self.cache.refresh(W2)
         self.assertEqual(recovered.status, "current")
         self.assertEqual(self.cache.source_metadata()[1]["status"], "current")
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM calendar_events WHERE deleted_at IS NOT NULL").fetchone()[0], 2)
         self.assertEqual(EventService(self.database).get(before_native.id).deleted_at, None)
+
+    async def test_shifted_windows_verify_stable_identity_and_true_remote_deletion(self) -> None:
+        await self.cache.refresh(W1)
+        before = self.database.connection.execute(
+            "SELECT id, provider_id FROM calendar_events WHERE title = '<b>literal</b>' ORDER BY provider_calendar_id"
+        ).fetchall()
+        self.assertEqual(len(before), 2)
+
+        await self.cache.refresh(W2)
+        after_shift = self.database.connection.execute(
+            "SELECT id, provider_id FROM calendar_events WHERE title = '<b>literal</b>' ORDER BY provider_calendar_id"
+        ).fetchall()
+        self.assertEqual([(row["id"], row["provider_id"]) for row in before], [(row["id"], row["provider_id"]) for row in after_shift])
+
+        self.transport.shift_second_event = True
+        await self.cache.refresh(W2)
+        changed = self.database.connection.execute(
+            "SELECT id, title, start_at_utc FROM calendar_events WHERE title = 'changed <b>literal</b>' ORDER BY provider_calendar_id"
+        ).fetchall()
+        self.assertEqual([row["id"] for row in changed], [row["id"] for row in before])
+        self.assertTrue(all(row["start_at_utc"] == "2026-08-20T08:00:00Z" for row in changed))
+
+        self.transport.delete_second_event = True
+        deleted = await self.cache.refresh(W2)
+        self.assertTrue(any("calendar-multiget" in body for body in self.transport.bodies))
+        self.assertEqual(deleted.tombstones_created, 2)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NOT NULL"
+            ).fetchone()[0],
+            2,
+        )
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NULL"
+            ).fetchone()[0],
+            12,
+        )
+        tombstone = self.database.connection.execute(
+            "SELECT provider_id, provider_calendar_id FROM calendar_events WHERE deleted_at IS NOT NULL LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(tombstone["provider_id"])
+        self.assertIsNotNone(tombstone["provider_calendar_id"])
+
+    async def test_moved_outside_window_is_present_but_not_tombstoned(self) -> None:
+        await self.cache.refresh(W1)
+        self.transport.move_second_event_outside = True
+        moved = await self.cache.refresh(W2)
+        self.assertEqual(moved.tombstones_created, 0)
+        rows = self.database.connection.execute(
+            "SELECT deleted_at, sync_state FROM calendar_events WHERE title = '<b>literal</b>'"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["deleted_at"] is None for row in rows))
+        self.assertTrue(all(row["sync_state"] == "stale" for row in rows))
+
+    async def test_disappeared_calendar_marks_cached_events_stale_without_deleting_them(self) -> None:
+        await self.cache.refresh(W1)
+        second_calendar_id = self.database.connection.execute(
+            "SELECT provider_calendar_id FROM provider_calendars ORDER BY provider_calendar_id DESC LIMIT 1"
+        ).fetchone()[0]
+        self.transport.include_second_calendar = False
+        result = await self.cache.refresh(W2)
+        self.assertEqual(result.status, "current")
+        calendar = self.database.connection.execute(
+            "SELECT enabled, status, last_error_code FROM provider_calendars WHERE provider_calendar_id = ?",
+            (second_calendar_id,),
+        ).fetchone()
+        self.assertEqual(calendar["enabled"], 0)
+        self.assertEqual(calendar["status"], "disabled")
+        self.assertEqual(calendar["last_error_code"], "provider_calendar_disappeared")
+        events = self.database.connection.execute(
+            "SELECT sync_state, deleted_at FROM calendar_events WHERE provider_calendar_id = ?",
+            (second_calendar_id,),
+        ).fetchall()
+        self.assertEqual(len(events), 7)
+        self.assertTrue(all(row["sync_state"] == "stale" for row in events))
+        self.assertTrue(all(row["deleted_at"] is None for row in events))
+
+    async def test_dense_recurrence_is_rejected_before_library_expansion(self) -> None:
+        self.transport.dense_only = True
+        calendars = await self.provider.list_calendars()
+        with patch("app.planning.providers.icloud.recurring_ical_events.of") as expand:
+            with self.assertRaises(ProviderPayloadError) as raised:
+                await self.provider.fetch_events(calendars[0], W2)
+        self.assertEqual(raised.exception.code, "provider_event_limit")
+        expand.assert_not_called()
 
     async def test_read_by_id_and_redacted_source_metadata(self) -> None:
         await self.cache.refresh(WINDOW)
@@ -324,6 +645,19 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/home/", serialized)
         self.assertEqual(payload["sources"][1]["provider"], "icloud")
         self.assertEqual(payload["sources"][1]["status"], "current")
+        resource_ref = self.database.connection.execute(
+            "SELECT resource_ref FROM provider_event_cache WHERE resource_ref IS NOT NULL LIMIT 1"
+        ).fetchone()[0]
+        self.assertTrue(resource_ref)
+        self.assertNotIn(resource_ref, serialized)
+        self.assertNotIn(resource_ref, str(self.cache.health_snapshot()))
+        event_source_ref = self.database.connection.execute(
+            "SELECT source_ref FROM calendar_events WHERE id = ?", (imported,)
+        ).fetchone()[0]
+        self.assertNotEqual(event_source_ref, resource_ref)
+        self.assertNotIn(resource_ref, str(self.database.connection.execute("SELECT * FROM audit_events").fetchall()))
+        with self.assertNoLogs("app.planning.providers", level="INFO"):
+            await self.cache.refresh(W2)
 
     async def test_disabled_and_not_configured_states_do_not_call_provider(self) -> None:
         disabled = ProviderCalendarCache(

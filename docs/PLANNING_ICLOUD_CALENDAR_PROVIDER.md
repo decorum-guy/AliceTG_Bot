@@ -36,14 +36,23 @@ are rejected.
 - `list_calendars()`;
 - `fetch_events(calendar, window)`.
 
+The iCloud adapter also implements a separate optional read-only
+`verify_resources(calendar, resource_refs, window)` capability for bounded
+authoritative reconciliation. It has no mutation methods and does not widen
+the provider-neutral fetch contract.
+
 The concrete transport has only `PROPFIND` and `REPORT` methods. There is no
 CalDAV `PUT`, `DELETE`, event creation/update/move, calendar mutation, invite
 response, or writeback method in the adapter surface. Fixture transports assert
 that every call is `PROPFIND` or `REPORT`.
 
 Discovery follows CalDAV `current-user-principal` and `calendar-home-set`
-properties, then discovers calendar collections and calendar data. It does not
-depend on an observed iCloud shard hostname.
+properties, then discovers calendar collections and calendar data. The DAV
+parser is property-scoped: it accepts only a successful propstat's nested
+`DAV:href` inside the requested property, never the enclosing response href.
+`DAV:unauthenticated`, missing properties, ambiguous values, and non-2xx
+propstats fail closed with sanitized codes. It does not depend on an observed
+iCloud shard hostname.
 
 `icalendar==7.2.2` parses iCalendar and timezone values. The maintained
 `recurring-ical-events==3.8.2` library expands occurrences for the finite
@@ -58,8 +67,10 @@ account name and is displayed only as an opaque ID. The display label is
 
 Calendar IDs are one-way opaque values over account identity plus the canonical
 discovered calendar reference. Calendar display names are not identifiers, so
-two calendars with the same name remain distinct. Raw CalDAV hrefs are kept
-only in the live adapter transport and are never stored or returned.
+two calendars with the same name remain distinct. A trusted resource href may
+be retained only in the internal provider cache for read-only deletion
+verification; it is never a browser-facing identity, `CalendarEvent.source_ref`,
+health/API metadata, log field, or audit field.
 
 Event IDs are canonical Alice UUIDv4 values. SQLite maps the opaque provider
 identity `(calendar identity, iCloud UID, recurrence-instance identity)` to the
@@ -112,7 +123,8 @@ Migration 005 adds three provider-only tables:
 - `provider_calendars`: opaque calendar identity, display name/color, status and
   freshness;
 - `provider_event_cache`: canonical UUIDv4 mapping, opaque event identity,
-  recurrence identity, bounded window and refresh marker.
+  recurrence identity, bounded window, refresh marker, and an optional
+  server-only trusted resource reference.
 
 The trusted cache path writes provider-owned rows directly. It never calls
 `EventService.create/update/delete`, so native local Planning ownership and its
@@ -128,10 +140,27 @@ A complete successful refresh atomically updates the source, calendars, event
 rows and mapping rows. A provider timeout, authentication failure, malformed
 payload or partial refresh leaves the prior cache intact, marks the provider
 source/cache stale or error, and never tombstones from incomplete information.
-A later successful authoritative refresh of the same complete window may
-tombstone only provider occurrences conclusively absent from that window. The
-tombstone is local cache state, not an external delete, and preserves the
-provider identity for read-by-ID diagnostics.
+A shifted rolling window is reconciled conservatively. For cached resources
+that are absent from the new time-range response, the adapter issues a bounded
+CalDAV `calendar-multiget` `REPORT` using the trusted resource href. An explicit
+successful resource read keeps the event (and marks the old cached occurrence
+stale), including when the event moved outside the requested window. An
+explicit 404/410 for that exact resource is the only deletion proof and may
+tombstone its provider-owned occurrences. Missing/ambiguous verification,
+timeouts, authentication failures, malformed payloads, and partial refreshes
+create zero tombstones. No CalDAV `DELETE` is issued.
+
+A calendar-list refresh that no longer returns a previously known calendar
+marks that calendar `disabled` with `provider_calendar_disappeared` and marks
+its cached events `stale`; it does not falsely delete their provider objects.
+Tombstones preserve provider identity for read-by-ID diagnostics.
+
+Before calling `recurring-ical-events`, the adapter computes a conservative
+upper bound from each RRULE's frequency, interval, COUNT/UNTIL/window span and
+BY-part multiplicity, plus RDATE values. If the bound exceeds the per-calendar
+event cap, it returns `provider_event_limit` without invoking the expansion
+library. The pinned library remains responsible for actual recurrence and
+exception/`RECURRENCE-ID` semantics.
 
 ## Freshness and health
 
@@ -153,11 +182,13 @@ patched or deleted through the B4 local mutation API; those calls return
 
 ## Backup policy
 
-The cache tables are included in the existing encrypted Planning SQLite backup
+The cache tables, including the internal resource reference used for
+verification, are included in the existing encrypted Planning SQLite backup
 because they are part of the durable database snapshot, but they are
 reconstructable and may be stale after restore. The next successful provider
 refresh replaces them. No credential is stored in the tables or backup
-manifest. Existing native Planning data is not rewritten.
+manifest, and the internal reference is never exposed by the API or health
+response. Existing native Planning data is not rewritten.
 
 ## Runtime activation after merge
 

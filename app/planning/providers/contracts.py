@@ -13,6 +13,11 @@ class ProviderAdapterError(RuntimeError):
 
     code = "provider_error"
 
+    def __init__(self, detail: str | None = None) -> None:
+        selected = detail if isinstance(detail, str) and detail.startswith("provider_") else type(self).code
+        self.code = selected
+        super().__init__(selected)
+
 
 class ProviderTimeoutError(ProviderAdapterError):
     code = "provider_timeout"
@@ -76,6 +81,18 @@ class ExternalCalendarEvent:
     end_at_utc: str | None
     start_date: str | None
     end_date_exclusive: str | None
+    # Provider-internal resource identity used only by a read-only verifier.
+    # It is never copied into CalendarEvent.source_ref or API envelopes.
+    resource_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class ExternalResourceVerification:
+    """Conclusive read-only status for one provider resource reference."""
+
+    resource_ref: str
+    status: Literal["present", "missing"]
+    events: tuple[ExternalCalendarEvent, ...] = ()
 
 
 class ExternalCalendarProvider(Protocol):
@@ -90,3 +107,14 @@ class ExternalCalendarProvider(Protocol):
         calendar: ExternalCalendar,
         window: CalendarWindow,
     ) -> list[ExternalCalendarEvent]: ...
+
+
+class ExternalCalendarResourceVerifier(Protocol):
+    """Optional read-only capability for authoritative missing-resource checks."""
+
+    async def verify_resources(
+        self,
+        calendar: ExternalCalendar,
+        resource_refs: list[str],
+        window: CalendarWindow,
+    ) -> list[ExternalResourceVerification]: ...

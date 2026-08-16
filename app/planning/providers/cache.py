@@ -8,19 +8,17 @@ from typing import Any, Callable
 
 from app.planning.db import PlanningDatabase
 from app.planning.models import (
-    CalendarEvent,
     new_uuid4,
     utc_now,
     validate_event_shape,
     validate_text,
-    validate_utc_timestamp,
-    validate_uuid4,
 )
 from app.planning.providers.contracts import (
     CalendarWindow,
     ExternalCalendar,
     ExternalCalendarEvent,
     ExternalCalendarProvider,
+    ExternalResourceVerification,
     ProviderAdapterError,
     ProviderStatus,
 )
@@ -162,13 +160,21 @@ class ProviderCalendarCache:
             calendars = await self.provider.list_calendars()
             if len(calendars) > self.max_calendars:
                 raise ProviderAdapterError("provider_calendar_limit")
-            fetched: list[tuple[ExternalCalendar, list[ExternalCalendarEvent]]] = []
+            fetched: list[
+                tuple[ExternalCalendar, list[ExternalCalendarEvent], list[ExternalResourceVerification]]
+            ] = []
+            verifier = getattr(self.provider, "verify_resources", None)
             for calendar in calendars:
                 if not calendar.enabled:
-                    fetched.append((calendar, []))
+                    fetched.append((calendar, [], []))
                     continue
                 events = await self.provider.fetch_events(calendar, window)
-                fetched.append((calendar, events))
+                verifications: list[ExternalResourceVerification] = []
+                if callable(verifier):
+                    refs = self._resource_refs_for_calendar(calendar.provider_calendar_id)
+                    if refs:
+                        verifications = await verifier(calendar, refs, window)
+                fetched.append((calendar, events, verifications))
             return self._commit_success(
                 account_id=account.account_id,
                 calendars=fetched,
@@ -187,7 +193,9 @@ class ProviderCalendarCache:
         self,
         *,
         account_id: str,
-        calendars: list[tuple[ExternalCalendar, list[ExternalCalendarEvent]]],
+        calendars: list[
+            tuple[ExternalCalendar, list[ExternalCalendarEvent], list[ExternalResourceVerification]]
+        ],
         window: CalendarWindow,
         observed_at: str,
     ) -> ProviderRefreshResult:
@@ -205,7 +213,7 @@ class ProviderCalendarCache:
                 error_code=None,
             )
             seen_calendar_ids: set[str] = set()
-            for calendar, events in calendars:
+            for calendar, events, verifications in calendars:
                 validate_text(calendar.provider_calendar_id, "provider.calendar_id", max_length=256)
                 seen_calendar_ids.add(calendar.provider_calendar_id)
                 self._upsert_calendar(connection, calendar, observed_at)
@@ -218,22 +226,55 @@ class ProviderCalendarCache:
                         observed_at=observed_at,
                     )
                     event_count += 1
-                tombstones += self._tombstone_missing(
+                for verification in verifications:
+                    for event in verification.events:
+                        self._upsert_event(
+                            connection,
+                            event=event,
+                            window=window,
+                            refresh_token=refresh_token,
+                            observed_at=observed_at,
+                        )
+                        event_count += 1
+                tombstones += self._reconcile_resources(
                     connection,
                     provider_calendar_id=calendar.provider_calendar_id,
-                    window=window,
+                    verifications=verifications,
                     refresh_token=refresh_token,
                     deleted_at=observed_at,
                 )
-            if seen_calendar_ids:
-                placeholders = ",".join("?" for _ in seen_calendar_ids)
+            previous_calendar_ids = [
+                str(row["provider_calendar_id"])
+                for row in connection.execute(
+                    "SELECT provider_calendar_id FROM provider_calendars WHERE source_id = ?",
+                    (self.source_id,),
+                ).fetchall()
+            ]
+            disappeared_calendar_ids = sorted(set(previous_calendar_ids) - seen_calendar_ids)
+            for provider_calendar_id in disappeared_calendar_ids:
                 connection.execute(
-                    f"""
+                    """
                     UPDATE provider_calendars
-                    SET enabled = 0, status = 'error', observed_at = ?, updated_at = ?
-                    WHERE source_id = ? AND provider_calendar_id NOT IN ({placeholders})
+                    SET enabled = 0, status = 'disabled', last_error_code = ?,
+                        observed_at = ?, updated_at = ?
+                    WHERE source_id = ? AND provider_calendar_id = ?
                     """,
-                    (observed_at, observed_at, self.source_id, *sorted(seen_calendar_ids)),
+                    (
+                        "provider_calendar_disappeared",
+                        observed_at,
+                        observed_at,
+                        self.source_id,
+                        provider_calendar_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE calendar_events
+                    SET sync_state = 'stale', updated_at = ?
+                    WHERE provider_calendar_id = ? AND deleted_at IS NULL
+                      AND provider_id IS NOT NULL AND source = 'calendar-provider'
+                    """,
+                    (observed_at, provider_calendar_id),
                 )
         return ProviderRefreshResult(
             self.source_id,
@@ -327,6 +368,8 @@ class ProviderCalendarCache:
         refresh_token: str,
         observed_at: str,
     ) -> None:
+        if event.resource_ref is not None:
+            validate_text(event.resource_ref, "provider.resource_ref", max_length=512)
         validate_event_shape(
             all_day=event.all_day,
             timezone_name=event.timezone,
@@ -437,14 +480,15 @@ class ProviderCalendarCache:
             """
             INSERT INTO provider_event_cache(
                 canonical_event_id, source_id, provider_calendar_id, provider_event_id,
-                identity_key, recurrence_instance_key, window_start_utc, window_end_utc,
-                last_seen_refresh, last_seen_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                identity_key, recurrence_instance_key, resource_ref, window_start_utc,
+                window_end_utc, last_seen_refresh, last_seen_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id, identity_key) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
                 provider_calendar_id = excluded.provider_calendar_id,
                 provider_event_id = excluded.provider_event_id,
                 recurrence_instance_key = excluded.recurrence_instance_key,
+                resource_ref = excluded.resource_ref,
                 window_start_utc = excluded.window_start_utc,
                 window_end_utc = excluded.window_end_utc,
                 last_seen_refresh = excluded.last_seen_refresh,
@@ -458,6 +502,7 @@ class ProviderCalendarCache:
                 event.provider_event_id,
                 identity_key,
                 event.recurrence_instance_key,
+                event.resource_ref,
                 _timestamp(window.start),
                 _timestamp(window.end),
                 refresh_token,
@@ -467,47 +512,69 @@ class ProviderCalendarCache:
             ),
         )
 
-    def _tombstone_missing(
+    def _resource_refs_for_calendar(self, provider_calendar_id: str) -> list[str]:
+        rows = self.database.connection.execute(
+            """
+            SELECT DISTINCT pec.resource_ref
+            FROM provider_event_cache AS pec
+            JOIN calendar_events AS ce ON ce.id = pec.canonical_event_id
+            WHERE pec.source_id = ? AND pec.provider_calendar_id = ?
+              AND pec.resource_ref IS NOT NULL AND ce.deleted_at IS NULL
+            ORDER BY pec.resource_ref
+            LIMIT 512
+            """,
+            (self.source_id, provider_calendar_id),
+        ).fetchall()
+        return [str(row["resource_ref"]) for row in rows if row["resource_ref"]]
+
+    def _reconcile_resources(
         self,
         connection: sqlite3.Connection,
         *,
         provider_calendar_id: str,
-        window: CalendarWindow,
+        verifications: list[ExternalResourceVerification],
         refresh_token: str,
         deleted_at: str,
     ) -> int:
-        rows = connection.execute(
-            """
-            SELECT pec.canonical_event_id
-            FROM provider_event_cache AS pec
-            JOIN calendar_events AS ce ON ce.id = pec.canonical_event_id
-            WHERE pec.source_id = ?
-              AND pec.provider_calendar_id = ?
-              AND pec.window_start_utc = ?
-              AND pec.window_end_utc = ?
-              AND pec.last_seen_refresh != ?
-              AND ce.deleted_at IS NULL
-              AND ce.provider_id IS NOT NULL
-              AND ce.provider_calendar_id IS NOT NULL
-            """,
-            (
-                self.source_id,
-                provider_calendar_id,
-                _timestamp(window.start),
-                _timestamp(window.end),
-                refresh_token,
-            ),
-        ).fetchall()
-        for row in rows:
+        missing_refs = [verification.resource_ref for verification in verifications if verification.status == "missing"]
+        present_refs = [verification.resource_ref for verification in verifications if verification.status == "present"]
+        tombstone_ids: list[str] = []
+        for resource_ref in missing_refs:
+            rows = connection.execute(
+                """
+                SELECT pec.canonical_event_id
+                FROM provider_event_cache AS pec
+                JOIN calendar_events AS ce ON ce.id = pec.canonical_event_id
+                WHERE pec.source_id = ? AND pec.provider_calendar_id = ?
+                  AND pec.resource_ref = ? AND ce.deleted_at IS NULL
+                  AND ce.provider_id IS NOT NULL AND ce.provider_calendar_id IS NOT NULL
+                """,
+                (self.source_id, provider_calendar_id, resource_ref),
+            ).fetchall()
+            tombstone_ids.extend(str(row["canonical_event_id"]) for row in rows)
+        for canonical_id in tombstone_ids:
             connection.execute(
                 """
                 UPDATE calendar_events
                 SET deleted_at = ?, updated_at = ?, version = version + 1
                 WHERE id = ? AND provider_id IS NOT NULL AND provider_calendar_id IS NOT NULL
                 """,
-                (deleted_at, deleted_at, str(row["canonical_event_id"])),
+                (deleted_at, deleted_at, canonical_id),
             )
-        return len(rows)
+        for resource_ref in present_refs:
+            connection.execute(
+                """
+                UPDATE calendar_events
+                SET sync_state = 'stale', updated_at = ?
+                WHERE id IN (
+                    SELECT canonical_event_id FROM provider_event_cache
+                    WHERE source_id = ? AND provider_calendar_id = ?
+                      AND resource_ref = ? AND last_seen_refresh != ?
+                ) AND deleted_at IS NULL AND provider_id IS NOT NULL
+                """,
+                (deleted_at, self.source_id, provider_calendar_id, resource_ref, refresh_token),
+            )
+        return len(set(tombstone_ids))
 
     def _record_failure(
         self,
