@@ -62,8 +62,8 @@ class PlanningStorageTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_empty_database_migrates_repeatably_and_has_required_pragmas(self) -> None:
-        self.assertEqual(self.database.schema_version(), 4)
-        self.assertEqual(self.database.migrate(), 4)
+        self.assertEqual(self.database.schema_version(), 5)
+        self.assertEqual(self.database.migrate(), 5)
         self.assertEqual(self.database.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         self.assertEqual(self.database.connection.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
         tables = {
@@ -87,9 +87,12 @@ class PlanningStorageTests(unittest.TestCase):
                 "sync_cursors",
                 "sync_conflicts",
                 "telegram_action_tokens",
+                "provider_sources",
+                "provider_calendars",
+                "provider_event_cache",
             }.issubset(tables)
         )
-        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 4)
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 5)
         self.assertEqual(self.database.integrity_check(), "ok")
 
     def test_newer_schema_is_refused(self) -> None:
@@ -115,10 +118,10 @@ class PlanningStorageTests(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             versions = list(executor.map(lambda _: initialize(), (1, 2)))
-        self.assertEqual(versions, [4, 4])
+        self.assertEqual(versions, [5, 5])
         check = PlanningDatabase(concurrent_path)
         try:
-            self.assertEqual(check.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 4)
+            self.assertEqual(check.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 5)
         finally:
             check.close()
 

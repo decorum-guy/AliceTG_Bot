@@ -50,7 +50,7 @@ package.
 Verify by recognized filename, not an arbitrary filesystem path:
 
 ```text
-python -m app.planning.backup verify planning-<timestamp>-schema4-<id>.sqlite3.a8
+python -m app.planning.backup verify planning-<timestamp>-schema5-<id>.sqlite3.a8
 ```
 
 Verification decrypts into a temporary isolated directory, checks the
