@@ -2,6 +2,9 @@
 
 set -Eeuo pipefail
 
+readonly VERIFY_WINDOW_SECONDS=30
+readonly VERIFY_RETRY_INTERVAL_SECONDS=1
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 override_file="$repo_root/deploy/compose.control-center-loopback.yml"
 verifier="$repo_root/scripts/verify-control-center-loopback.sh"
@@ -13,6 +16,33 @@ dry_run=false
 fail() {
     printf 'error: %s\n' "$1" >&2
     exit "${2:-1}"
+}
+
+verify_loopback_ready() {
+    local deadline
+    local now
+    local verifier_exit=1
+
+    deadline=$(( $(date +%s) + VERIFY_WINDOW_SECONDS ))
+    while :; do
+        if "$verifier"; then
+            return 0
+        else
+            verifier_exit=$?
+        fi
+
+        case "$verifier_exit" in
+            64|77)
+                return "$verifier_exit"
+                ;;
+        esac
+
+        now="$(date +%s)"
+        if (( now >= deadline )); then
+            return "$verifier_exit"
+        fi
+        sleep "$VERIFY_RETRY_INTERVAL_SECONDS"
+    done
 }
 
 usage() {
@@ -116,4 +146,4 @@ docker compose \
     -f "$override_file" \
     up -d --build --no-deps telegram-bot
 
-"$verifier"
+verify_loopback_ready
