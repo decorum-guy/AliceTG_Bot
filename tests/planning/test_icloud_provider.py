@@ -318,6 +318,8 @@ class FixtureCalDavTransport:
         self.include_second_calendar = True
         self.discovery_variant = "normal"
         self.multiget_mode = "normal"
+        self.empty_calendar_numbers: set[int] = set()
+        self.report_payload: bytes | None = None
 
     async def propfind(self, url: str, *, body: bytes, depth: str) -> bytes:
         self.calls.append(("PROPFIND", url, depth))
@@ -347,7 +349,8 @@ class FixtureCalDavTransport:
 
     async def report(self, url: str, *, body: bytes, depth: str) -> bytes:
         self.calls.append(("REPORT", url, depth))
-        self.bodies.append(body.decode())
+        body_text = body.decode()
+        self.bodies.append(body_text)
         if self.fail_next_report:
             self.fail_next_report = False
             raise ProviderTimeoutError("fixture timeout")
@@ -358,6 +361,8 @@ class FixtureCalDavTransport:
             self.auth_next_report = False
             raise ProviderAuthError("fixture auth failure")
         number = 1 if url.endswith("one/") else 2
+        if self.report_payload is not None and "calendar-multiget" not in body_text:
+            return self.report_payload
         resource_icals = _resource_icals(
             number,
             include_second_event=self.include_second_event,
@@ -365,8 +370,10 @@ class FixtureCalDavTransport:
             move_second_event_outside=self.move_second_event_outside,
             dense_only=self.dense_only,
         )
-        if "calendar-multiget" in body.decode():
-            requested = re.findall(r"<d:href>(.*?)</d:href>", body.decode())
+        if "calendar-multiget" in body_text:
+            if self.multiget_mode == "empty":
+                return _multistatus(resource_hrefs=[])
+            requested = re.findall(r"<d:href>(.*?)</d:href>", body_text)
             hrefs = [href for href in requested]
             if self.multiget_mode == "omitted":
                 hrefs = hrefs[:-1]
@@ -413,6 +420,8 @@ class FixtureCalDavTransport:
                 direct_statuses=direct_statuses,
                 no_data_hrefs=no_data_hrefs,
             )
+        if number in self.empty_calendar_numbers:
+            return _multistatus(resource_hrefs=[])
         resource_hrefs = [f"event-{index}.ics" for index in range(1, len(resource_icals) + 1)]
         if self.delete_second_event or self.move_second_event_outside:
             resource_hrefs = resource_hrefs[:-1]
@@ -572,6 +581,122 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProviderPayloadError):
             await self.provider.discover_account()
         self.assertEqual([method for method, _, _ in self.transport.calls], ["PROPFIND", "PROPFIND"])
+
+    async def test_empty_calendar_query_accepts_only_dav_multistatus(self) -> None:
+        calendars = await self.provider.list_calendars()
+        self.transport.report_payload = b'<d:multistatus xmlns:d="DAV:" />'
+        self.assertEqual(await self.provider.fetch_events(calendars[0], W1), [])
+
+        self.transport.report_payload = b'<d:multistatus xmlns:d="DAV:">\n  \n</d:multistatus>'
+        self.assertEqual(await self.provider.fetch_events(calendars[0], W1), [])
+
+        invalid_payloads = (
+            b'<d:collection xmlns:d="DAV:" />',
+            b'<d:multistatus xmlns:d="urn:wrong" />',
+            b'<html />',
+            b"not xml",
+        )
+        for payload in invalid_payloads:
+            self.transport.report_payload = payload
+            with self.assertRaises(ProviderPayloadError) as raised:
+                await self.provider.fetch_events(calendars[0], W1)
+            self.assertEqual(raised.exception.code, "provider_xml_invalid")
+
+    async def test_nonempty_calendar_query_still_requires_successful_calendar_data(self) -> None:
+        calendars = await self.provider.list_calendars()
+        self.transport.report_payload = _multistatus(
+            resource_hrefs=["event-1.ics"],
+            no_data_hrefs={"event-1.ics"},
+        )
+        with self.assertRaises(ProviderPayloadError) as raised:
+            await self.provider.fetch_events(calendars[0], W1)
+        self.assertEqual(raised.exception.code, "provider_calendar_data_missing")
+
+    async def test_empty_multiget_is_verification_incomplete(self) -> None:
+        await self.cache.refresh(W1)
+        row = self.database.connection.execute(
+            "SELECT resource_ref, provider_calendar_id FROM provider_event_cache WHERE resource_ref IS NOT NULL LIMIT 1"
+        ).fetchone()
+        calendar = next(
+            calendar
+            for calendar in await self.provider.list_calendars()
+            if calendar.provider_calendar_id == row["provider_calendar_id"]
+        )
+        self.transport.multiget_mode = "empty"
+        with self.assertRaises(ProviderPayloadError) as raised:
+            await self.provider.verify_resources(calendar, [row["resource_ref"]], W2)
+        self.assertEqual(raised.exception.code, "provider_resource_verification_incomplete")
+
+    async def test_mixed_empty_and_populated_calendars_refresh_current(self) -> None:
+        self.transport.empty_calendar_numbers = {1}
+        result = await self.cache.refresh(W1)
+        self.assertEqual(result.status, "current")
+        self.assertEqual(result.calendars_seen, 2)
+        self.assertEqual(result.events_seen, 7)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NULL"
+            ).fetchone()[0],
+            7,
+        )
+        self.assertEqual(self.cache.source_metadata()[1]["status"], "current")
+
+    async def test_all_empty_calendars_refresh_current(self) -> None:
+        self.transport.empty_calendar_numbers = {1, 2}
+        result = await self.cache.refresh(W1)
+        self.assertEqual(result.status, "current")
+        self.assertEqual(result.events_seen, 0)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider'"
+            ).fetchone()[0],
+            0,
+        )
+        source = self.cache.source_metadata()[1]
+        self.assertEqual(source["status"], "current")
+        self.assertTrue(all(calendar["status"] == "current" for calendar in source["calendars"]))
+
+    async def test_empty_query_with_present_multiget_does_not_tombstone_cached_event(self) -> None:
+        await self.cache.refresh(W1)
+        native = PlanningRepository(self.database).create_calendar_event(
+            title="Native remains",
+            all_day=False,
+            timezone="Europe/Moscow",
+            start_at_utc="2026-08-17T08:00:00Z",
+            end_at_utc="2026-08-17T09:00:00Z",
+            context=CONTEXT,
+        )
+        self.transport.empty_calendar_numbers = {1, 2}
+        result = await self.cache.refresh(W2)
+        self.assertEqual(result.status, "current")
+        self.assertEqual(result.tombstones_created, 0)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NOT NULL"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(EventService(self.database).get(native.id).deleted_at)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND sync_state = 'synced'"
+            ).fetchone()[0],
+            14,
+        )
+
+    async def test_empty_query_with_incomplete_multiget_creates_zero_tombstones(self) -> None:
+        await self.cache.refresh(W1)
+        self.transport.empty_calendar_numbers = {1, 2}
+        self.transport.multiget_mode = "empty"
+        result = await self.cache.refresh(W2)
+        self.assertEqual(result.status, "stale")
+        self.assertEqual(result.tombstones_created, 0)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NOT NULL"
+            ).fetchone()[0],
+            0,
+        )
 
     async def test_multiget_direct_response_statuses_fail_closed(self) -> None:
         await self.cache.refresh(W1)

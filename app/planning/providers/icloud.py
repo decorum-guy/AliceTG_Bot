@@ -254,7 +254,11 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         body = _calendar_query_body(window)
         response = await self.transport.report(calendar.fetch_ref, body=body, depth="1")
         results: list[ExternalCalendarEvent] = []
-        resources = self._parse_calendar_resources(response, calendar.fetch_ref)
+        resources = self._parse_calendar_resources(
+            response,
+            calendar.fetch_ref,
+            allow_empty=True,
+        )
         for resource in resources:
             if resource.status_code is not None and not 200 <= resource.status_code < 300:
                 raise ProviderFetchError("provider_read_failed")
@@ -411,6 +415,8 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         allow_empty: bool = False,
     ) -> list[_CalendarResource]:
         root = _xml_root(payload)
+        if root.tag != f"{{{_DAV}}}multistatus":
+            raise ProviderPayloadError("provider_xml_invalid")
         results: list[_CalendarResource] = []
         seen_hrefs: set[str] = set()
         for response in _xml_children(root, "response"):
