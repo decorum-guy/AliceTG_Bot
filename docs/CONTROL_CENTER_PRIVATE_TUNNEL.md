@@ -6,14 +6,22 @@ dedicated SSH account with local forwarding only.
 
 ## Loopback Docker exposure
 
-Apply the compose override together with the parent Home Assistant compose
-files:
+Routine Alice updates should use the canonical helper from the Alice checkout.
+It always composes the parent Home Assistant project with the tracked loopback
+override, rebuilds only `telegram-bot`, and runs the verifier afterward:
+
+```bash
+cd ~/homeassistant/TG_Alisa_Assistant_Bot
+./scripts/deploy-telegram-bot.sh --parent-root ..
+```
+
+For topology explanation or recovery, the equivalent raw Compose shape is:
 
 ```bash
 docker compose \
   -f compose.yml \
   -f TG_Alisa_Assistant_Bot/deploy/compose.control-center-loopback.yml \
-  up -d homeassistant telegram-bot
+  up -d --build --no-deps telegram-bot
 ```
 
 The exact parent compose file name can differ. The resulting host listeners
@@ -32,6 +40,10 @@ Verify without printing response bodies or tokens:
 ```bash
 ./TG_Alisa_Assistant_Bot/scripts/verify-control-center-loopback.sh
 ```
+
+Do not replace the routine helper with a parent-only `docker compose up` for
+`telegram-bot`; that omits the loopback override and can remove the private
+`127.0.0.1:18088` listener on recreation.
 
 ## Dedicated SSH account
 
