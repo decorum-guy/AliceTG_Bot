@@ -2000,16 +2000,20 @@ python -m app.main
 
 ## Deploy
 
-From the parent Home Assistant compose project on the VPS:
+Use the canonical helper from the Alice checkout. It composes the parent Home
+Assistant project with the tracked Control Center loopback override, rebuilds
+only `telegram-bot`, and verifies the private listeners afterward:
 
 ```bash
 cd ~/homeassistant/TG_Alisa_Assistant_Bot
-git pull
-
-cd ~/homeassistant
-docker compose up -d --build telegram-bot
-docker compose logs --tail=100 telegram-bot
+git pull --ff-only
+./scripts/deploy-telegram-bot.sh --parent-root ..
 ```
+
+The helper auto-detects one of `compose.yml`, `compose.yaml`,
+`docker-compose.yml`, or `docker-compose.yaml` in the parent directory. If
+more than one exists, pass the intended file explicitly with
+`--compose-file`.
 
 ## Rollback If Caddy Breaks
 
