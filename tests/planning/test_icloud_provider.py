@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import re
 import unittest
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +22,14 @@ from app.planning.providers.contracts import (
     ProviderPayloadError,
     ProviderTimeoutError,
 )
-from app.planning.providers.icloud import ICloudCalDavProvider
+from app.planning.providers.icloud import (
+    ICloudCalDavProvider,
+    _CALDAV,
+    _DAV,
+    _calendar_multiget_body,
+    _calendar_query_body,
+    _propfind_body,
+)
 
 
 NOW = "2026-08-16T12:00:00Z"
@@ -415,6 +423,69 @@ class FixtureCalDavTransport:
         )
 
 
+class ICloudXmlBuilderTests(unittest.TestCase):
+    @staticmethod
+    def _expanded(namespace: str, local_name: str) -> str:
+        return f"{{{namespace}}}{local_name}"
+
+    def _assert_propfind_root(self, body: bytes) -> ET.Element:
+        root = ET.fromstring(body)
+        self.assertEqual(root.tag, self._expanded(_DAV, "propfind"))
+        prop = root.find(self._expanded(_DAV, "prop"))
+        self.assertIsNotNone(prop)
+        return prop
+
+    def test_principal_propfind_body_is_dav_bound(self) -> None:
+        prop = self._assert_propfind_root(
+            _propfind_body("<d:current-user-principal/>", {"d": _DAV})
+        )
+        self.assertEqual(
+            [child.tag for child in prop],
+            [self._expanded(_DAV, "current-user-principal")],
+        )
+
+    def test_calendar_home_body_is_valid_without_explicit_d_namespace(self) -> None:
+        prop = self._assert_propfind_root(
+            _propfind_body("<x:calendar-home-set/>", {"x": _CALDAV})
+        )
+        self.assertEqual(
+            [child.tag for child in prop],
+            [self._expanded(_CALDAV, "calendar-home-set")],
+        )
+
+    def test_calendar_list_body_is_valid_and_binds_dav_and_apple_namespaces(self) -> None:
+        prop = self._assert_propfind_root(
+            _propfind_body(
+                "<d:resourcetype/><d:displayname/><x:calendar-color/>",
+                {"d": _DAV, "x": "http://apple.com/ns/ical/"},
+            )
+        )
+        self.assertEqual(
+            [child.tag for child in prop],
+            [
+                self._expanded(_DAV, "resourcetype"),
+                self._expanded(_DAV, "displayname"),
+                self._expanded("http://apple.com/ns/ical/", "calendar-color"),
+            ],
+        )
+
+    def test_correct_explicit_d_namespace_is_not_duplicated(self) -> None:
+        body = _propfind_body(
+            "<x:calendar-home-set/>",
+            {"d": _DAV, "x": _CALDAV},
+        )
+        self.assertEqual(body.count(b'xmlns:d="DAV:"'), 1)
+        self._assert_propfind_root(body)
+
+    def test_wrong_explicit_d_namespace_fails_deterministically(self) -> None:
+        with self.assertRaisesRegex(ValueError, "PROPFIND DAV namespace binding is invalid"):
+            _propfind_body("<d:current-user-principal/>", {"d": "urn:wrong"})
+
+    def test_other_read_only_xml_builders_bind_every_prefix(self) -> None:
+        ET.fromstring(_calendar_query_body(W1))
+        ET.fromstring(_calendar_multiget_body(["https://fixture.invalid/event.ics"]))
+
+
 class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -445,6 +516,16 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         account = await self.provider.discover_account()
         calendars = await self.provider.list_calendars()
         events = await self.provider.fetch_events(calendars[0], WINDOW)
+
+        discovery_bodies = self.transport.bodies[:3]
+        self.assertEqual(len(discovery_bodies), 3)
+        for body in discovery_bodies:
+            root = ET.fromstring(body)
+            self.assertEqual(root.tag, "{DAV:}propfind")
+            self.assertIsNotNone(root.find("{DAV:}prop"))
+        home_prop = ET.fromstring(discovery_bodies[1]).find("{DAV:}prop")
+        self.assertIsNotNone(home_prop)
+        self.assertEqual(home_prop[0].tag, "{urn:ietf:params:xml:ns:caldav}calendar-home-set")
 
         self.assertEqual(account.display_label, "iCloud")
         self.assertNotIn("owner@example.invalid", account.account_id)
