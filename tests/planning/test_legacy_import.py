@@ -192,7 +192,7 @@ class LegacyReminderImportTests(unittest.TestCase):
         self.database.close()
         self.database = PlanningDatabase(self.db_path)
         self.assertEqual(self.database.integrity_check(), "ok")
-        self.assertEqual(self.database.schema_version(), 5)
+        self.assertEqual(self.database.schema_version(), 6)
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM reminders").fetchone()[0], 3)
 
     def test_cutover_gate_requires_marker_and_disabled_mode_keeps_legacy_store(self) -> None:
