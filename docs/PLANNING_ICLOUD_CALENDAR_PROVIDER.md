@@ -116,15 +116,17 @@ data, conference URLs, alarms and attachments are not logged or projected.
 
 ## Cache and reconciliation
 
-Migration 005 adds three provider-only tables:
+Migration 005 adds three provider-only tables, and migration 006 adds the
+durable deletion-confirmation marker:
 
 - `provider_sources`: safe account identity, enabled/configured/status,
   timestamps and sanitized error code;
 - `provider_calendars`: opaque calendar identity, display name/color, status and
   freshness;
 - `provider_event_cache`: canonical UUIDv4 mapping, opaque event identity,
-  recurrence identity, bounded window, refresh marker, and an optional
-  server-only trusted resource reference.
+  recurrence identity, bounded window, refresh marker, an optional server-only
+  trusted resource reference, and persisted successful-miss confirmation
+  state. The confirmation state is separate from generic provider staleness.
 
 The trusted cache path writes provider-owned rows directly. It never calls
 `EventService.create/update/delete`, so native local Planning ownership and its
@@ -136,6 +138,14 @@ past through 365 days in the future, refreshed every five minutes by default.
 No entire-history download is performed. All calendar/event counts and payload
 sizes are bounded.
 
+The current production bootstrap creates one refresh-loop task for the one
+provider cache. Each loop iteration awaits `cache.refresh()` before sleeping;
+status and read routes do not trigger another refresh. Therefore refreshes do
+not overlap in the current single-process architecture, and the cache's one
+transaction per refresh remains the atomic state boundary. Any future manual
+refresh trigger must preserve this serialization rather than adding a broad
+application-wide lock.
+
 A complete successful refresh atomically updates the source, calendars, event
 rows and mapping rows. A provider timeout, authentication failure, malformed
 payload or partial refresh leaves the prior cache intact, marks the provider
@@ -146,13 +156,23 @@ CalDAV `calendar-multiget` `REPORT` using the trusted resource href. An explicit
 successful resource read keeps the event (and marks the old cached occurrence
 stale), including when the event moved outside the requested window. The
 multiget parser accepts both RFC-style response-level `DAV:status` and the
-existing `propstat` status path; an explicit 404/410 for that exact resource,
-with no successful calendar data, is the only deletion proof and may tombstone
-its provider-owned occurrences. A contradictory error status plus successful
-calendar data, omitted or duplicate requested hrefs, direct 200 without
-calendar data, and other non-2xx statuses fail closed. Missing/ambiguous
-verification, timeouts, authentication failures, malformed payloads, and
-partial refreshes create zero tombstones. No CalDAV `DELETE` is issued.
+existing `propstat` status path. An explicit 404/410 for that exact resource is
+a deletion candidate only: the first complete successful missing observation
+is persisted without tombstoning, and a second consecutive complete successful
+missing observation confirms the deletion and creates one tombstone. Thus a
+single transient provider inconsistency cannot make a canonical event
+disappear, while a real deletion is eventually reflected deterministically.
+
+Data fetched by the current calendar query always wins over a contradictory
+missing verification for the same event/resource in that refresh. Omitted or
+duplicate requested hrefs, direct 200 without calendar data, and other non-2xx
+statuses fail closed. Provider timeouts, authentication failures, malformed or
+incomplete payloads, partial refreshes, and disappeared calendars do not count
+as deletion evidence; provider failure also clears pending deletion evidence.
+Pending confirmation is stored in the provider cache and survives process
+restart. Repeated confirmed misses do not change the tombstone again, and a
+later valid provider observation restores the same canonical event identity.
+No CalDAV `DELETE` is issued.
 
 A calendar-list refresh that no longer returns a previously known calendar
 marks that calendar `disabled` with `provider_calendar_disappeared` and marks

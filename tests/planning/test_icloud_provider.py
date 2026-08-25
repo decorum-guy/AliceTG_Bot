@@ -856,11 +856,158 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         recovered = await self.cache.refresh(W2)
         self.assertEqual(recovered.status, "current")
         self.assertEqual(self.cache.source_metadata()[1]["status"], "current")
-        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM calendar_events WHERE deleted_at IS NOT NULL").fetchone()[0], 2)
+        self.assertEqual(recovered.tombstones_created, 0)
+        self.assertEqual(recovered.deletions_deferred, 2)
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM calendar_events WHERE deleted_at IS NOT NULL").fetchone()[0], 0)
         self.assertEqual(EventService(self.database).get(before_native.id).deleted_at, None)
+
+    async def test_transient_missing_resource_is_deferred_and_range_stays_stable(self) -> None:
+        await self.cache.refresh(W1)
+        api = PlanningApiService(
+            self.database,
+            default_timezone="Europe/Moscow",
+            provider_cache=self.cache,
+        )
+        before = api.list_events(
+            from_utc="2026-08-16T00:00:00Z",
+            to_utc="2026-08-23T00:00:00Z",
+            limit=100,
+            offset=0,
+            correlation_id="correlation",
+        )
+        self.transport.include_second_event = False
+        first_missing = await self.cache.refresh(W2)
+        during = api.list_events(
+            from_utc="2026-08-16T00:00:00Z",
+            to_utc="2026-08-23T00:00:00Z",
+            limit=100,
+            offset=0,
+            correlation_id="correlation",
+        )
+        self.assertEqual(first_missing.status, "current")
+        self.assertEqual(first_missing.missing_candidates_seen, 2)
+        self.assertEqual(first_missing.tombstones_created, 0)
+        self.assertEqual(first_missing.deletions_deferred, 2)
+        self.assertEqual(len(during["items"]), len(before["items"]))
+        self.transport.include_second_event = True
+        recovered = await self.cache.refresh(W2)
+        after = api.list_events(
+            from_utc="2026-08-16T00:00:00Z",
+            to_utc="2026-08-23T00:00:00Z",
+            limit=100,
+            offset=0,
+            correlation_id="correlation",
+        )
+        self.assertEqual(recovered.tombstones_created, 0)
+        self.assertEqual(recovered.deletions_deferred, 0)
+        self.assertEqual(len(after["items"]), len(before["items"]))
+        self.assertEqual(
+            {item["id"] for item in after["items"]},
+            {item["id"] for item in before["items"]},
+        )
+
+    async def test_same_refresh_fetched_event_wins_over_contradictory_missing_verification(self) -> None:
+        await self.cache.refresh(W1)
+        self.transport.multiget_mode = "direct_404"
+        contradictory = await self.cache.refresh(W2)
+        self.assertEqual(contradictory.status, "current")
+        self.assertGreater(contradictory.missing_candidates_seen, 0)
+        self.assertEqual(contradictory.tombstones_created, 0)
+        self.assertEqual(contradictory.deletions_deferred, 0)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NULL"
+            ).fetchone()[0],
+            14,
+        )
+
+    async def test_provider_failure_resets_pending_deletion_evidence(self) -> None:
+        await self.cache.refresh(W1)
+        self.transport.include_second_event = False
+        first_missing = await self.cache.refresh(W2)
+        self.assertEqual(first_missing.deletions_deferred, 2)
+        self.transport.fail_next_report = True
+        failed = await self.cache.refresh(W2)
+        self.assertEqual(failed.status, "stale")
+        self.assertEqual(failed.tombstones_created, 0)
+        self.transport.include_second_event = False
+        after_failure = await self.cache.refresh(W2)
+        self.assertEqual(after_failure.tombstones_created, 0)
+        self.assertEqual(after_failure.deletions_deferred, 2)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NOT NULL"
+            ).fetchone()[0],
+            0,
+        )
+
+    async def test_pending_deletion_confirmation_survives_restart(self) -> None:
+        restart_path = Path(self.temp.name) / "restart.sqlite3"
+        first_database = PlanningDatabase(restart_path)
+        first_transport = FixtureCalDavTransport()
+        first_provider = ICloudCalDavProvider(
+            transport=first_transport,
+            account_name="owner@example.invalid",
+            default_timezone="Europe/Moscow",
+        )
+        first_cache = ProviderCalendarCache(
+            first_database,
+            provider=first_provider,
+            provider_name="icloud",
+            account_id=first_provider.account_id_for("owner@example.invalid"),
+            display_label="iCloud",
+            enabled=True,
+            configured=True,
+            now_fn=lambda: NOW,
+        )
+        try:
+            await first_cache.refresh(W1)
+            first_transport.include_second_event = False
+            deferred = await first_cache.refresh(W2)
+            self.assertEqual(deferred.tombstones_created, 0)
+        finally:
+            await first_provider.close()
+            first_database.close()
+
+        second_database = PlanningDatabase(restart_path)
+        second_transport = FixtureCalDavTransport()
+        second_transport.include_second_event = False
+        second_provider = ICloudCalDavProvider(
+            transport=second_transport,
+            account_name="owner@example.invalid",
+            default_timezone="Europe/Moscow",
+        )
+        second_cache = ProviderCalendarCache(
+            second_database,
+            provider=second_provider,
+            provider_name="icloud",
+            account_id=second_provider.account_id_for("owner@example.invalid"),
+            display_label="iCloud",
+            enabled=True,
+            configured=True,
+            now_fn=lambda: NOW,
+        )
+        try:
+            confirmed = await second_cache.refresh(W2)
+            self.assertEqual(confirmed.tombstones_created, 2)
+            self.assertEqual(
+                second_database.connection.execute(
+                    "SELECT COUNT(*) FROM calendar_events WHERE deleted_at IS NOT NULL"
+                ).fetchone()[0],
+                2,
+            )
+        finally:
+            await second_provider.close()
+            second_database.close()
 
     async def test_shifted_windows_verify_stable_identity_and_true_remote_deletion(self) -> None:
         await self.cache.refresh(W1)
+        initial_provider_ids = {
+            row["id"]
+            for row in self.database.connection.execute(
+                "SELECT id FROM calendar_events WHERE source = 'calendar-provider'"
+            ).fetchall()
+        }
         before = self.database.connection.execute(
             "SELECT id, provider_id FROM calendar_events WHERE title = '<b>literal</b>' ORDER BY provider_calendar_id"
         ).fetchall()
@@ -881,9 +1028,19 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["start_at_utc"] == "2026-08-20T08:00:00Z" for row in changed))
 
         self.transport.delete_second_event = True
-        deleted = await self.cache.refresh(W2)
+        deferred = await self.cache.refresh(W2)
         self.assertTrue(any("calendar-multiget" in body for body in self.transport.bodies))
-        self.assertEqual(deleted.tombstones_created, 2)
+        self.assertEqual(deferred.tombstones_created, 0)
+        self.assertEqual(deferred.deletions_deferred, 2)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NOT NULL"
+            ).fetchone()[0],
+            0,
+        )
+        confirmed = await self.cache.refresh(W2)
+        self.assertEqual(confirmed.tombstones_created, 2)
+        self.assertEqual(confirmed.deletions_confirmed, 2)
         self.assertEqual(
             self.database.connection.execute(
                 "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NOT NULL"
@@ -901,6 +1058,35 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()
         self.assertIsNotNone(tombstone["provider_id"])
         self.assertIsNotNone(tombstone["provider_calendar_id"])
+        tombstone_versions = self.database.connection.execute(
+            "SELECT id, version FROM calendar_events WHERE deleted_at IS NOT NULL ORDER BY id"
+        ).fetchall()
+        repeated = await self.cache.refresh(W2)
+        self.assertEqual(repeated.tombstones_created, 0)
+        self.assertEqual(
+            [(row["id"], row["version"]) for row in tombstone_versions],
+            [
+                (row["id"], row["version"])
+                for row in self.database.connection.execute(
+                    "SELECT id, version FROM calendar_events WHERE deleted_at IS NOT NULL ORDER BY id"
+                ).fetchall()
+            ],
+        )
+        self.transport.delete_second_event = False
+        resurrected = await self.cache.refresh(W2)
+        self.assertEqual(resurrected.tombstones_created, 0)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM calendar_events WHERE source = 'calendar-provider' AND deleted_at IS NULL"
+            ).fetchone()[0],
+            14,
+        )
+        self.assertEqual(
+            {row["id"] for row in self.database.connection.execute(
+                "SELECT id FROM calendar_events WHERE source = 'calendar-provider'"
+            ).fetchall()},
+            initial_provider_ids,
+        )
 
     async def test_moved_outside_window_is_present_but_not_tombstoned(self) -> None:
         await self.cache.refresh(W1)

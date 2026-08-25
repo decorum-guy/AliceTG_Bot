@@ -34,6 +34,17 @@ class ProviderRefreshResult:
     observed_at: str
     last_successful_sync_at: str | None
     error_code: str | None = None
+    missing_candidates_seen: int = 0
+    deletions_deferred: int = 0
+    deletions_confirmed: int = 0
+
+
+@dataclass(frozen=True)
+class _ResourceReconciliationResult:
+    tombstones_created: int
+    missing_candidates_seen: int
+    deletions_deferred: int
+    deletions_confirmed: int
 
 
 class ProviderCalendarCache:
@@ -203,6 +214,9 @@ class ProviderCalendarCache:
         refresh_token = new_uuid4()
         tombstones = 0
         event_count = 0
+        missing_candidates_seen = 0
+        deletions_deferred = 0
+        deletions_confirmed = 0
         with self.database.transaction() as connection:
             self._upsert_source(
                 connection,
@@ -217,6 +231,10 @@ class ProviderCalendarCache:
                 validate_text(calendar.provider_calendar_id, "provider.calendar_id", max_length=256)
                 seen_calendar_ids.add(calendar.provider_calendar_id)
                 self._upsert_calendar(connection, calendar, observed_at)
+                fetched_event_ids = {event.provider_event_id for event in events}
+                fetched_resource_refs = {
+                    event.resource_ref for event in events if event.resource_ref is not None
+                }
                 for event in events:
                     self._upsert_event(
                         connection,
@@ -227,6 +245,12 @@ class ProviderCalendarCache:
                     )
                     event_count += 1
                 for verification in verifications:
+                    fetched_event_ids.update(event.provider_event_id for event in verification.events)
+                    fetched_resource_refs.update(
+                        event.resource_ref
+                        for event in verification.events
+                        if event.resource_ref is not None
+                    )
                     for event in verification.events:
                         self._upsert_event(
                             connection,
@@ -236,13 +260,19 @@ class ProviderCalendarCache:
                             observed_at=observed_at,
                         )
                         event_count += 1
-                tombstones += self._reconcile_resources(
+                reconciliation = self._reconcile_resources(
                     connection,
                     provider_calendar_id=calendar.provider_calendar_id,
                     verifications=verifications,
                     refresh_token=refresh_token,
                     deleted_at=observed_at,
+                    fetched_event_ids=fetched_event_ids,
+                    fetched_resource_refs=fetched_resource_refs,
                 )
+                tombstones += reconciliation.tombstones_created
+                missing_candidates_seen += reconciliation.missing_candidates_seen
+                deletions_deferred += reconciliation.deletions_deferred
+                deletions_confirmed += reconciliation.deletions_confirmed
             previous_calendar_ids = [
                 str(row["provider_calendar_id"])
                 for row in connection.execute(
@@ -276,6 +306,14 @@ class ProviderCalendarCache:
                     """,
                     (observed_at, provider_calendar_id),
                 )
+                connection.execute(
+                    """
+                    UPDATE provider_event_cache
+                    SET missing_successes = 0, updated_at = ?
+                    WHERE source_id = ? AND provider_calendar_id = ?
+                    """,
+                    (observed_at, self.source_id, provider_calendar_id),
+                )
         return ProviderRefreshResult(
             self.source_id,
             "current",
@@ -285,6 +323,9 @@ class ProviderCalendarCache:
             observed_at,
             observed_at,
             None,
+            missing_candidates_seen,
+            deletions_deferred,
+            deletions_confirmed,
         )
 
     def _upsert_source(
@@ -481,8 +522,9 @@ class ProviderCalendarCache:
             INSERT INTO provider_event_cache(
                 canonical_event_id, source_id, provider_calendar_id, provider_event_id,
                 identity_key, recurrence_instance_key, resource_ref, window_start_utc,
-                window_end_utc, last_seen_refresh, last_seen_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                window_end_utc, last_seen_refresh, last_seen_at, created_at, updated_at,
+                missing_successes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(source_id, identity_key) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
                 provider_calendar_id = excluded.provider_calendar_id,
@@ -493,7 +535,8 @@ class ProviderCalendarCache:
                 window_end_utc = excluded.window_end_utc,
                 last_seen_refresh = excluded.last_seen_refresh,
                 last_seen_at = excluded.last_seen_at,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                missing_successes = 0
             """,
             (
                 canonical_id,
@@ -535,14 +578,18 @@ class ProviderCalendarCache:
         verifications: list[ExternalResourceVerification],
         refresh_token: str,
         deleted_at: str,
-    ) -> int:
+        fetched_event_ids: set[str],
+        fetched_resource_refs: set[str],
+    ) -> _ResourceReconciliationResult:
         missing_refs = [verification.resource_ref for verification in verifications if verification.status == "missing"]
         present_refs = [verification.resource_ref for verification in verifications if verification.status == "present"]
-        tombstone_ids: list[str] = []
+        tombstone_ids: set[str] = set()
+        missing_candidates_seen = 0
+        deletions_deferred = 0
         for resource_ref in missing_refs:
             rows = connection.execute(
                 """
-                SELECT pec.canonical_event_id
+                SELECT pec.canonical_event_id, pec.provider_event_id, pec.missing_successes
                 FROM provider_event_cache AS pec
                 JOIN calendar_events AS ce ON ce.id = pec.canonical_event_id
                 WHERE pec.source_id = ? AND pec.provider_calendar_id = ?
@@ -551,7 +598,37 @@ class ProviderCalendarCache:
                 """,
                 (self.source_id, provider_calendar_id, resource_ref),
             ).fetchall()
-            tombstone_ids.extend(str(row["canonical_event_id"]) for row in rows)
+            for row in rows:
+                missing_candidates_seen += 1
+                canonical_id = str(row["canonical_event_id"])
+                # A successful calendar query in this same refresh wins over a
+                # contradictory verifier response. Never delete what we just
+                # fetched from the provider.
+                if (
+                    str(row["provider_event_id"]) in fetched_event_ids
+                    or resource_ref in fetched_resource_refs
+                ):
+                    connection.execute(
+                        """
+                        UPDATE provider_event_cache
+                        SET missing_successes = 0, updated_at = ?
+                        WHERE canonical_event_id = ?
+                        """,
+                        (deleted_at, canonical_id),
+                    )
+                    continue
+                if int(row["missing_successes"]) >= 1:
+                    tombstone_ids.add(canonical_id)
+                else:
+                    deletions_deferred += 1
+                    connection.execute(
+                        """
+                        UPDATE provider_event_cache
+                        SET missing_successes = 1, updated_at = ?
+                        WHERE canonical_event_id = ?
+                        """,
+                        (deleted_at, canonical_id),
+                    )
         for canonical_id in tombstone_ids:
             connection.execute(
                 """
@@ -561,7 +638,23 @@ class ProviderCalendarCache:
                 """,
                 (deleted_at, deleted_at, canonical_id),
             )
+            connection.execute(
+                """
+                UPDATE provider_event_cache
+                SET missing_successes = 0, updated_at = ?
+                WHERE canonical_event_id = ?
+                """,
+                (deleted_at, canonical_id),
+            )
         for resource_ref in present_refs:
+            connection.execute(
+                """
+                UPDATE provider_event_cache
+                SET missing_successes = 0, updated_at = ?
+                WHERE source_id = ? AND provider_calendar_id = ? AND resource_ref = ?
+                """,
+                (deleted_at, self.source_id, provider_calendar_id, resource_ref),
+            )
             connection.execute(
                 """
                 UPDATE calendar_events
@@ -574,7 +667,12 @@ class ProviderCalendarCache:
                 """,
                 (deleted_at, self.source_id, provider_calendar_id, resource_ref, refresh_token),
             )
-        return len(set(tombstone_ids))
+        return _ResourceReconciliationResult(
+            tombstones_created=len(tombstone_ids),
+            missing_candidates_seen=missing_candidates_seen,
+            deletions_deferred=deletions_deferred,
+            deletions_confirmed=len(tombstone_ids),
+        )
 
     def _record_failure(
         self,
@@ -595,6 +693,14 @@ class ProviderCalendarCache:
                 observed_at=observed_at,
                 error_code=error_code,
                 connection=connection,
+            )
+            connection.execute(
+                """
+                UPDATE provider_event_cache
+                SET missing_successes = 0, updated_at = ?
+                WHERE source_id = ?
+                """,
+                (observed_at, self.source_id),
             )
             connection.execute(
                 """

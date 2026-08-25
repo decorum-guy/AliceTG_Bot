@@ -96,7 +96,7 @@ class PlanningHealthA8Tests(unittest.TestCase):
 
     def test_schema_db_and_disabled_scheduler_facts_are_content_free(self) -> None:
         snapshot = self.health(scheduler_enabled=False).snapshot(correlation_id="health-correlation")
-        self.assertEqual(snapshot["planningSchemaVersion"], 5)
+        self.assertEqual(snapshot["planningSchemaVersion"], 6)
         self.assertTrue(snapshot["dbAvailable"])
         self.assertEqual(snapshot["dbIntegrityStatus"], "ok")
         self.assertFalse(snapshot["durableSchedulerEnabled"])
