@@ -32,6 +32,7 @@ from app.planning.models import (
     SyncConflict,
     SyncCursor,
     Task,
+    TASK_VIEWS,
     new_uuid4,
     utc_now,
     validate_date,
@@ -874,9 +875,9 @@ class PlanningRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Task]:
-        """Return one of the explicit today/overdue/upcoming task views."""
+        """Return one of the explicit canonical task list views."""
 
-        if view not in {"today", "overdue", "upcoming"}:
+        if view not in TASK_VIEWS:
             raise PlanningValidationError("task.view has an invalid enum")
         validate_date(today, "task.today")
         if project_id is not None:
@@ -886,14 +887,20 @@ class PlanningRepository:
         if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000:
             raise PlanningValidationError("task.list offset is out of range")
 
-        if view == "today":
-            date_clause = "due_date = ?"
-        elif view == "overdue":
-            date_clause = "due_date < ?"
+        if view == "undated":
+            clauses = ["deleted_at IS NULL", "status = 'open'", "due_date IS NULL"]
+            values: list[Any] = []
+            ordering = "created_at, id"
         else:
-            date_clause = "due_date > ?"
-        clauses = ["deleted_at IS NULL", "status = 'open'", "due_date IS NOT NULL", date_clause]
-        values: list[Any] = [today]
+            if view == "today":
+                date_clause = "due_date = ?"
+            elif view == "overdue":
+                date_clause = "due_date < ?"
+            else:
+                date_clause = "due_date > ?"
+            clauses = ["deleted_at IS NULL", "status = 'open'", "due_date IS NOT NULL", date_clause]
+            values = [today]
+            ordering = "due_date, CASE WHEN due_time IS NULL THEN 1 ELSE 0 END, due_time, id"
         if project_id is not None:
             clauses.append("project_id = ?")
             values.append(project_id)
@@ -902,7 +909,7 @@ class PlanningRepository:
             f"""
             SELECT * FROM tasks
             WHERE {' AND '.join(clauses)}
-            ORDER BY due_date, CASE WHEN due_time IS NULL THEN 1 ELSE 0 END, due_time, id
+            ORDER BY {ordering}
             LIMIT ? OFFSET ?
             """,
             values,

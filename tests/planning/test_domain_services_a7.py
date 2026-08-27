@@ -158,6 +158,101 @@ class PlanningDomainServicesA7Tests(unittest.TestCase):
         with self.assertRaises(PlanningVersionConflictError):
             self.tasks.archive(archive_candidate.id, expected_version=archive_candidate.version, context=CONTEXT)
 
+    def test_undated_view_is_active_bounded_and_deterministic(self) -> None:
+        selected_project = self.repository.create_project(name="Selected undated project", context=CONTEXT)
+        other_project = self.repository.create_project(name="Other undated project", context=CONTEXT)
+        visible = [
+            self.tasks.create(title="selected first", project_id=selected_project.id, context=CONTEXT),
+            self.tasks.create(title="unassigned", context=CONTEXT),
+            self.tasks.create(title="selected second", project_id=selected_project.id, context=CONTEXT),
+            self.tasks.create(title="different project", project_id=other_project.id, context=CONTEXT),
+        ]
+        date_only = self.tasks.create(title="date-only excluded", due_date="2026-08-12", context=CONTEXT)
+        timed = self.tasks.create(
+            title="timed excluded",
+            due_date="2026-08-12",
+            due_time="09:30",
+            timezone="Europe/Moscow",
+            context=CONTEXT,
+        )
+        completed = self.tasks.create(title="completed excluded", context=CONTEXT)
+        self.tasks.complete(completed.id, expected_version=completed.version, context=CONTEXT)
+        archived = self.tasks.create(title="archived excluded", context=CONTEXT)
+        self.tasks.archive(archived.id, expected_version=archived.version, context=CONTEXT)
+        tombstoned = self.tasks.create(title="tombstoned excluded", context=CONTEXT)
+        self.database.connection.execute(
+            "UPDATE tasks SET deleted_at = ? WHERE id = ?",
+            (NOW, tombstoned.id),
+        )
+
+        before_read = {
+            table: [
+                tuple(row)
+                for row in self.database.connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            ]
+            for table in ("tasks", "audit_events", "outbox")
+        }
+        all_undated = self.tasks.undated(
+            reference_time_utc=NOW,
+            caller_timezone="Europe/Moscow",
+        )
+        repeated_undated = self.tasks.undated(
+            reference_time_utc="2030-01-01T00:00:00Z",
+            caller_timezone="UTC",
+        )
+        expected_order = sorted(visible, key=lambda item: (item.created_at, item.id))
+        self.assertEqual([item.id for item in all_undated], [item.id for item in expected_order])
+        self.assertEqual([item.id for item in repeated_undated], [item.id for item in all_undated])
+        self.assertEqual(
+            [(item.due_date, item.due_time, item.timezone) for item in all_undated],
+            [(None, None, None)] * len(all_undated),
+        )
+        self.assertNotIn(date_only.id, [item.id for item in all_undated])
+        self.assertNotIn(timed.id, [item.id for item in all_undated])
+        self.assertNotIn(completed.id, [item.id for item in all_undated])
+        self.assertNotIn(archived.id, [item.id for item in all_undated])
+        self.assertNotIn(tombstoned.id, [item.id for item in all_undated])
+
+        selected = self.tasks.undated(
+            reference_time_utc=NOW,
+            caller_timezone="Europe/Moscow",
+            project_id=selected_project.id,
+        )
+        self.assertEqual(
+            [item.id for item in selected],
+            [item.id for item in expected_order if item.project_id == selected_project.id],
+        )
+        self.assertNotIn(other_project.id, [item.project_id for item in selected])
+
+        first_page = self.tasks.undated(
+            reference_time_utc=NOW,
+            caller_timezone="Europe/Moscow",
+            limit=2,
+            offset=0,
+        )
+        second_page = self.tasks.undated(
+            reference_time_utc=NOW,
+            caller_timezone="Europe/Moscow",
+            limit=2,
+            offset=2,
+        )
+        self.assertEqual([item.id for item in first_page], [item.id for item in expected_order[:2]])
+        self.assertEqual([item.id for item in second_page], [item.id for item in expected_order[2:]])
+        self.assertEqual({item.id for item in first_page} & {item.id for item in second_page}, set())
+        with self.assertRaises(PlanningValidationError):
+            self.tasks.undated(reference_time_utc=NOW, caller_timezone="Europe/Moscow", limit=1002)
+        with self.assertRaises(PlanningValidationError):
+            self.tasks.undated(reference_time_utc=NOW, caller_timezone="Europe/Moscow", offset=10_001)
+
+        after_read = {
+            table: [
+                tuple(row)
+                for row in self.database.connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            ]
+            for table in ("tasks", "audit_events", "outbox")
+        }
+        self.assertEqual(after_read, before_read)
+
     def test_projects_are_deterministic_tombstones_without_cascade_or_default(self) -> None:
         first = self.repository.create_project(name="beta", context=CONTEXT)
         second = self.repository.create_project(name="Alpha", context=CONTEXT)
