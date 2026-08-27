@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Mapping
 
 from app.planning.delivery import DeliveryResult, ReminderChannelTransport
+from app.planning.delivery_settings import normalize_phone_channels
 from app.planning.errors import PlanningLeaseLostError, PlanningVersionConflictError
 from app.planning.models import (
     DeliveryAttempt,
@@ -96,6 +97,8 @@ class DurableReminderScheduler:
         *,
         telegram_transport: ReminderChannelTransport,
         mobile_transport: ReminderChannelTransport | None,
+        spoken_transport: ReminderChannelTransport | None = None,
+        jarvis_transport: ReminderChannelTransport | None = None,
         default_chat_id: int,
         settings_provider: Callable[[], Awaitable[ReminderSettings]] | None = None,
         interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
@@ -126,6 +129,8 @@ class DurableReminderScheduler:
         self._repository = PlanningRepository(database, now_fn=lambda: self._current_now)
         self._telegram_transport = telegram_transport
         self._mobile_transport = mobile_transport
+        self._spoken_transport = spoken_transport
+        self._jarvis_transport = jarvis_transport
         self._default_chat_id = default_chat_id
         self._settings_provider = settings_provider
         self._interval_seconds = interval_seconds
@@ -451,79 +456,171 @@ class DurableReminderScheduler:
             self._suppress_job(job, now, reminder)
             return
 
-        telegram_attempts = self._repository.count_delivery_attempts(
-            reminder_id=reminder.id,
-            channel="telegram",
-            delivery_cycle_id=job.delivery_cycle_id,
-        )
-        attempt_window = job.attempt_window_started_at
-        if telegram_attempts >= MAX_DELIVERY_ATTEMPTS or (
-            attempt_window is not None
-            and _as_datetime(now) >= _as_datetime(str(attempt_window)) + timedelta(seconds=DELIVERY_RETRY_WINDOW_SECONDS)
-        ):
+        policy = job.payload.get("delivery_policy")
+        if not isinstance(policy, Mapping):
+            settings = ReminderSettings()
+            if self._settings_provider is not None:
+                settings = await self._settings_provider()
+            policy = self._policy_snapshot(settings)
+            job = self._repository.snapshot_outbox_delivery_policy(
+                job_id=job.id,
+                lease_owner=self._worker_id,
+                lease_token=job.lease_token,
+                policy=policy,
+                now=now,
+            )
+
+        plan = self._channel_plan(policy)
+        if not plan:
+            self._commit_terminal(job, reminder, now, "no_delivery_channels", "no reminder delivery channels selected")
+            return
+
+        if job.attempt_window_started_at is not None and _as_datetime(now) >= _as_datetime(
+            str(job.attempt_window_started_at)
+        ) + timedelta(seconds=DELIVERY_RETRY_WINDOW_SECONDS):
             self._commit_terminal(job, reminder, now, "retry_window_exhausted", "delivery retry window exhausted")
             return
 
-        settings = ReminderSettings()
-        if self._settings_provider is not None:
-            settings = await self._settings_provider()
-
-        if settings.notify_telegram_enabled:
-            telegram_outcome = await self._attempt_channel(
-                job,
-                reminder,
-                self._telegram_transport,
-                now,
+        pending_plan: list[tuple[str, ReminderChannelTransport | None, DeliveryResult | None, bool]] = []
+        for channel, transport, forced_result, required in plan:
+            if self._repository.has_successful_delivery_attempt(reminder_id=reminder.id, channel=channel):
+                continue
+            attempts = self._repository.count_delivery_attempts(
+                reminder_id=reminder.id,
+                channel=channel,
+                delivery_cycle_id=job.delivery_cycle_id,
             )
-        else:
-            telegram_outcome = await self._attempt_channel(
-                job,
-                reminder,
-                None,
-                now,
-                forced_result=DeliveryResult.permanent(
-                    "telegram_disabled",
-                    diagnostic="Telegram required delivery is disabled",
-                ),
-            )
-        telegram_result = telegram_outcome.result
+            if attempts >= MAX_DELIVERY_ATTEMPTS:
+                self._commit_terminal(job, reminder, now, "retry_window_exhausted", "delivery retry window exhausted")
+                return
+            pending_plan.append((channel, transport, forced_result, required))
 
+        outcomes: dict[str, ChannelAttemptOutcome] = {}
         optional_result: DeliveryResult | None = None
-        if settings.notify_iphone_enabled and self._mobile_transport is not None:
+        for channel, transport, forced_result, required in pending_plan:
             current = self._repository.get_reminder(reminder.id)
-            if (
-                self._is_due_and_active(current, now)
-                and not self._repository.has_successful_delivery_attempt(
-                    reminder_id=reminder.id,
-                    channel=self._mobile_transport.channel,
-                )
-            ):
-                optional_outcome = await self._attempt_channel(
-                    job,
-                    current,
-                    self._mobile_transport,
-                    now,
-                )
-                optional_result = optional_outcome.result
+            if not self._is_due_and_active(current, now):
+                self._suppress_job(job, now, current)
+                return
+            outcome = await self._attempt_channel(
+                job,
+                current,
+                transport,
+                now,
+                forced_result=forced_result,
+                channel_override=channel,
+            )
+            outcomes[channel] = outcome
+            if not required:
+                optional_result = outcome.result
 
         current = self._repository.get_reminder(reminder.id)
         if not self._is_due_and_active(current, now):
             self._suppress_job(job, now, current)
             return
-        if telegram_result.kind == "success":
+
+        retry_candidates: list[tuple[str, DeliveryResult, ChannelAttemptOutcome]] = []
+        terminal_candidate: tuple[str, DeliveryResult] | None = None
+        required_complete = True
+        for channel, _transport, _forced_result, required in plan:
+            if not required:
+                continue
+            if self._repository.has_successful_delivery_attempt(reminder_id=reminder.id, channel=channel):
+                continue
+            required_complete = False
+            outcome = outcomes.get(channel)
+            if outcome is None:
+                continue
+            if outcome.result.kind == "retryable":
+                retry_candidates.append((channel, outcome.result, outcome))
+            elif terminal_candidate is None:
+                terminal_candidate = (channel, outcome.result)
+
+        if required_complete:
             self._commit_success(job, current, now, optional_result)
             return
-        if telegram_result.kind == "retryable":
+        if terminal_candidate is not None:
+            self._commit_terminal(job, current, now, terminal_candidate[1].code, terminal_candidate[1].diagnostic)
+            return
+        if retry_candidates:
+            _channel, result, outcome = retry_candidates[0]
             retry_at = self._next_retry_at(
                 job,
                 now,
-                telegram_result,
-                telegram_attempt_ordinal=telegram_outcome.delivery_ordinal,
+                result,
+                channel_attempt_ordinal=outcome.delivery_ordinal,
             )
             if retry_at is not None:
-                self._commit_retry(job, current, now, retry_at, telegram_result)
+                self._commit_retry(job, current, now, retry_at, result)
                 return
-        self._commit_terminal(job, current, now, telegram_result.code, telegram_result.diagnostic)
+        self._commit_terminal(job, current, now, "delivery_failed", "reminder delivery failed")
+
+    @staticmethod
+    def _policy_snapshot(settings: ReminderSettings) -> dict[str, Any]:
+        if settings.phone_channels is None:
+            return {
+                "version": 1,
+                "legacy": True,
+                "spoken_endpoint": None,
+                "phone_channels": ["telegram"],
+                "telegram_enabled": settings.notify_telegram_enabled,
+                "mobile_enabled": settings.notify_iphone_enabled,
+            }
+        return {
+            "version": 1,
+            "legacy": False,
+            "spoken_endpoint": settings.spoken_endpoint,
+            "phone_channels": list(normalize_phone_channels(settings.phone_channels)),
+        }
+
+    def _channel_plan(
+        self,
+        policy: Mapping[str, Any],
+    ) -> list[tuple[str, ReminderChannelTransport | None, DeliveryResult | None, bool]]:
+        if policy.get("legacy") is True:
+            plan: list[tuple[str, ReminderChannelTransport | None, DeliveryResult | None, bool]] = [
+                (
+                    "telegram",
+                    self._telegram_transport if policy.get("telegram_enabled") else None,
+                    None if policy.get("telegram_enabled") else DeliveryResult.permanent(
+                        "telegram_disabled", diagnostic="Telegram required delivery is disabled"
+                    ),
+                    True,
+                )
+            ]
+            if policy.get("mobile_enabled") and self._mobile_transport is not None:
+                plan.append((self._mobile_transport.channel, self._mobile_transport, None, False))
+            return plan
+
+        endpoint = policy.get("spoken_endpoint")
+        plan = []
+        if endpoint == "alice":
+            plan.append(("alice", self._spoken_transport, None if self._spoken_transport else DeliveryResult.permanent(
+                "alice_not_configured", diagnostic="Alice spoken delivery is not configured"
+            ), True))
+        elif endpoint == "jarvis":
+            plan.append(("jarvis", self._jarvis_transport, None if self._jarvis_transport else DeliveryResult.permanent(
+                "jarvis_runtime_unavailable", diagnostic="Jarvis runtime is not available"
+            ), True))
+        else:
+            plan.append(("alice", None, DeliveryResult.permanent("spoken_endpoint_invalid", diagnostic="Spoken endpoint is invalid"), True))
+
+        phone_channels = policy.get("phone_channels")
+        if not isinstance(phone_channels, list):
+            phone_channels = []
+        for phone_channel in phone_channels:
+            if phone_channel == "telegram":
+                plan.append(("telegram", self._telegram_transport, None, True))
+            elif phone_channel == "home_assistant":
+                plan.append((
+                    "home_assistant",
+                    self._mobile_transport,
+                    None if self._mobile_transport else DeliveryResult.permanent(
+                        "ha_mobile_not_configured", diagnostic="Home Assistant mobile delivery is not configured"
+                    ),
+                    True,
+                ))
+        return plan
 
     async def _attempt_channel(
         self,
@@ -533,8 +630,9 @@ class DurableReminderScheduler:
         now: str,
         *,
         forced_result: DeliveryResult | None = None,
+        channel_override: str | None = None,
     ) -> ChannelAttemptOutcome:
-        channel = "telegram" if transport is None else transport.channel
+        channel = channel_override or ("telegram" if transport is None else transport.channel)
         if self._before_attempt_persist is not None:
             await self._call_hook(self._before_attempt_persist, reminder, channel)
         attempt = self._repository.start_delivery_attempt(
@@ -542,14 +640,10 @@ class DurableReminderScheduler:
             channel=channel,
             started_at=now,
         )
-        delivery_ordinal = (
-            self._repository.count_delivery_attempts(
-                reminder_id=reminder.id,
-                channel="telegram",
-                delivery_cycle_id=attempt.delivery_cycle_id,
-            )
-            if channel == "telegram"
-            else None
+        delivery_ordinal = self._repository.count_delivery_attempts(
+            reminder_id=reminder.id,
+            channel=channel,
+            delivery_cycle_id=attempt.delivery_cycle_id,
         )
         if self._before_provider_send is not None:
             await self._call_hook(self._before_provider_send, reminder, channel)
@@ -574,6 +668,8 @@ class DurableReminderScheduler:
             result = forced_result
         else:
             try:
+                if transport is None:
+                    raise RuntimeError("missing channel transport")
                 result = await transport.send(
                     reminder=current,
                     chat_id=self._chat_id(job),
@@ -646,11 +742,11 @@ class DurableReminderScheduler:
         now: str,
         result: DeliveryResult,
         *,
-        telegram_attempt_ordinal: int | None,
+        channel_attempt_ordinal: int | None,
     ) -> str | None:
-        if telegram_attempt_ordinal is None or telegram_attempt_ordinal >= MAX_DELIVERY_ATTEMPTS:
+        if channel_attempt_ordinal is None or channel_attempt_ordinal >= MAX_DELIVERY_ATTEMPTS:
             return None
-        index = telegram_attempt_ordinal - 1
+        index = channel_attempt_ordinal - 1
         if index < 0 or index >= len(RETRY_DELAYS_SECONDS):
             return None
         base_delay = RETRY_DELAYS_SECONDS[index]

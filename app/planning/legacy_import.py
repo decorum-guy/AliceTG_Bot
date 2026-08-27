@@ -13,6 +13,11 @@ from typing import Any, Mapping
 
 from app.planning.audit import AuditWriter
 from app.planning.db import PlanningDatabase
+from app.planning.delivery_settings import (
+    ReminderDeliveryPreferences,
+    ReminderDeliveryPreferencesStore,
+    legacy_phone_channels,
+)
 from app.planning.errors import PlanningNotFoundError, PlanningValidationError
 from app.planning.models import (
     MutationContext,
@@ -801,12 +806,13 @@ class LegacyReminderImporter:
 
 
 class PlanningReminderStoreAdapter:
-    """ReminderStore-shaped adapter over Planning, with settings kept in legacy JSON."""
+    """ReminderStore-shaped adapter over Planning and canonical owner policy."""
 
     def __init__(self, database: PlanningDatabase, settings_store: ReminderSettingsStore) -> None:
         self.database = database
         self.settings_store = settings_store
         self.repository = PlanningRepository(database)
+        self.delivery_preferences = ReminderDeliveryPreferencesStore(database)
 
     async def create(
         self,
@@ -915,7 +921,53 @@ class PlanningReminderStoreAdapter:
         return True
 
     async def get_settings(self) -> ReminderSettings:
-        return await self.settings_store.get_settings()
+        legacy = await self.settings_store.get_settings()
+        preferences = self.delivery_preferences.ensure_from_legacy(
+            spoken_endpoint=legacy.spoken_endpoint,
+            notify_telegram_enabled=legacy.notify_telegram_enabled,
+            notify_iphone_enabled=legacy.notify_iphone_enabled,
+        )
+        return ReminderSettings(
+            voice_enabled=legacy.voice_enabled,
+            voice_station_entity_id=legacy.voice_station_entity_id,
+            notify_telegram_enabled="telegram" in preferences.phone_channels,
+            notify_iphone_enabled="home_assistant" in preferences.phone_channels,
+            spoken_endpoint=preferences.spoken_endpoint,
+            phone_channels=preferences.phone_channels,
+        )
+
+    async def get_delivery_preferences(self) -> ReminderDeliveryPreferences:
+        legacy = await self.settings_store.get_settings()
+        return self.delivery_preferences.ensure_from_legacy(
+            spoken_endpoint=legacy.spoken_endpoint,
+            notify_telegram_enabled=legacy.notify_telegram_enabled,
+            notify_iphone_enabled=legacy.notify_iphone_enabled,
+        )
+
+    async def update_delivery_preferences(
+        self,
+        *,
+        expected_revision: int,
+        spoken_endpoint: str,
+        phone_channels: tuple[str, ...],
+    ) -> ReminderDeliveryPreferences:
+        legacy = await self.settings_store.get_settings()
+        self.delivery_preferences.ensure_from_legacy(
+            spoken_endpoint=legacy.spoken_endpoint,
+            notify_telegram_enabled=legacy.notify_telegram_enabled,
+            notify_iphone_enabled=legacy.notify_iphone_enabled,
+        )
+        return self.delivery_preferences.update(
+            expected_revision=expected_revision,
+            spoken_endpoint=spoken_endpoint,
+            phone_channels=phone_channels,
+            context=MutationContext(
+                audience="operator",
+                actor_id="control-center",
+                actor_type="service",
+                surface="panel-agent",
+            ),
+        )
 
     async def update_settings(
         self,
@@ -924,13 +976,40 @@ class PlanningReminderStoreAdapter:
         voice_station_entity_id: str | None = None,
         notify_telegram_enabled: bool | None = None,
         notify_iphone_enabled: bool | None = None,
+        spoken_endpoint: str | None = None,
+        phone_channels: tuple[str, ...] | None = None,
     ) -> ReminderSettings:
-        return await self.settings_store.update_settings(
+        updated = await self.settings_store.update_settings(
             voice_enabled=voice_enabled,
             voice_station_entity_id=voice_station_entity_id,
             notify_telegram_enabled=notify_telegram_enabled,
             notify_iphone_enabled=notify_iphone_enabled,
+            spoken_endpoint=spoken_endpoint,
+            phone_channels=phone_channels,
         )
+        current = await self.get_delivery_preferences()
+        selected = phone_channels or legacy_phone_channels(
+            notify_telegram_enabled=updated.notify_telegram_enabled,
+            notify_iphone_enabled=updated.notify_iphone_enabled,
+        )
+        if (
+            spoken_endpoint is not None
+            or phone_channels is not None
+            or notify_telegram_enabled is not None
+            or notify_iphone_enabled is not None
+        ) and (current.spoken_endpoint != updated.spoken_endpoint or current.phone_channels != selected):
+            self.delivery_preferences.update(
+                expected_revision=current.revision,
+                spoken_endpoint=updated.spoken_endpoint,
+                phone_channels=selected,
+                context=MutationContext(
+                    audience="operator",
+                    actor_id="reminder-adapter",
+                    actor_type="service",
+                    surface="system",
+                ),
+            )
+        return await self.get_settings()
 
     def _metadata(self, planning_id: str):
         return self.database.connection.execute(

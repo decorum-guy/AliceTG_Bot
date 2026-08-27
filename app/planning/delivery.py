@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Awaitable, Callable, Literal, Protocol
 
 from aiogram.exceptions import (
     TelegramAPIError,
@@ -19,6 +19,7 @@ from app.keyboards.coffee import delete_only
 from app.messages import reminders as reminder_messages
 from app.planning.models import Reminder
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
+from app.services.reminder_store import ReminderSettings
 from app.services.telegram_messages import TelegramMessages
 
 
@@ -198,3 +199,43 @@ class HomeAssistantMobileTransport:
                 diagnostic="Home Assistant mobile services rejected the notification",
             )
         return DeliveryResult.permanent("ha_mobile_failed", diagnostic="Home Assistant mobile delivery failed")
+
+
+class AliceSpokenDeliveryTransport:
+    """Spoken Alice delivery through the already configured HA media player."""
+
+    channel = "alice"
+
+    def __init__(
+        self,
+        home_assistant: HomeAssistantClient,
+        settings_provider: Callable[[], Awaitable[ReminderSettings]],
+    ) -> None:
+        self._home_assistant = home_assistant
+        self._settings_provider = settings_provider
+
+    async def send(
+        self,
+        *,
+        reminder: Reminder,
+        chat_id: int,
+        correlation_id: str,
+    ) -> DeliveryResult:
+        del chat_id, correlation_id
+        settings = await self._settings_provider()
+        if not settings.voice_enabled:
+            return DeliveryResult.permanent("alice_voice_disabled", diagnostic="Alice spoken delivery is disabled")
+        station = settings.voice_station_entity_id.strip()
+        if not station:
+            return DeliveryResult.permanent("alice_not_configured", diagnostic="Alice voice station is not configured")
+        try:
+            await self._home_assistant.play_media(station, reminder.title)
+        except asyncio.TimeoutError:
+            return DeliveryResult.retryable("alice_timeout", diagnostic="Alice voice request timed out")
+        except HomeAssistantError as exc:
+            if exc.status is None or exc.status == 429 or exc.status >= 500:
+                return DeliveryResult.retryable("alice_temporary_failure", diagnostic="Alice voice service temporarily failed")
+            return DeliveryResult.permanent("alice_rejected", diagnostic="Home Assistant rejected Alice voice delivery")
+        except (OSError, RuntimeError):
+            return DeliveryResult.retryable("alice_transport_error", diagnostic="Alice voice transport failed")
+        return DeliveryResult.success(code="alice_spoken_delivered", provider_receipt="ha-media-player")

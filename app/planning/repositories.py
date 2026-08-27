@@ -1683,6 +1683,48 @@ class PlanningRepository:
                 return None
             return self.get_outbox(job_id)
 
+    def snapshot_outbox_delivery_policy(
+        self,
+        *,
+        job_id: str,
+        lease_owner: str,
+        lease_token: str,
+        policy: Mapping[str, Any],
+        now: str,
+    ) -> OutboxJob:
+        """Persist the policy used by this logical delivery job before sending."""
+
+        validate_uuid4(job_id, "outbox.id")
+        validate_text(lease_owner, "outbox.lease_owner", max_length=128)
+        validate_uuid4(lease_token, "outbox.lease_token")
+        validate_utc_timestamp(now, "outbox.updated_at")
+        safe_policy = _json_ready(dict(policy))
+        reject_secret_fields(safe_policy, field="outbox.delivery_policy")
+        with self.database.transaction():
+            row = self.connection.execute(
+                "SELECT payload_json FROM outbox WHERE id = ? AND status = 'leased' "
+                "AND lease_owner = ? AND lease_token = ?",
+                (job_id, lease_owner, lease_token),
+            ).fetchone()
+            if row is None:
+                raise PlanningLeaseLostError(f"lease lost while snapshotting outbox {job_id}")
+            payload = _decode_json(str(row["payload_json"]), "outbox payload")
+            if not isinstance(payload, Mapping):
+                raise PlanningValidationError("stored outbox payload is not an object")
+            if isinstance(payload.get("delivery_policy"), Mapping):
+                return self.get_outbox(job_id)
+            updated_payload = dict(payload)
+            updated_payload["delivery_policy"] = safe_policy
+            payload_json = json.dumps(updated_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if len(payload_json) > 1_048_576:
+                raise PlanningValidationError("outbox.payload is too large")
+            self.connection.execute(
+                "UPDATE outbox SET payload_json = ?, updated_at = ? WHERE id = ? "
+                "AND status = 'leased' AND lease_owner = ? AND lease_token = ?",
+                (payload_json, now, job_id, lease_owner, lease_token),
+            )
+            return self.get_outbox(job_id)
+
     def transition_outbox(
         self,
         *,
@@ -1896,7 +1938,7 @@ class PlanningRepository:
                 (reminder_id, REMINDER_DELIVERY_JOB_TYPE),
             ).fetchone()
             delivery_cycle_id = cycle_row["delivery_cycle_id"] if cycle_row is not None else None
-            if channel == "telegram" and delivery_cycle_id is None:
+            if delivery_cycle_id is None:
                 delivery_cycle_id = new_uuid4()
                 if cycle_row is not None:
                     self.connection.execute(
@@ -2157,16 +2199,29 @@ class PlanningRepository:
                 if job_status == "leased" and job_row["lease_expires_at"] is not None:
                     if str(job_row["lease_expires_at"]) > now:
                         raise PlanningValidationError("terminal reminder delivery job still has a live lease")
+                existing_payload = _decode_json(str(job_row["payload_json"]), "outbox payload")
+                if not isinstance(existing_payload, Mapping):
+                    raise PlanningValidationError("stored outbox payload is not an object")
+                # A manual retry starts a new logical delivery cycle.  Do not
+                # silently reuse the policy snapshot from the failed cycle.
+                retry_payload = dict(existing_payload)
+                retry_payload.pop("delivery_policy", None)
+                retry_payload_json = json.dumps(
+                    retry_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 self.connection.execute(
                     """
                     UPDATE outbox
-                    SET status = 'queued', available_at = ?, lease_owner = NULL,
+                    SET status = 'queued', available_at = ?, payload_json = ?, lease_owner = NULL,
                         lease_expires_at = NULL, lease_token = NULL, attempt_count = 0,
                         attempt_window_started_at = NULL, last_error = NULL,
                         last_error_code = NULL, delivery_cycle_id = NULL, updated_at = ?
                     WHERE id = ?
                     """,
-                    (now, now, str(job_row["id"])),
+                    (now, retry_payload_json, now, str(job_row["id"])),
                 )
 
             updated = replace(

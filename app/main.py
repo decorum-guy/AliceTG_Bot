@@ -14,7 +14,7 @@ from app.config import Settings
 from app.handlers import admin_modes, coffee, common, planning, reminders, start, tea, water
 from app.planning.legacy_import import build_reminder_store
 from app.planning.backup import PlanningBackupError, PlanningBackupService
-from app.planning.delivery import HomeAssistantMobileTransport, TelegramDeliveryTransport
+from app.planning.delivery import AliceSpokenDeliveryTransport, HomeAssistantMobileTransport, TelegramDeliveryTransport
 from app.planning.db import PlanningDatabase, PlanningDatabaseConfig
 from app.planning.health import PlanningHealthService
 from app.planning.providers import (
@@ -191,6 +191,7 @@ async def create_app() -> web.Application:
             planning_database,
             telegram_transport=TelegramDeliveryTransport(telegram_messages),
             mobile_transport=HomeAssistantMobileTransport(ha, settings.ha_mobile_notify_services),
+            spoken_transport=AliceSpokenDeliveryTransport(ha, reminder_store.get_settings),
             default_chat_id=settings.telegram_admin_chat_id,
             settings_provider=reminder_store.get_settings,
             interval_seconds=settings.planning_scheduler_poll_interval_seconds,
