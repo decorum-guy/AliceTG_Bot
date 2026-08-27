@@ -43,6 +43,8 @@ from app.planning.errors import (
 )
 from app.planning.models import new_uuid4
 from app.planning.parser import PlanningParser
+from app.planning.providers.cache import ProviderCalendarCache, ProviderRefreshResult
+from app.planning.providers.sync import ICloudCalendarRefreshLoop, calendar_refresh_window
 
 
 LOGGER = logging.getLogger(__name__)
@@ -415,6 +417,39 @@ async def _get_status(request: web.Request, auth: AuthenticatedPlanningContext) 
     return _json_response(payload, correlation_id=correlation_id)
 
 
+async def _refresh_calendar_sources(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    del auth
+    parse_empty_body(await read_json_body(request, required=False))
+    cache = request.app.get("planning_icloud_cache")
+    if not isinstance(cache, ProviderCalendarCache):
+        raise PlanningApiError(
+            code="calendar_source_unavailable",
+            message="Calendar source refresh is temporarily unavailable.",
+            status=503,
+            retryable=True,
+        )
+    refresh_loop = request.app.get("planning_icloud_refresh_loop")
+    if isinstance(refresh_loop, ICloudCalendarRefreshLoop):
+        result = await refresh_loop.refresh_once()
+    else:
+        result = await cache.refresh(calendar_refresh_window())
+    assert isinstance(result, ProviderRefreshResult)
+    correlation_id = new_uuid4()
+    payload = {
+        "schemaVersion": "planning.calendar-sources.refresh.v1",
+        "kind": "calendar_sources_refresh",
+        "result": "success" if result.status == "current" else "failure",
+        "status": result.status,
+        "observedAt": result.observed_at,
+        "lastSuccessfulSyncAt": result.last_successful_sync_at,
+        "calendarsSeen": result.calendars_seen,
+        "eventsSeen": result.events_seen,
+        "errorCode": result.error_code,
+        "correlation_id": correlation_id,
+    }
+    return _json_response(payload, correlation_id=correlation_id)
+
+
 async def _parse_preview(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
     del auth
     parser_input = parse_parse_preview_request(await read_json_body(request))
@@ -564,6 +599,10 @@ def setup_planning_routes(
     )
     app.router.add_get(f"{PLANNING_PREFIX}/projects", _route(_get_projects, "GET /projects"))
     app.router.add_get(f"{PLANNING_PREFIX}/status", _route(_get_status, "GET /status"))
+    app.router.add_post(
+        f"{PLANNING_PREFIX}/calendar-sources/refresh",
+        _route(_refresh_calendar_sources, "POST /calendar-sources/refresh"),
+    )
     app.router.add_post(f"{PLANNING_PREFIX}/parse", _route(_parse_preview, "POST /parse"))
     if include_alice_route:
         app.router.add_post(

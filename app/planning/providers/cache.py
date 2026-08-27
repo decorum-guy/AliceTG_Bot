@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sqlite3
 from dataclasses import dataclass
@@ -79,6 +80,8 @@ class ProviderCalendarCache:
         self.now_fn = now_fn
         self.max_calendars = max_calendars
         self.source_id = _source_id(provider_name, account_id)
+        self._refresh_lock: asyncio.Lock | None = None
+        self._refresh_lock_loop: asyncio.AbstractEventLoop | None = None
         self._ensure_source()
 
     def source_metadata(self) -> list[dict[str, Any]]:
@@ -152,6 +155,14 @@ class ProviderCalendarCache:
 
     async def refresh(self, window: CalendarWindow) -> ProviderRefreshResult:
         window.validate()
+        loop = asyncio.get_running_loop()
+        if self._refresh_lock is None or self._refresh_lock_loop is not loop:
+            self._refresh_lock = asyncio.Lock()
+            self._refresh_lock_loop = loop
+        async with self._refresh_lock:
+            return await self._refresh_unlocked(window)
+
+    async def _refresh_unlocked(self, window: CalendarWindow) -> ProviderRefreshResult:
         observed_at = self.now_fn()
         if not self.enabled:
             self._set_source_state(status="disabled", observed_at=observed_at, error_code=None)
@@ -683,8 +694,13 @@ class ProviderCalendarCache:
     ) -> ProviderRefreshResult:
         del cause
         has_cache = self.database.connection.execute(
-            "SELECT 1 FROM provider_event_cache WHERE source_id = ? LIMIT 1",
-            (self.source_id,),
+            """
+            SELECT 1 FROM provider_calendars WHERE source_id = ?
+            UNION ALL
+            SELECT 1 FROM provider_event_cache WHERE source_id = ?
+            LIMIT 1
+            """,
+            (self.source_id, self.source_id),
         ).fetchone()
         status: ProviderStatus = "stale" if has_cache else "error"
         with self.database.transaction() as connection:
