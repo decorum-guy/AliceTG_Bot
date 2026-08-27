@@ -64,7 +64,7 @@ def _collection_propfind_body() -> bytes:
 
 
 def _vtodo_query_body(*, start: datetime, end: datetime) -> bytes:
-    """Build the only bounded VTODO read request; it contains no write operation."""
+    """Build the bounded, sampled VTODO read request; it contains no write operation."""
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("VTODO probe window must be finite and timezone-aware")
@@ -74,7 +74,17 @@ def _vtodo_query_body(*, start: datetime, end: datetime) -> bytes:
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
-        '<d:prop><d:getetag/><c:calendar-data/></d:prop>'
+        '<d:prop><d:getetag/>'
+        '<c:calendar-data content-type="text/calendar" version="2.0">'
+        '<c:comp name="VCALENDAR">'
+        '<c:prop name="VERSION"/><c:prop name="PRODID"/>'
+        '<c:comp name="VTODO">'
+        '<c:prop name="UID"/><c:prop name="DTSTAMP"/><c:prop name="LAST-MODIFIED"/>'
+        '<c:prop name="SEQUENCE"/><c:prop name="DTSTART"/><c:prop name="DUE"/>'
+        '<c:prop name="DURATION"/><c:prop name="STATUS"/><c:prop name="COMPLETED"/>'
+        '<c:prop name="PERCENT-COMPLETE"/><c:prop name="RRULE"/>'
+        '<c:prop name="RECURRENCE-ID"/><c:prop name="EXDATE"/><c:prop name="RDATE"/>'
+        '</c:comp></c:comp></c:calendar-data></d:prop>'
         '<c:filter><c:comp-filter name="VCALENDAR">'
         f'<c:comp-filter name="VTODO"><c:time-range start="{start_text}" end="{end_text}"/></c:comp-filter>'
         "</c:comp-filter></c:filter></c:calendar-query>"
@@ -86,6 +96,7 @@ class _Collection:
     href: str
     collection_id: str
     components: frozenset[str] | None
+    component_set_state: str
     display_name_present: bool
     resource_id_present: bool
     collection_etag_present: bool
@@ -98,8 +109,16 @@ class _Collection:
     supported_reports: tuple[str, ...]
 
     @property
-    def is_vtodo_capable(self) -> bool:
-        return self.components is not None and "VTODO" in self.components
+    def explicitly_advertises_vtodo(self) -> bool:
+        return self.component_set_state == "explicit_vtodo_support"
+
+    @property
+    def standards_accepts_vtodo(self) -> bool:
+        return self.component_set_state == "absent" or self.explicitly_advertises_vtodo
+
+    @property
+    def should_probe_vtodo(self) -> bool:
+        return self.standards_accepts_vtodo
 
 
 @dataclass(frozen=True)
@@ -111,7 +130,7 @@ class _VTodoResource:
 
 def _initial_result() -> dict[str, Any]:
     return {
-        "schemaVersion": "b4.apple-vtodo-probe.v1",
+        "schemaVersion": "b4.apple-vtodo-probe.v2",
         "transport": {
             "allowedMethods": ["PROPFIND", "REPORT"],
             "writesAvailable": False,
@@ -128,30 +147,53 @@ def _initial_result() -> dict[str, Any]:
         },
         "collections": [],
         "vTodoCollections": {
-            "count": 0,
-            "explicitlyAdvertised": 0,
-            "stableIdentitiesAvailable": "not_observed",
-            "readable": "not_observed",
+            "candidateCount": 0,
+            "explicitlyAdvertisedVTodoCollections": 0,
+            "standardsAcceptedVTodoCollections": 0,
+            "unrestrictedComponentSetCollections": 0,
+            "explicitlyExcludedVTodoCollections": 0,
+            "actuallyReadableVTodo": "not_observed",
+            "resourcesActuallyObserved": 0,
         },
         "resourceRead": {
             "status": "not_observed",
             "supported": "not_observed",
+            "actuallyReadableVTodo": "not_observed",
             "collectionsQueried": 0,
-            "resourcesSeen": 0,
-            "itemsSeen": 0,
+            "resourcesActuallyObserved": 0,
+            "itemsActuallyObserved": 0,
             "boundedByMaxResources": True,
             "queryWindowFinite": True,
             "queryWindowDaysPast": 30,
             "queryWindowDaysFuture": 365,
+            "coverage": "sampled_not_enumerated",
+            "zeroResultMeaning": "not_observed_not_empty",
+            "possibleMisses": [
+                "undated_or_no-due VTODOs may not match the finite time-range",
+                "old overdue VTODOs may be outside the finite time-range",
+                "old completed VTODOs may be outside the finite time-range",
+                "other DTSTART/DUE/DURATION/COMPLETED/CREATED or recurrence combinations may not overlap the window",
+            ],
         },
         "identity": {
-            "collectionHrefAvailable": "not_observed",
-            "collectionResourceIdObserved": False,
-            "itemUidAvailable": "not_observed",
-            "itemHrefAvailable": "not_observed",
-            "itemEtagAvailable": "not_observed",
+            "fieldsAvailable": {
+                "collectionHref": "not_observed",
+                "collectionResourceId": "not_observed",
+                "itemUid": "not_observed",
+                "itemHref": "not_observed",
+                "itemEtag": "not_observed",
+                "recurrenceId": "not_observed",
+            },
+            "snapshotUniqueness": {
+                "collections": "not_observed",
+                "items": "not_observed",
+            },
+            "longitudinalStability": {
+                "collections": "not_observed",
+                "items": "not_observed",
+            },
             "recurrenceIdObserved": False,
-            "stableIdentity": "not_observed",
+            "recurrenceIdentity": "not_observed",
             "duplicateUidCount": 0,
         },
         "freshness": {
@@ -159,6 +201,8 @@ def _initial_result() -> dict[str, Any]:
             "ctagObserved": False,
             "syncTokenObserved": False,
             "itemEtagAvailable": "not_observed",
+            "itemDtstampObserved": False,
+            "itemLastModifiedObserved": False,
             "incrementalVTodoSync": "not_tested_safely",
         },
         "completion": {
@@ -209,11 +253,43 @@ def _initial_result() -> dict[str, Any]:
             "absenceOnly": True,
         },
         "sharedLists": {
-            "sharedMetadataObserved": False,
+            "ownerMetadataObserved": False,
             "ownerVsParticipant": "not_observed",
-            "readPrivilegeObserved": False,
+            "sharedListStatus": "not_observed",
+            "privilegesMetadataObserved": False,
+            "currentUserReadPrivilegeObserved": False,
+            "currentUserWritePrivilegeObserved": False,
             "readOnlyCollections": 0,
             "privilegeLimitations": "not_observed",
+        },
+        "privacy": {
+            "calendarDataRetrieval": "partial_requested",
+            "requestedVTodoProperties": [
+                "UID",
+                "DTSTAMP",
+                "LAST-MODIFIED",
+                "SEQUENCE",
+                "DTSTART",
+                "DUE",
+                "DURATION",
+                "STATUS",
+                "COMPLETED",
+                "PERCENT-COMPLETE",
+                "RRULE",
+                "RECURRENCE-ID",
+                "EXDATE",
+                "RDATE",
+            ],
+            "notRequestedPrivateProperties": [
+                "SUMMARY",
+                "DESCRIPTION",
+                "LOCATION",
+                "URL",
+                "ATTACH",
+                "ATTENDEE",
+                "ORGANIZER",
+            ],
+            "serverMayReturnAdditionalData": True,
         },
         "errors": [],
     }
@@ -262,9 +338,9 @@ def _has_property(props: list[Any], local_name: str, namespace: str | None = Non
     return _property(props, local_name, namespace) is not None
 
 
-def _parse_components(component_property: Any | None) -> frozenset[str] | None:
+def _parse_components(component_property: Any | None) -> tuple[str, frozenset[str] | None]:
     if component_property is None:
-        return None
+        return "absent", None
     components: set[str] = set()
     for component in _direct_children(component_property, "comp", namespace=_CALDAV):
         name = (component.attrib.get("name") or "").strip().upper()
@@ -273,7 +349,11 @@ def _parse_components(component_property: Any | None) -> frozenset[str] | None:
         components.add(name)
     if not components:
         raise ProviderPayloadError("provider_vtodo_component_set_invalid")
-    return frozenset(components)
+    component_set = frozenset(components)
+    return (
+        "explicit_vtodo_support" if "VTODO" in component_set else "explicit_vtodo_exclusion",
+        component_set,
+    )
 
 
 def _parse_privileges(privilege_property: Any | None) -> tuple[bool, bool, bool]:
@@ -328,13 +408,15 @@ def _parse_collections(payload: bytes, base_url: str, account_id: str) -> list[_
         privileges_present, read_privilege, write_privilege = _parse_privileges(
             _property(props, "current-user-privilege-set", _DAV)
         )
+        component_set_state, components = _parse_components(
+            _property(props, "supported-calendar-component-set", _CALDAV)
+        )
         results.append(
             _Collection(
                 href=absolute_href,
                 collection_id=_opaque("vtodo_collection", f"{account_id}|{absolute_href}"),
-                components=_parse_components(
-                    _property(props, "supported-calendar-component-set", _CALDAV)
-                ),
+                components=components,
+                component_set_state=component_set_state,
                 display_name_present=_has_property(props, "displayname", _DAV),
                 resource_id_present=_has_property(props, "resource-id", _DAV),
                 collection_etag_present=_has_property(props, "getetag", _DAV),
@@ -522,6 +604,8 @@ def _parse_vtodo_calendar_data(
                 "uidAvailable": True,
                 "hrefAvailable": True,
                 "etagAvailable": resource.etag is not None,
+                "dtstampObserved": "DTSTAMP" in property_names,
+                "lastModifiedObserved": "LAST-MODIFIED" in property_names,
                 "recurrenceIdObserved": recurrence_id_observed,
                 "completion": completion,
                 "due": due,
@@ -551,20 +635,34 @@ def _parse_vtodo_calendar_data(
     return items, component_names
 
 
-def _collection_output(collection: _Collection, query_status: str) -> dict[str, Any]:
-    component_status = "observed" if collection.components is not None else "not_observed"
+def _collection_output(
+    collection: _Collection,
+    query_status: str,
+    resources_observed: int,
+) -> dict[str, Any]:
     return {
         "collectionId": collection.collection_id,
         "componentCapability": {
-            "status": component_status,
+            "state": collection.component_set_state,
             "advertisedComponents": sorted(collection.components or ()),
-            "vTodoAdvertised": collection.is_vtodo_capable,
+            "explicitlyAdvertisedVTodo": collection.explicitly_advertises_vtodo,
+            "standardsAcceptedVTodo": collection.standards_accepts_vtodo,
+            "unrestrictedComponentSet": collection.component_set_state == "absent",
             "mixedVeventVtodo": bool(
                 collection.components is not None
                 and {"VEVENT", "VTODO"}.issubset(collection.components)
             ),
+            "actuallyReadableVTodo": (
+                query_status if collection.should_probe_vtodo else "not_observed"
+            ),
+            "resourcesActuallyObserved": resources_observed,
         },
-        "hrefIdentity": {"available": True, "opaqueStableId": True},
+        "hrefIdentity": {
+            "available": True,
+            "opaqueId": True,
+            "snapshotUniqueness": "unambiguous",
+            "longitudinalStability": "not_observed",
+        },
         "displayNamePresent": collection.display_name_present,
         "resourceIdPresent": collection.resource_id_present,
         "freshness": {
@@ -585,7 +683,7 @@ def _collection_output(collection: _Collection, query_status: str) -> dict[str, 
                 else None
             ),
         },
-        "sharedMetadataPresent": collection.owner_metadata_present,
+        "ownerMetadataObserved": collection.owner_metadata_present,
         "queryStatus": query_status,
     }
 
@@ -676,22 +774,41 @@ class ICloudVTodoProbe:
             _record_error(result, "collectionDiscovery", error)
             return result
 
-        candidates = [collection for collection in collections if collection.is_vtodo_capable]
-        result["identity"].update(
+        candidates = [collection for collection in collections if collection.should_probe_vtodo]
+        explicit_vtodo = sum(
+            collection.explicitly_advertises_vtodo for collection in collections
+        )
+        unrestricted = sum(
+            collection.component_set_state == "absent" for collection in collections
+        )
+        explicit_exclusion = sum(
+            collection.component_set_state == "explicit_vtodo_exclusion"
+            for collection in collections
+        )
+        fields = result["identity"]["fieldsAvailable"]
+        fields.update(
             {
-                "collectionHrefAvailable": "supported" if collections else "not_observed",
-                "collectionResourceIdObserved": any(
-                    collection.resource_id_present for collection in collections
+                "collectionHref": "supported" if collections else "not_observed",
+                "collectionResourceId": (
+                    "supported"
+                    if collections
+                    and all(collection.resource_id_present for collection in collections)
+                    else "partial"
+                    if any(collection.resource_id_present for collection in collections)
+                    else "not_observed"
                 ),
             }
         )
+        result["identity"]["snapshotUniqueness"]["collections"] = (
+            "unambiguous" if collections else "not_observed"
+        )
         result["vTodoCollections"].update(
             {
-                "count": len(candidates),
-                "explicitlyAdvertised": len(candidates),
-                "stableIdentitiesAvailable": (
-                    "supported" if candidates else "not_observed"
-                ),
+                "candidateCount": len(candidates),
+                "explicitlyAdvertisedVTodoCollections": explicit_vtodo,
+                "standardsAcceptedVTodoCollections": len(candidates),
+                "unrestrictedComponentSetCollections": unrestricted,
+                "explicitlyExcludedVTodoCollections": explicit_exclusion,
             }
         )
         result["freshness"].update(
@@ -708,11 +825,17 @@ class ICloudVTodoProbe:
         result["deletion"]["syncTokenObserved"] = result["freshness"]["syncTokenObserved"]
         result["sharedLists"].update(
             {
-                "sharedMetadataObserved": any(
+                "ownerMetadataObserved": any(
                     collection.owner_metadata_present for collection in collections
                 ),
-                "readPrivilegeObserved": any(
+                "privilegesMetadataObserved": any(
+                    collection.privileges_present for collection in collections
+                ),
+                "currentUserReadPrivilegeObserved": any(
                     collection.read_privilege_present for collection in collections
+                ),
+                "currentUserWritePrivilegeObserved": any(
+                    collection.write_privilege_present for collection in collections
                 ),
                 "readOnlyCollections": sum(
                     collection.read_privilege_present and not collection.write_privilege_present
@@ -724,7 +847,8 @@ class ICloudVTodoProbe:
         query_statuses: dict[str, str] = {}
         item_observations: list[dict[str, Any]] = []
         uid_by_collection: Counter[tuple[str, str]] = Counter()
-        resources_seen = 0
+        resources_by_collection: Counter[str] = Counter()
+        resources_observed = 0
         now = datetime.now(timezone.utc)
         query_start = now - timedelta(days=30)
         query_end = now + timedelta(days=365)
@@ -740,7 +864,8 @@ class ICloudVTodoProbe:
                     collection.href,
                     self.max_resources_per_collection,
                 )
-                resources_seen += len(resources)
+                resources_observed += len(resources)
+                resources_by_collection[collection.collection_id] += len(resources)
                 for resource in resources:
                     items, _ = _parse_vtodo_calendar_data(resource, collection.collection_id)
                     for item in items:
@@ -773,14 +898,23 @@ class ICloudVTodoProbe:
                     else "not_observed"
                 ),
                 "collectionsQueried": len(query_statuses),
-                "resourcesSeen": resources_seen,
-                "itemsSeen": len(item_observations),
+                "resourcesActuallyObserved": resources_observed,
+                "itemsActuallyObserved": len(item_observations),
+                "actuallyReadableVTodo": (
+                    "supported"
+                    if successful_queries and not failed_queries
+                    else "partial"
+                    if successful_queries
+                    else "failed"
+                    if failed_queries
+                    else "not_observed"
+                ),
             }
         )
         duplicate_uid_count = sum(max(count - 1, 0) for count in uid_by_collection.values())
         for item in item_observations:
             item.pop("_uid", None)
-        result["vTodoCollections"]["readable"] = (
+        result["vTodoCollections"]["actuallyReadableVTodo"] = (
             "supported"
             if successful_queries and not failed_queries
             else "partial"
@@ -793,13 +927,20 @@ class ICloudVTodoProbe:
             _collection_output(
                 collection,
                 query_statuses.get(collection.collection_id, "not_tested"),
+                resources_by_collection[collection.collection_id],
             )
             for collection in collections
         ]
         self._aggregate_observations(result, item_observations)
         result["identity"]["duplicateUidCount"] = duplicate_uid_count
-        if duplicate_uid_count:
-            result["identity"]["stableIdentity"] = "ambiguous"
+        result["vTodoCollections"]["resourcesActuallyObserved"] = resources_observed
+        result["identity"]["snapshotUniqueness"]["items"] = (
+            "ambiguous"
+            if duplicate_uid_count
+            else "unambiguous"
+            if item_observations
+            else "not_observed"
+        )
         return result
 
     @staticmethod
@@ -881,23 +1022,43 @@ class ICloudVTodoProbe:
         for key in advanced:
             advanced[key] = any(item["advanced"][key] for item in observations)
         identity = result["identity"]
+        fields = identity["fieldsAvailable"]
         identity.update(
             {
-                "collectionHrefAvailable": "supported",
-                "itemUidAvailable": "supported",
-                "itemHrefAvailable": "supported",
-                "itemEtagAvailable": (
-                    "supported" if all(item["etagAvailable"] for item in observations) else "partial"
-                ),
                 "recurrenceIdObserved": any(
                     item["recurrenceIdObserved"] for item in observations
                 ),
-                "stableIdentity": (
-                    "supported"
-                    if len({item["itemId"] for item in observations}) == len(observations)
-                    else "ambiguous"
+                "recurrenceIdentity": (
+                    "recurrence_id_observed"
+                    if any(item["recurrenceIdObserved"] for item in observations)
+                    else "uid_only_not_occurrence_identity"
                 ),
             }
         )
-        identity["duplicateUidCount"] = 0
-        result["freshness"]["itemEtagAvailable"] = identity["itemEtagAvailable"]
+        fields.update(
+            {
+                "itemUid": "supported",
+                "itemHref": "supported",
+                "itemEtag": (
+                    "supported"
+                    if all(item["etagAvailable"] for item in observations)
+                    else "partial"
+                ),
+                "recurrenceId": (
+                    "supported"
+                    if any(item["recurrenceIdObserved"] for item in observations)
+                    else "not_observed"
+                ),
+            }
+        )
+        result["freshness"].update(
+            {
+                "itemEtagAvailable": fields["itemEtag"],
+                "itemDtstampObserved": any(
+                    item["dtstampObserved"] for item in observations
+                ),
+                "itemLastModifiedObserved": any(
+                    item["lastModifiedObserved"] for item in observations
+                ),
+            }
+        )

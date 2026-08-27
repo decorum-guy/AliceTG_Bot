@@ -59,7 +59,7 @@ def main() -> int:
     missing = _missing_configuration()
     if missing:
         result = {
-            "schemaVersion": "b4.apple-vtodo-probe.v1",
+            "schemaVersion": "b4.apple-vtodo-probe.v2",
             "evidenceSource": "current_authorized_live_path",
             "liveEvidenceAvailable": False,
             "status": "not_configured",
@@ -81,7 +81,7 @@ def main() -> int:
         # The probe itself sanitizes provider failures. This final guard keeps
         # an unexpected local failure from printing exception text or secrets.
         result = {
-            "schemaVersion": "b4.apple-vtodo-probe.v1",
+            "schemaVersion": "b4.apple-vtodo-probe.v2",
             "evidenceSource": "current_authorized_live_path",
             "liveEvidenceAvailable": True,
             "status": "failed",
