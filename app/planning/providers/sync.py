@@ -3,8 +3,16 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from app.planning.providers.cache import ProviderCalendarCache
+from app.planning.providers.cache import ProviderCalendarCache, ProviderRefreshResult
 from app.planning.providers.contracts import CalendarWindow
+
+
+def calendar_refresh_window(*, now: datetime | None = None) -> CalendarWindow:
+    selected = now or datetime.now(timezone.utc)
+    return CalendarWindow(
+        start=selected - timedelta(days=30),
+        end=selected + timedelta(days=365),
+    )
 
 
 class ICloudCalendarRefreshLoop:
@@ -26,13 +34,8 @@ class ICloudCalendarRefreshLoop:
             await self.refresh_once()
             await asyncio.sleep(self.interval_seconds)
 
-    async def refresh_once(self) -> None:
-        now = datetime.now(timezone.utc)
-        window = CalendarWindow(
-            start=now - timedelta(days=30),
-            end=now + timedelta(days=365),
-        )
-        await self.cache.refresh(window)
+    async def refresh_once(self) -> ProviderRefreshResult:
+        return await self.cache.refresh(calendar_refresh_window())
 
     async def close(self) -> None:
         if self._task is not None:

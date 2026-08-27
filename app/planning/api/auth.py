@@ -39,6 +39,7 @@ ROUTE_PERMISSIONS: dict[str, frozenset[str]] = {
     "DELETE /events/{id}": frozenset({"panel-agent", "operator"}),
     "GET /projects": frozenset({"ha", "panel-agent", "operator"}),
     "GET /status": frozenset({"ha", "panel-agent", "operator"}),
+    "POST /calendar-sources/refresh": frozenset({"panel-agent", "operator"}),
     # This is the only A5a write-capable ingress for Home Assistant.  HA does
     # not receive generic Planning domain CRUD access.
     "POST /alice/interpret": frozenset({"ha"}),
