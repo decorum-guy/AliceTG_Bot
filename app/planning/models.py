@@ -27,6 +27,7 @@ REMINDER_STATUSES = frozenset({"pending", "due", "completed", "cancelled"})
 DELIVERY_STATES = frozenset({"not_due", "queued", "retrying", "delivered", "failed"})
 TASK_PRIORITIES = frozenset({"none", "low", "normal", "high"})
 TASK_STATUSES = frozenset({"open", "completed", "archived"})
+TASK_VIEWS = frozenset({"today", "overdue", "upcoming", "undated"})
 EVENT_SYNC_STATES = frozenset({"local_only", "pending", "synced", "stale", "conflict", "error"})
 OUTBOX_STATUSES = frozenset({"queued", "leased", "succeeded", "failed", "cancelled"})
 REMINDER_DELIVERY_JOB_TYPE = "planning.reminder.delivery.v1"

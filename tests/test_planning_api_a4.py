@@ -637,6 +637,144 @@ class PlanningApiA4Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(archived_payload["object"]["deleted_at"])
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 3)
 
+    async def test_undated_task_view_is_canonical_bounded_and_read_only(self) -> None:
+        context = MutationContext(
+            audience="operator",
+            actor_id="synthetic-undated-test",
+            actor_type="operator",
+            surface="operator",
+        )
+        selected_project = self.service.repository.create_project(name="Selected undated", context=context)
+        other_project = self.service.repository.create_project(name="Other undated", context=context)
+        selected = self.service.repository.create_task(
+            title="selected undated",
+            project_id=selected_project.id,
+            context=context,
+        )
+        selected_second = self.service.repository.create_task(
+            title="selected undated second",
+            project_id=selected_project.id,
+            context=context,
+        )
+        different_project = self.service.repository.create_task(
+            title="different project undated",
+            project_id=other_project.id,
+            context=context,
+        )
+        date_only = self.service.repository.create_task(
+            title="date-only excluded",
+            due_date="2026-08-11",
+            context=context,
+        )
+        timed = self.service.repository.create_task(
+            title="timed excluded",
+            due_date="2026-08-11",
+            due_time="09:30",
+            timezone="Europe/Moscow",
+            context=context,
+        )
+        completed = self.service.repository.create_task(title="completed excluded", context=context)
+        self.service.repository.complete_task(completed.id, expected_version=1, context=context)
+        archived = self.service.repository.create_task(title="archived excluded", context=context)
+        self.service.repository.archive_task(archived.id, expected_version=1, context=context)
+        tombstoned = self.service.repository.create_task(title="tombstoned excluded", context=context)
+        self.database.connection.execute(
+            "UPDATE tasks SET deleted_at = ? WHERE id = ?",
+            (NOW, tombstoned.id),
+        )
+
+        def state_snapshot() -> dict[str, list[tuple[object, ...]]]:
+            return {
+                table: [
+                    tuple(row)
+                    for row in self.database.connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                ]
+                for table in ("tasks", "projects", "audit_events", "idempotency_keys", "outbox")
+            }
+
+        before_read = state_snapshot()
+        response = await self._request("GET", f"{PLANNING_PREFIX}/tasks?view=undated")
+        payload = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["schemaVersion"], "planning.v1")
+        self.assertEqual(payload["kind"], "list")
+        self.assertEqual(payload["domain"], "task")
+        returned_ids = [item["id"] for item in payload["items"]]
+        self.assertEqual(
+            returned_ids,
+            [task.id for task in sorted((selected, selected_second, different_project), key=lambda item: (item.created_at, item.id))],
+        )
+        selected_payload = next(item for item in payload["items"] if item["id"] == selected.id)
+        self.assertEqual(selected_payload, selected.to_dict())
+        self.assertIsNone(selected_payload["due_date"])
+        self.assertIsNone(selected_payload["due_time"])
+        self.assertIsNone(selected_payload["timezone"])
+        for excluded in (date_only, timed, completed, archived, tombstoned):
+            self.assertNotIn(excluded.id, returned_ids)
+
+        filtered = await self._request(
+            "GET",
+            f"{PLANNING_PREFIX}/tasks?view=undated&project_id={selected_project.id}",
+        )
+        filtered_payload = await filtered.json()
+        self.assertEqual(filtered.status, 200)
+        self.assertEqual(
+            [item["id"] for item in filtered_payload["items"]],
+            [
+                task.id
+                for task in sorted((selected, selected_second), key=lambda item: (item.created_at, item.id))
+            ],
+        )
+        self.assertNotIn(different_project.id, [item["id"] for item in filtered_payload["items"]])
+
+        first_page = await self._request("GET", f"{PLANNING_PREFIX}/tasks?view=undated&limit=1")
+        first_page_payload = await first_page.json()
+        self.assertEqual(first_page.status, 200)
+        self.assertEqual(first_page_payload["pagination"], {
+            "count": 1,
+            "has_more": True,
+            "limit": 1,
+            "next_offset": 1,
+            "offset": 0,
+        })
+
+        for audience, secret in (("ha", HA_SECRET), ("panel-agent", PANEL_SECRET), ("operator", OPERATOR_SECRET)):
+            permitted = await self._request(
+                "GET",
+                f"{PLANNING_PREFIX}/tasks?view=undated",
+                audience=audience,
+                secret=secret,
+            )
+            self.assertEqual(permitted.status, 200, audience)
+        unauthorized = await self.client.get(f"{PLANNING_PREFIX}/tasks?view=undated")
+        self.assertEqual(unauthorized.status, 401)
+        wrong_secret = await self._request(
+            "GET",
+            f"{PLANNING_PREFIX}/tasks?view=undated",
+            secret="wrong-secret",
+        )
+        self.assertEqual(wrong_secret.status, 401)
+
+        self.assertEqual(state_snapshot(), before_read)
+
+    async def test_undated_task_query_allowlist_and_bounds_remain_strict(self) -> None:
+        cases = (
+            "view=unknown",
+            "view=undated&view=undated",
+            "view=undated&project_id=not-a-uuid",
+            "view=undated&limit=101",
+            "view=undated&offset=10001",
+        )
+        for query in cases:
+            response = await self._request("GET", f"{PLANNING_PREFIX}/tasks?{query}")
+            payload = await response.json()
+            with self.subTest(query=query):
+                self.assertEqual(response.status, 400)
+                self.assertEqual(payload["kind"], "error")
+                self.assertEqual(payload["error"]["code"], "validation_error")
+                self.assertNotIn(str(self.db_path), json.dumps(payload))
+                self.assertNotIn(PANEL_SECRET, json.dumps(payload))
+
     async def test_task_read_by_id_is_bounded_and_audience_scoped(self) -> None:
         _, created = await self._create_task(key="read-by-id-open", title="Read by id")
         task_id = created["object"]["id"]

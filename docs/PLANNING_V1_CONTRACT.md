@@ -145,6 +145,22 @@ metadata plus `generatedAt` and a typed `items` array. `sourceStatus` is
 source snapshot exists, while `staleAfter` remains an explicit UTC time when
 the source can calculate one.
 
+### Canonical task list views
+
+The fixed A4 route `GET /internal/planning/v1/tasks` accepts the task view
+values `today`, `overdue`, `upcoming`, and `undated`, with the existing
+bounded `limit`/`offset` pagination and optional `project_id` filter.  The
+`undated` view is the explicit `Без срока` / Inbox projection: it returns only
+active/open canonical Planning tasks with `due_date IS NULL`.  It is a
+projection over the canonical `tasks` table, not a separate store.  Completed,
+archived, and deleted/tombstoned rows are excluded.  Undated tasks retain
+`due_date: null`, `due_time: null`, and `timezone: null` in the existing task
+object and use deterministic `created_at, id` ordering.
+
+The dated views retain their existing semantics: `today` is the caller's
+local date, `overdue` is before it, and `upcoming` is after it.  `upcoming`
+does not include undated tasks.
+
 ### Mutation request, actor and idempotency boundary
 
 The client/server trust boundary is explicit. A task create is sent to the

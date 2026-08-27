@@ -22,7 +22,7 @@ SQLite
 ## Tasks
 
 `TaskService` owns create, update, complete, archive/tombstone, get, and the
-`today`, `overdue`, and `upcoming` views. It delegates persistence and version
+`today`, `overdue`, `upcoming`, and `undated` views. It delegates persistence and version
 guards to the repository; it does not duplicate SQL. Open-view queries continue
 to exclude completed and archived/tombstoned tasks. A project filter is passed
 to the existing repository primitive.
@@ -50,12 +50,17 @@ Europe/Berlin, including both Berlin DST transitions.
 
 ### Caller-timezone views
 
-Every canonical task view takes an explicit `reference_time_utc` and caller
+Every dated canonical task view takes an explicit `reference_time_utc` and caller
 IANA timezone. The service converts that instant to the caller's local date
 and delegates the date-based repository view. It does not call
 `date.today()` or use the machine-local timezone. Existing product semantics
 are preserved: `today` is the local date, `overdue` is before it, and
 `upcoming` is after it.
+
+`undated` is the explicit active/open projection for tasks with `due_date IS
+NULL`; it does not reinterpret or add tasks to any dated view. It uses the
+same optional project filter, bounded pagination, and canonical task table,
+with deterministic `created_at, id` ordering.
 
 ## Projects
 

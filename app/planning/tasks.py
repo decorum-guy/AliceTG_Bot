@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from app.planning.errors import PlanningValidationError
-from app.planning.models import MutationContext, Task, utc_now, validate_timezone
+from app.planning.models import TASK_VIEWS, MutationContext, Task, utc_now, validate_timezone
 from app.planning.repositories import PlanningRepository
 from app.planning.service_time import UtcReference, caller_local_date
 
@@ -109,7 +109,7 @@ class TaskService:
         limit: int = 1001,
         offset: int = 0,
     ) -> list[Task]:
-        if view not in {"today", "overdue", "upcoming"}:
+        if view not in TASK_VIEWS:
             raise PlanningValidationError("task.view has an invalid enum")
         validate_timezone(caller_timezone, "caller_timezone")
         _page(limit, offset)
@@ -117,6 +117,24 @@ class TaskService:
         return self.repository.list_tasks(
             view=view,
             today=today,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def undated(
+        self,
+        *,
+        reference_time_utc: UtcReference,
+        caller_timezone: str,
+        project_id: str | None = None,
+        limit: int = 1001,
+        offset: int = 0,
+    ) -> list[Task]:
+        return self.list_view(
+            view="undated",
+            reference_time_utc=reference_time_utc,
+            caller_timezone=caller_timezone,
             project_id=project_id,
             limit=limit,
             offset=offset,

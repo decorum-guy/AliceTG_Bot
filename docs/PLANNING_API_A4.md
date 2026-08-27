@@ -16,7 +16,7 @@ PATCH  /reminders/{id}
 POST   /reminders/{id}/complete
 POST   /reminders/{id}/cancel
 
-GET    /tasks?view=today|overdue|upcoming&project_id=&limit=&offset=
+GET    /tasks?view=today|overdue|upcoming|undated&project_id=&limit=&offset=
 GET    /tasks/{id}
 POST   /tasks
 PATCH  /tasks/{id}
@@ -108,6 +108,22 @@ local wall-clock time plus IANA timezone.  Reminders and timed events require
 UTC `Z` timestamps plus IANA timezone.  Events enforce timed/all-day
 exclusivity, exclusive all-day end dates, `end > start`, disabled recurrence,
 and `sync_state=local_only`.  A4 performs no provider network writes.
+
+### Task list views
+
+`GET /tasks` accepts exactly one of these fixed views:
+
+- `today`: active/open tasks whose `due_date` is the caller's local date.
+- `overdue`: active/open tasks whose `due_date` is before the caller's local date.
+- `upcoming`: active/open tasks whose `due_date` is after the caller's local date.
+- `undated`: active/open tasks whose `due_date IS NULL` (`Без срока` / Inbox).
+
+All four views are bounded projections over the canonical Planning `tasks`
+table, not separate stores.  Completed, archived, and deleted/tombstoned rows
+are excluded.  The optional `project_id` filter applies to every task view;
+pagination uses the same fixed `limit`/`offset` bounds and list envelope.
+`undated` uses deterministic `created_at, id` ordering because no due-date
+ordering is available.
 
 ## Mutation transaction and replay
 

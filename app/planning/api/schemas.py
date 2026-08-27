@@ -12,6 +12,7 @@ from app.planning.models import (
     LOCAL_TIME_PATTERN,
     REMINDER_STATUSES,
     TASK_PRIORITIES,
+    TASK_VIEWS,
     validate_date,
     validate_event_shape,
     validate_text,
@@ -595,8 +596,8 @@ def parse_reminder_query(request: web.Request) -> tuple[str | None, str | None, 
 def parse_task_query(request: web.Request) -> tuple[str, str | None, int, int]:
     query = parse_query(request, allowed={"view", "project_id"})
     view = query.get("view")
-    if view not in {"today", "overdue", "upcoming"}:
-        raise _validation("Task query requires view=today, overdue, or upcoming.")
+    if view not in TASK_VIEWS:
+        raise _validation("Task query requires view=today, overdue, upcoming, or undated.")
     project_id = _optional_uuid(query.get("project_id"), "project_id")
     limit, offset = parse_list_options(query, allowed={"view", "project_id"})
     return view, project_id, limit, offset
