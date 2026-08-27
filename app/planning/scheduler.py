@@ -31,6 +31,8 @@ DELIVERY_RETRY_WINDOW_SECONDS = 24 * 60 * 60
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_LEASE_SECONDS = 60
 DEFAULT_JITTER_SECONDS = 5.0
+DELIVERY_TERMINAL_STATE_KEY = "delivery_terminal_channels"
+_DELIVERY_CHANNELS = frozenset({"alice", "jarvis", "telegram", "home_assistant", "iphone"})
 
 SCHEDULER_CONTEXT = MutationContext(
     audience="operator",
@@ -55,6 +57,24 @@ def _as_datetime(value: str) -> datetime:
 
 def _as_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _terminal_channel_state(payload: Mapping[str, Any]) -> dict[str, str]:
+    raw_state = payload.get(DELIVERY_TERMINAL_STATE_KEY)
+    if not isinstance(raw_state, Mapping):
+        return {}
+    state: dict[str, str] = {}
+    for channel, error_code in raw_state.items():
+        if (
+            isinstance(channel, str)
+            and channel in _DELIVERY_CHANNELS
+            and isinstance(error_code, str)
+            and error_code
+            and error_code[0] in "abcdefghijklmnopqrstuvwxyz0123456789"
+            and all(character in "abcdefghijklmnopqrstuvwxyz0123456789_.:-" for character in error_code)
+        ):
+            state[channel] = error_code
+    return state
 
 
 @dataclass(frozen=True)
@@ -474,6 +494,7 @@ class DurableReminderScheduler:
         if not plan:
             self._commit_terminal(job, reminder, now, "no_delivery_channels", "no reminder delivery channels selected")
             return
+        terminal_channels = _terminal_channel_state(job.payload)
 
         if job.attempt_window_started_at is not None and _as_datetime(now) >= _as_datetime(
             str(job.attempt_window_started_at)
@@ -484,6 +505,8 @@ class DurableReminderScheduler:
         pending_plan: list[tuple[str, ReminderChannelTransport | None, DeliveryResult | None, bool]] = []
         for channel, transport, forced_result, required in plan:
             if self._repository.has_successful_delivery_attempt(reminder_id=reminder.id, channel=channel):
+                continue
+            if channel in terminal_channels:
                 continue
             attempts = self._repository.count_delivery_attempts(
                 reminder_id=reminder.id,
@@ -511,6 +534,16 @@ class DurableReminderScheduler:
                 channel_override=channel,
             )
             outcomes[channel] = outcome
+            if outcome.result.kind == "permanent" and outcome.result.code != "delivery_suppressed":
+                terminal_channels[channel] = outcome.result.code
+                job = self._repository.record_outbox_terminal_channel(
+                    job_id=job.id,
+                    lease_owner=self._worker_id,
+                    lease_token=job.lease_token,
+                    channel=channel,
+                    error_code=outcome.result.code,
+                    now=now,
+                )
             if not required:
                 optional_result = outcome.result
 
@@ -528,6 +561,16 @@ class DurableReminderScheduler:
             if self._repository.has_successful_delivery_attempt(reminder_id=reminder.id, channel=channel):
                 continue
             required_complete = False
+            if channel in terminal_channels:
+                if terminal_candidate is None:
+                    terminal_candidate = (
+                        channel,
+                        DeliveryResult.permanent(
+                            terminal_channels[channel],
+                            diagnostic=f"{channel} delivery permanently failed",
+                        ),
+                    )
+                continue
             outcome = outcomes.get(channel)
             if outcome is None:
                 continue
@@ -538,9 +581,6 @@ class DurableReminderScheduler:
 
         if required_complete:
             self._commit_success(job, current, now, optional_result)
-            return
-        if terminal_candidate is not None:
-            self._commit_terminal(job, current, now, terminal_candidate[1].code, terminal_candidate[1].diagnostic)
             return
         if retry_candidates:
             _channel, result, outcome = retry_candidates[0]
@@ -553,6 +593,9 @@ class DurableReminderScheduler:
             if retry_at is not None:
                 self._commit_retry(job, current, now, retry_at, result)
                 return
+        if terminal_candidate is not None:
+            self._commit_terminal(job, current, now, terminal_candidate[1].code, terminal_candidate[1].diagnostic)
+            return
         self._commit_terminal(job, current, now, "delivery_failed", "reminder delivery failed")
 
     @staticmethod

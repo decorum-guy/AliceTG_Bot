@@ -861,10 +861,19 @@ async def alice_reminder_create(request: web.Request) -> web.Response:
 def _delivery_channel_health(settings, reminder_settings) -> dict[str, dict[str, str | None]]:
     ha_configured = bool(settings.ha_url.strip() and settings.ha_long_lived_token.strip())
     telegram_configured = bool(settings.telegram_bot_token.strip() and settings.telegram_admin_chat_id)
-    alice_status = "available" if ha_configured and reminder_settings.voice_station_entity_id else "not_configured"
+    station_configured = bool(reminder_settings.voice_station_entity_id.strip())
+    if not reminder_settings.voice_enabled:
+        alice_status = "unavailable"
+        alice_code = "alice_voice_disabled"
+    elif not ha_configured or not station_configured:
+        alice_status = "not_configured"
+        alice_code = "alice_not_configured"
+    else:
+        alice_status = "available"
+        alice_code = None
     return {
         "spoken": {
-            "alice": {"status": alice_status, "code": None if alice_status == "available" else "alice_not_configured"},
+            "alice": {"status": alice_status, "code": alice_code},
             "jarvis": {"status": "unavailable", "code": "jarvis_runtime_unavailable"},
         },
         "phone": {
