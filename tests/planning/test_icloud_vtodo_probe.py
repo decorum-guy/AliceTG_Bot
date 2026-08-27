@@ -149,6 +149,7 @@ class FixtureReadOnlyTransport:
         self.calls: list[tuple[str, str, str]] = []
         self.bodies: list[str] = []
         self.report_error: BaseException | None = None
+        self.report_errors: dict[str, BaseException] = {}
 
     async def propfind(self, url: str, *, body: bytes, depth: str) -> bytes:
         self.calls.append(("PROPFIND", url, depth))
@@ -163,8 +164,9 @@ class FixtureReadOnlyTransport:
         self.calls.append(("REPORT", url, depth))
         body_text = body.decode("utf-8")
         self.bodies.append(body_text)
-        if self.report_error is not None:
-            raise self.report_error
+        error = self.report_errors.get(url, self.report_error)
+        if error is not None:
+            raise error
         if "VTODO" not in body_text:
             raise AssertionError("probe issued a non-VTODO REPORT")
         return self.reports.get(
@@ -194,7 +196,7 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         result = _probe(transport)
         self.assertEqual(result["vTodoCollections"]["candidateCount"], 0)
         self.assertEqual(result["vTodoCollections"]["explicitlyExcludedVTodoCollections"], 1)
-        self.assertEqual(result["resourceRead"]["status"], "not_observed")
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "not_observed")
         self.assertEqual(
             result["collections"][0]["componentCapability"]["state"],
             "explicit_vtodo_exclusion",
@@ -209,13 +211,18 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         result = _probe(transport)
         self.assertEqual(result["vTodoCollections"]["candidateCount"], 1)
         self.assertEqual(result["vTodoCollections"]["explicitlyAdvertisedVTodoCollections"], 1)
-        self.assertEqual(result["vTodoCollections"]["actuallyReadableVTodo"], "supported")
+        self.assertEqual(result["vTodoCollections"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(result["vTodoCollections"]["vTodoResourceEvidence"], "not_observed")
         capability = result["collections"][0]["componentCapability"]
         self.assertEqual(capability["state"], "explicit_vtodo_support")
         self.assertTrue(capability["explicitlyAdvertisedVTodo"])
         self.assertTrue(capability["standardsAcceptedVTodo"])
         self.assertFalse(capability["unrestrictedComponentSet"])
         self.assertEqual(result["resourceRead"]["itemsActuallyObserved"], 0)
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(result["resourceRead"]["vTodoResourceEvidence"], "not_observed")
+        self.assertEqual(result["resourceRead"]["resourcesActuallyObserved"], 0)
+        self.assertEqual(result["resourceRead"]["parsedVTodoResourcesActuallyObserved"], 0)
         self.assertEqual(result["resourceRead"]["zeroResultMeaning"], "not_observed_not_empty")
         self.assertEqual(result["collections"][0]["queryStatus"], "supported")
         self.assertEqual([method for method, _, _ in transport.calls], ["PROPFIND", "PROPFIND", "PROPFIND", "REPORT"])
@@ -236,11 +243,14 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         self.assertFalse(capability["explicitlyAdvertisedVTodo"])
         self.assertTrue(capability["standardsAcceptedVTodo"])
         self.assertTrue(capability["unrestrictedComponentSet"])
-        self.assertEqual(capability["actuallyReadableVTodo"], "supported")
-        self.assertEqual(capability["resourcesActuallyObserved"], 0)
+        self.assertEqual(result["collections"][0]["queryStatus"], "supported")
+        self.assertEqual(result["collections"][0]["vTodoResourceEvidence"], "not_observed")
+        self.assertEqual(result["collections"][0]["resourcesActuallyObserved"], 0)
         self.assertEqual(result["vTodoCollections"]["explicitlyAdvertisedVTodoCollections"], 0)
         self.assertEqual(result["vTodoCollections"]["unrestrictedComponentSetCollections"], 1)
-        self.assertEqual(result["vTodoCollections"]["actuallyReadableVTodo"], "supported")
+        self.assertEqual(result["vTodoCollections"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(result["vTodoCollections"]["vTodoResourceEvidence"], "not_observed")
+        self.assertEqual(result["vTodoCollections"]["resourcesActuallyObserved"], 0)
         self.assertEqual(result["resourceRead"]["coverage"], "sampled_not_enumerated")
         self.assertEqual(result["resourceRead"]["zeroResultMeaning"], "not_observed_not_empty")
         self.assertEqual([method for method, _, _ in transport.calls], ["PROPFIND", "PROPFIND", "PROPFIND", "REPORT"])
@@ -254,9 +264,13 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         )
         result = _probe(transport)
         self.assertEqual(result["vTodoCollections"]["explicitlyAdvertisedVTodoCollections"], 0)
+        self.assertEqual(result["vTodoCollections"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(result["vTodoCollections"]["vTodoResourceEvidence"], "observed")
         self.assertEqual(result["vTodoCollections"]["resourcesActuallyObserved"], 1)
-        self.assertEqual(result["resourceRead"]["actuallyReadableVTodo"], "supported")
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(result["resourceRead"]["vTodoResourceEvidence"], "observed")
         self.assertEqual(result["resourceRead"]["resourcesActuallyObserved"], 1)
+        self.assertEqual(result["resourceRead"]["parsedVTodoResourcesActuallyObserved"], 1)
         self.assertEqual(result["resourceRead"]["itemsActuallyObserved"], 1)
         self.assertEqual(result["identity"]["longitudinalStability"]["items"], "not_observed")
 
@@ -267,12 +281,16 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         result = _probe(transport)
         self.assertEqual(result["vTodoCollections"]["candidateCount"], 1)
         self.assertEqual(result["vTodoCollections"]["explicitlyAdvertisedVTodoCollections"], 0)
-        self.assertEqual(result["vTodoCollections"]["actuallyReadableVTodo"], "failed")
+        self.assertEqual(result["vTodoCollections"]["vTodoQueryStatus"], "failed")
+        self.assertEqual(result["vTodoCollections"]["vTodoResourceEvidence"], "not_observed")
         self.assertEqual(
-            result["collections"][0]["componentCapability"]["actuallyReadableVTodo"],
+            result["collections"][0]["queryStatus"],
             "failed",
         )
-        self.assertEqual(result["resourceRead"]["status"], "failed")
+        self.assertEqual(result["collections"][0]["vTodoResourceEvidence"], "not_observed")
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "failed")
+        self.assertEqual(result["resourceRead"]["vTodoResourceEvidence"], "not_observed")
+        self.assertEqual(result["resourceRead"]["resourcesActuallyObserved"], 0)
 
     def test_mixed_component_capability_is_distinguished(self) -> None:
         path = "/home/mixed/"
@@ -344,11 +362,18 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         self.assertTrue(result["recurrence"]["recurrenceIdObserved"])
         self.assertTrue(result["recurrence"]["exdateObserved"])
         self.assertEqual(result["recurrence"]["exceptions"], "observed")
-        self.assertTrue(result["advancedProperties"]["alarmsObserved"])
-        self.assertTrue(result["advancedProperties"]["undocumentedXPropertiesObserved"])
+        self.assertEqual(result["advancedProperties"]["status"], "not_requested")
+        self.assertNotIn("notesObserved", result["advancedProperties"])
+        self.assertNotIn("locationObserved", result["advancedProperties"])
+        self.assertNotIn("urlObserved", result["advancedProperties"])
+        self.assertNotIn("alarmsObserved", result["advancedProperties"])
         self.assertEqual(result["identity"]["fieldsAvailable"]["itemEtag"], "supported")
         self.assertEqual(result["identity"]["longitudinalStability"]["items"], "not_observed")
         self.assertEqual(result["identity"]["recurrenceIdentity"], "recurrence_id_observed")
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(result["resourceRead"]["vTodoResourceEvidence"], "observed")
+        self.assertEqual(result["resourceRead"]["resourcesActuallyObserved"], 4)
+        self.assertEqual(result["resourceRead"]["parsedVTodoResourcesActuallyObserved"], 4)
 
     def test_date_time_without_timezone_is_recorded_as_floating(self) -> None:
         path = "/home/reminders/"
@@ -399,6 +424,30 @@ class ICloudVTodoProbeTests(unittest.TestCase):
         self.assertEqual(result["resourceRead"]["itemsActuallyObserved"], 2)
         self.assertNotIn("SHOULD_NOT_LEAK_PRIVATE_SYNTHETIC_TITLE", json.dumps(result))
 
+    def test_mixed_collection_queries_remain_partial(self) -> None:
+        first_path = "/home/working-list/"
+        second_path = "/home/unavailable-list/"
+        first_report = _resources(("one.ics", _calendar(_vtodo("working-item"))))
+        transport = FixtureReadOnlyTransport(
+            _collections(
+                _collection(first_path, ("VTODO",)),
+                _collection(second_path, ("VTODO",)),
+            ),
+            {f"{BASE}{first_path}": first_report},
+        )
+        transport.report_errors[f"{BASE}{second_path}"] = ProviderFetchError(
+            "provider_server_failure"
+        )
+        result = _probe(transport)
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "partial")
+        self.assertEqual(result["resourceRead"]["vTodoResourceEvidence"], "partial")
+        self.assertEqual(result["resourceRead"]["resourcesActuallyObserved"], 1)
+        self.assertEqual(result["resourceRead"]["parsedVTodoResourcesActuallyObserved"], 1)
+        self.assertEqual(result["collections"][0]["queryStatus"], "supported")
+        self.assertEqual(result["collections"][0]["vTodoResourceEvidence"], "observed")
+        self.assertEqual(result["collections"][1]["queryStatus"], "failed")
+        self.assertEqual(result["collections"][1]["vTodoResourceEvidence"], "not_observed")
+
     def test_shared_readonly_and_revision_metadata_are_facts_not_identity(self) -> None:
         path = "/home/shared/"
         transport = FixtureReadOnlyTransport(
@@ -426,7 +475,8 @@ class ICloudVTodoProbeTests(unittest.TestCase):
             {f"{BASE}{path}": b"not xml"},
         )
         result = _probe(transport)
-        self.assertEqual(result["resourceRead"]["status"], "failed")
+        self.assertEqual(result["resourceRead"]["vTodoQueryStatus"], "failed")
+        self.assertEqual(result["resourceRead"]["vTodoResourceEvidence"], "not_observed")
         self.assertEqual(result["errors"], [{"layer": "resourceRead", "code": "provider_xml_invalid"}])
         entity_transport = FixtureReadOnlyTransport(
             _collections(_collection(path, ("VTODO",))),
@@ -446,6 +496,12 @@ class ICloudVTodoProbeTests(unittest.TestCase):
             malformed_result["errors"],
             [{"layer": "resourceRead", "code": "provider_vtodo_calendar_data_invalid"}],
         )
+        self.assertEqual(malformed_result["resourceRead"]["vTodoQueryStatus"], "supported")
+        self.assertEqual(malformed_result["resourceRead"]["vTodoResourceEvidence"], "failed")
+        self.assertEqual(malformed_result["resourceRead"]["resourcesActuallyObserved"], 1)
+        self.assertEqual(malformed_result["resourceRead"]["parsedVTodoResourcesActuallyObserved"], 0)
+        self.assertEqual(malformed_result["resourceRead"]["itemsActuallyObserved"], 0)
+        self.assertEqual(malformed_result["resourceRead"]["parserFailures"], 1)
 
     def test_mixed_resource_payload_and_duplicate_href_are_rejected(self) -> None:
         path = "/home/reminders/"

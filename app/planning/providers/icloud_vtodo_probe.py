@@ -152,16 +152,20 @@ def _initial_result() -> dict[str, Any]:
             "standardsAcceptedVTodoCollections": 0,
             "unrestrictedComponentSetCollections": 0,
             "explicitlyExcludedVTodoCollections": 0,
-            "actuallyReadableVTodo": "not_observed",
+            "vTodoQueryStatus": "not_observed",
+            "vTodoResourceEvidence": "not_observed",
             "resourcesActuallyObserved": 0,
+            "parsedVTodoResourcesActuallyObserved": 0,
+            "parserFailures": 0,
         },
         "resourceRead": {
-            "status": "not_observed",
-            "supported": "not_observed",
-            "actuallyReadableVTodo": "not_observed",
+            "vTodoQueryStatus": "not_observed",
+            "vTodoResourceEvidence": "not_observed",
             "collectionsQueried": 0,
             "resourcesActuallyObserved": 0,
+            "parsedVTodoResourcesActuallyObserved": 0,
             "itemsActuallyObserved": 0,
+            "parserFailures": 0,
             "boundedByMaxResources": True,
             "queryWindowFinite": True,
             "queryWindowDaysPast": 30,
@@ -237,14 +241,18 @@ def _initial_result() -> dict[str, Any]:
             ],
         },
         "advancedProperties": {
-            "priorityObserved": False,
-            "notesObserved": False,
-            "urlObserved": False,
-            "locationObserved": False,
-            "alarmsObserved": False,
-            "parentRelationshipObserved": False,
-            "flaggedOrTagsObserved": False,
-            "undocumentedXPropertiesObserved": False,
+            "status": "not_requested",
+            "reason": "Excluded from the partial calendar-data request for privacy.",
+            "notRequestedProperties": [
+                "PRIORITY",
+                "DESCRIPTION",
+                "URL",
+                "LOCATION",
+                "VALARM",
+                "RELATED-TO",
+                "CATEGORIES",
+                "X-*",
+            ],
         },
         "deletion": {
             "status": "not_testable_safely",
@@ -639,6 +647,9 @@ def _collection_output(
     collection: _Collection,
     query_status: str,
     resources_observed: int,
+    parsed_resources_observed: int,
+    items_observed: int,
+    parser_failures: int,
 ) -> dict[str, Any]:
     return {
         "collectionId": collection.collection_id,
@@ -652,10 +663,6 @@ def _collection_output(
                 collection.components is not None
                 and {"VEVENT", "VTODO"}.issubset(collection.components)
             ),
-            "actuallyReadableVTodo": (
-                query_status if collection.should_probe_vtodo else "not_observed"
-            ),
-            "resourcesActuallyObserved": resources_observed,
         },
         "hrefIdentity": {
             "available": True,
@@ -685,7 +692,50 @@ def _collection_output(
         },
         "ownerMetadataObserved": collection.owner_metadata_present,
         "queryStatus": query_status,
+        "resourcesActuallyObserved": resources_observed,
+        "parsedVTodoResourcesActuallyObserved": parsed_resources_observed,
+        "itemsActuallyObserved": items_observed,
+        "parserFailures": parser_failures,
+        "vTodoResourceEvidence": (
+            "observed"
+            if parsed_resources_observed and not parser_failures
+            else "partial"
+            if parsed_resources_observed
+            else "failed"
+            if parser_failures
+            else "not_observed"
+        ),
     }
+
+
+def _query_capability_status(query_statuses: list[str]) -> str:
+    if not query_statuses:
+        return "not_observed"
+    successful = sum(status == "supported" for status in query_statuses)
+    failed = sum(status == "failed" for status in query_statuses)
+    if successful and failed:
+        return "partial"
+    if successful:
+        return "supported"
+    if failed:
+        return "failed"
+    return "not_observed"
+
+
+def _resource_evidence_status(
+    *,
+    query_statuses: list[str],
+    parsed_resources: int,
+    parser_failures: int,
+) -> str:
+    query_failures = any(status == "failed" for status in query_statuses)
+    if parsed_resources and (parser_failures or query_failures):
+        return "partial"
+    if parsed_resources:
+        return "observed"
+    if parser_failures:
+        return "failed"
+    return "not_observed"
 
 
 class ICloudVTodoProbe:
@@ -848,7 +898,12 @@ class ICloudVTodoProbe:
         item_observations: list[dict[str, Any]] = []
         uid_by_collection: Counter[tuple[str, str]] = Counter()
         resources_by_collection: Counter[str] = Counter()
+        parsed_resources_by_collection: Counter[str] = Counter()
+        items_by_collection: Counter[str] = Counter()
+        parser_failures_by_collection: Counter[str] = Counter()
         resources_observed = 0
+        parsed_resources_observed = 0
+        parser_failures = 0
         now = datetime.now(timezone.utc)
         query_start = now - timedelta(days=30)
         query_end = now + timedelta(days=365)
@@ -867,7 +922,17 @@ class ICloudVTodoProbe:
                 resources_observed += len(resources)
                 resources_by_collection[collection.collection_id] += len(resources)
                 for resource in resources:
-                    items, _ = _parse_vtodo_calendar_data(resource, collection.collection_id)
+                    try:
+                        items, _ = _parse_vtodo_calendar_data(resource, collection.collection_id)
+                    except Exception as error:
+                        parser_failures += 1
+                        parser_failures_by_collection[collection.collection_id] += 1
+                        _record_error(result, "resourceRead", error)
+                        continue
+                    if items:
+                        parsed_resources_observed += 1
+                        parsed_resources_by_collection[collection.collection_id] += 1
+                        items_by_collection[collection.collection_id] += len(items)
                     for item in items:
                         item_observations.append(item)
                         uid_by_collection[(collection.collection_id, item["_uid"])] += 1
@@ -876,64 +941,49 @@ class ICloudVTodoProbe:
                 query_statuses[collection.collection_id] = "failed"
                 _record_error(result, "resourceRead", error)
 
-        successful_queries = sum(status == "supported" for status in query_statuses.values())
-        failed_queries = sum(status == "failed" for status in query_statuses.values())
+        query_capability = _query_capability_status(list(query_statuses.values()))
+        resource_evidence = _resource_evidence_status(
+            query_statuses=list(query_statuses.values()),
+            parsed_resources=parsed_resources_observed,
+            parser_failures=parser_failures,
+        )
         resource_read = result["resourceRead"]
         resource_read.update(
             {
-                "status": (
-                    "supported"
-                    if successful_queries and not failed_queries
-                    else "partial"
-                    if successful_queries
-                    else "failed"
-                    if failed_queries
-                    else "not_observed"
-                ),
-                "supported": (
-                    True
-                    if successful_queries and not failed_queries
-                    else "ambiguous"
-                    if successful_queries or failed_queries
-                    else "not_observed"
-                ),
+                "vTodoQueryStatus": query_capability,
+                "vTodoResourceEvidence": resource_evidence,
                 "collectionsQueried": len(query_statuses),
                 "resourcesActuallyObserved": resources_observed,
+                "parsedVTodoResourcesActuallyObserved": parsed_resources_observed,
                 "itemsActuallyObserved": len(item_observations),
-                "actuallyReadableVTodo": (
-                    "supported"
-                    if successful_queries and not failed_queries
-                    else "partial"
-                    if successful_queries
-                    else "failed"
-                    if failed_queries
-                    else "not_observed"
-                ),
+                "parserFailures": parser_failures,
             }
         )
         duplicate_uid_count = sum(max(count - 1, 0) for count in uid_by_collection.values())
         for item in item_observations:
             item.pop("_uid", None)
-        result["vTodoCollections"]["actuallyReadableVTodo"] = (
-            "supported"
-            if successful_queries and not failed_queries
-            else "partial"
-            if successful_queries
-            else "failed"
-            if failed_queries
-            else "not_observed"
+        result["vTodoCollections"].update(
+            {
+                "vTodoQueryStatus": query_capability,
+                "vTodoResourceEvidence": resource_evidence,
+                "resourcesActuallyObserved": resources_observed,
+                "parsedVTodoResourcesActuallyObserved": parsed_resources_observed,
+                "parserFailures": parser_failures,
+            }
         )
         result["collections"] = [
             _collection_output(
                 collection,
                 query_statuses.get(collection.collection_id, "not_tested"),
                 resources_by_collection[collection.collection_id],
+                parsed_resources_by_collection[collection.collection_id],
+                items_by_collection[collection.collection_id],
+                parser_failures_by_collection[collection.collection_id],
             )
             for collection in collections
         ]
         self._aggregate_observations(result, item_observations)
         result["identity"]["duplicateUidCount"] = duplicate_uid_count
-        result["vTodoCollections"]["resourcesActuallyObserved"] = resources_observed
         result["identity"]["snapshotUniqueness"]["items"] = (
             "ambiguous"
             if duplicate_uid_count
@@ -1018,9 +1068,6 @@ class ICloudVTodoProbe:
                 ),
             }
         )
-        advanced = result["advancedProperties"]
-        for key in advanced:
-            advanced[key] = any(item["advanced"][key] for item in observations)
         identity = result["identity"]
         fields = identity["fieldsAvailable"]
         identity.update(

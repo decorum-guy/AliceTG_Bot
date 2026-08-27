@@ -102,13 +102,17 @@ resource data, and error responses. It verifies:
   collection states;
 - empty, open, completed, date-only, TZID date-time, floating date-time, and
   no-due VTODO observations;
-- RRULE, RECURRENCE-ID, EXDATE, VALARM, RELATED-TO, priority, URL, location,
-  categories, and undocumented X-property presence without value projection;
+- RRULE, RECURRENCE-ID, EXDATE, and recurrence evidence; synthetic responses
+  containing VALARM, RELATED-TO, priority, URL, location, categories, and
+  undocumented X-properties verify sanitization and the `not_requested`
+  advanced-property status;
 - duplicate UID snapshot ambiguity and distinct collection identity for
   same-title items;
 - identity fields, snapshot uniqueness, and unobserved longitudinal stability
   are separate evidence fields; `RECURRENCE-ID` is recorded separately because
   UID alone does not identify an occurrence;
+- returned DAV resources, successfully parsed VTODO resources, parsed items,
+  and parser failures are counted separately;
 - href, UID, ETag, resource-id, sync-token, ctag, read-only, owner metadata,
   and supported-report observations;
 - malformed XML/ICS, XML entity declarations, mixed resource payloads,
@@ -116,7 +120,7 @@ resource data, and error responses. It verifies:
 - the transport call list contains only `PROPFIND` and `REPORT`, with no GET,
   PUT, POST, PATCH, DELETE, MKCALENDAR, MOVE, or COPY operation.
 
-Current deterministic validation: `18` B4 tests passed; existing iCloud
+Current deterministic validation: `19` B4 tests passed; existing iCloud
 Calendar provider validation: `29` tests passed.
 
 Fixture behavior is not Apple-account evidence. It proves parser and boundary
@@ -132,7 +136,10 @@ Partial retrieval requests only `UID`, `DTSTAMP`, `LAST-MODIFIED`, `SEQUENCE`,
 `RRULE`, `RECURRENCE-ID`, `EXDATE`, and `RDATE` inside `VTODO`. The request
 does not ask for `SUMMARY`, `DESCRIPTION`, `LOCATION`, `URL`, attachments,
 attendees, or organizer data. If a server returns additional data, the probe
-still emits only sanitized presence/count facts.
+still emits only sanitized protocol presence/count facts. The structured
+output marks the advanced-property group `not_requested`; it does not expose
+`notesObserved`, `locationObserved`, `urlObserved`, alarm, tag, or other
+advanced-property booleans whose false value could imply an observed absence.
 
 This is deliberately a bounded sample, not representative enumeration. A
 VTODO can be valid without a due date, and the RFC time-range rules depend on
@@ -145,6 +152,14 @@ cap, so B4 does not use it. The structured result says
 `zeroResultMeaning: not_observed_not_empty`; it never converts zero returned
 resources into an empty-collection or unsupported verdict. Transport payload,
 collection, and per-collection resource caps remain in force.
+
+`vTodoQueryStatus` answers whether the VTODO query executed. Separately,
+`vTodoResourceEvidence` is `observed` only when at least one returned DAV
+resource contains successfully parsed VTODO data; it is `not_observed` for a
+successful empty query, `failed` when returned resources all fail parsing, and
+`partial` when parsed data is mixed with parser or collection-query failures.
+`resourcesActuallyObserved`, `parsedVTodoResourcesActuallyObserved`,
+`itemsActuallyObserved`, and `parserFailures` preserve the underlying counts.
 
 ## Standards/documentation support
 
@@ -188,7 +203,8 @@ results are protocol/parser evidence only, never current-account evidence.
 | Capability | Standards expectation | Current Apple path evidence | Product status | Notes |
 |---|---|---|---|---|
 | VTODO collection discovery | Present component-set may explicitly include/exclude VTODO; absent means standards-unrestricted acceptance | NOT OBSERVED | PENDING LIVE EVIDENCE | Absent property is queried but does not prove a VTODO resource exists |
-| VTODO resource read | `calendar-query` can return matching calendar data | NOT OBSERVED | PENDING LIVE EVIDENCE | Result is a finite time-range sample, not enumeration; zero results mean NOT OBSERVED, not empty |
+| VTODO query capability | `calendar-query` can return matching calendar data | NOT OBSERVED | PENDING LIVE EVIDENCE | `vTodoQueryStatus` reports query execution separately from resource evidence |
+| Actual VTODO resource evidence | A returned resource with valid VTODO data is readable evidence | NOT OBSERVED | PENDING LIVE EVIDENCE | `vTodoResourceEvidence` requires parsed VTODO data; zero results mean NOT OBSERVED, not empty |
 | Collection identity fields | href identifies the DAV resource; resource-id may exist | NOT OBSERVED | PENDING LIVE EVIDENCE | Opaque ID is derived only after live href validation |
 | Collection snapshot uniqueness | Duplicate collection hrefs fail closed | NOT OBSERVED | PENDING LIVE EVIDENCE | Snapshot uniqueness is not longitudinal stability |
 | Collection longitudinal stability | Requires a later non-mutating provider observation | NOT OBSERVED | NOT TESTABLE SAFELY | One-shot B4 does not manufacture list rename/move/update evidence |
@@ -240,13 +256,14 @@ Until a live run is available, the following are unknown:
 
 - whether Apple exposes any VTODO-capable collection on this account;
 - whether a VTODO `calendar-query` succeeds through this accepted endpoint;
+- whether the bounded sample returns any successfully parsed VTODO resource;
 - whether UID/href/ETag remain stable across ordinary remote updates;
 - whether Apple exposes recurrence exceptions and completion per occurrence in
   a usable form;
 - whether sync-token/ctag behavior can establish VTODO deletion/tombstones;
 - whether shared lists expose owner/participant and privilege distinctions;
 - Apple-specific flags, tags, locations, alarms, subtasks, and private X-
-  properties beyond safe presence facts;
+  properties; these are intentionally not requested by the B4 partial read;
 - account-specific HTTP rate limits and partial-response behavior.
 
 ## Product verdict
