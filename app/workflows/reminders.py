@@ -12,6 +12,7 @@ from app.services.reminder_parser import ParsedReminder, parse_delay_only, parse
 from app.services.reminder_store import ReminderRecord, ReminderSettings, ReminderSource, ReminderStore
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.telegram_messages import TelegramMessages
+from app.planning.delivery_settings import ReminderDeliveryPreferences, legacy_phone_channels
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +105,41 @@ class ReminderWorkflow:
 
     async def get_settings(self) -> ReminderSettings:
         return await self._store.get_settings()
+
+    async def get_delivery_preferences(self) -> ReminderDeliveryPreferences:
+        getter = getattr(self._store, "get_delivery_preferences", None)
+        if callable(getter):
+            return await getter()
+        settings = await self._store.get_settings()
+        return ReminderDeliveryPreferences(
+            spoken_endpoint=settings.spoken_endpoint,  # type: ignore[arg-type]
+            phone_channels=(
+                tuple(settings.phone_channels)
+                if settings.phone_channels is not None
+                else legacy_phone_channels(
+                    notify_telegram_enabled=settings.notify_telegram_enabled,
+                    notify_iphone_enabled=settings.notify_iphone_enabled,
+                )
+            ),
+            revision=settings.delivery_revision,
+            updated_at=settings.delivery_updated_at,
+        )
+
+    async def update_delivery_preferences(
+        self,
+        *,
+        expected_revision: int,
+        spoken_endpoint: str,
+        phone_channels: tuple[str, ...],
+    ) -> ReminderDeliveryPreferences:
+        updater = getattr(self._store, "update_delivery_preferences", None)
+        if not callable(updater):
+            raise RuntimeError("reminder delivery preferences are unavailable")
+        return await updater(
+            expected_revision=expected_revision,
+            spoken_endpoint=spoken_endpoint,
+            phone_channels=phone_channels,
+        )
 
     async def toggle_voice(self) -> ReminderSettings:
         settings = await self._store.get_settings()
@@ -216,7 +252,9 @@ class ReminderWorkflow:
                     delivered = True
                     LOGGER.info("Reminder sent to Telegram: id=%s chat_id=%s", reminder.id, reminder.chat_id or self._admin_chat_id)
 
-            if settings.notify_iphone_enabled:
+            if settings.notify_iphone_enabled or (
+                settings.phone_channels is not None and "home_assistant" in settings.phone_channels
+            ):
                 attempted = True
                 if not self._settings.ha_mobile_notify_services:
                     LOGGER.info("Reminder mobile push skipped, HA mobile notify services are not configured: id=%s", reminder.id)

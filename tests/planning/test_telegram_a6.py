@@ -112,7 +112,7 @@ class A6TelegramTests(unittest.TestCase):
         )
 
     def test_schema_adds_persistent_token_store_and_reopens(self) -> None:
-        self.assertEqual(self.database.schema_version(), 6)
+        self.assertEqual(self.database.schema_version(), 7)
         reminder = self.reminder()
         issued = self.service.issue_reminder_complete_token(
             reminder=reminder,

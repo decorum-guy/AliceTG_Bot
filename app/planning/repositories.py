@@ -53,6 +53,17 @@ _TABLES = {
     "tasks": "tasks",
     "calendar_events": "calendar_events",
 }
+_DELIVERY_TERMINAL_CHANNELS = frozenset({"alice", "jarvis", "telegram", "home_assistant", "iphone"})
+
+
+def _validate_delivery_terminal_channel(channel: str, error_code: str) -> None:
+    if channel not in _DELIVERY_TERMINAL_CHANNELS:
+        raise PlanningValidationError("outbox terminal channel is not supported")
+    validate_text(error_code, "outbox.delivery_terminal_channels.error_code", max_length=128)
+    if not error_code or error_code[0] not in "abcdefghijklmnopqrstuvwxyz0123456789":
+        raise PlanningValidationError("outbox terminal error code is invalid")
+    if any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_.:-" for character in error_code):
+        raise PlanningValidationError("outbox terminal error code is invalid")
 
 
 def _optional_timestamp(value: str | None, field: str) -> None:
@@ -1683,6 +1694,105 @@ class PlanningRepository:
                 return None
             return self.get_outbox(job_id)
 
+    def snapshot_outbox_delivery_policy(
+        self,
+        *,
+        job_id: str,
+        lease_owner: str,
+        lease_token: str,
+        policy: Mapping[str, Any],
+        now: str,
+    ) -> OutboxJob:
+        """Persist the policy used by this logical delivery job before sending."""
+
+        validate_uuid4(job_id, "outbox.id")
+        validate_text(lease_owner, "outbox.lease_owner", max_length=128)
+        validate_uuid4(lease_token, "outbox.lease_token")
+        validate_utc_timestamp(now, "outbox.updated_at")
+        safe_policy = _json_ready(dict(policy))
+        reject_secret_fields(safe_policy, field="outbox.delivery_policy")
+        with self.database.transaction():
+            row = self.connection.execute(
+                "SELECT payload_json FROM outbox WHERE id = ? AND status = 'leased' "
+                "AND lease_owner = ? AND lease_token = ?",
+                (job_id, lease_owner, lease_token),
+            ).fetchone()
+            if row is None:
+                raise PlanningLeaseLostError(f"lease lost while snapshotting outbox {job_id}")
+            payload = _decode_json(str(row["payload_json"]), "outbox payload")
+            if not isinstance(payload, Mapping):
+                raise PlanningValidationError("stored outbox payload is not an object")
+            if isinstance(payload.get("delivery_policy"), Mapping):
+                return self.get_outbox(job_id)
+            updated_payload = dict(payload)
+            updated_payload["delivery_policy"] = safe_policy
+            payload_json = json.dumps(updated_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if len(payload_json) > 1_048_576:
+                raise PlanningValidationError("outbox.payload is too large")
+            self.connection.execute(
+                "UPDATE outbox SET payload_json = ?, updated_at = ? WHERE id = ? "
+                "AND status = 'leased' AND lease_owner = ? AND lease_token = ?",
+                (payload_json, now, job_id, lease_owner, lease_token),
+            )
+            return self.get_outbox(job_id)
+
+    def record_outbox_terminal_channel(
+        self,
+        *,
+        job_id: str,
+        lease_owner: str,
+        lease_token: str,
+        channel: str,
+        error_code: str,
+        now: str,
+    ) -> OutboxJob:
+        """Remember one permanent channel result for this delivery cycle."""
+
+        validate_uuid4(job_id, "outbox.id")
+        validate_text(lease_owner, "outbox.lease_owner", max_length=128)
+        validate_uuid4(lease_token, "outbox.lease_token")
+        validate_utc_timestamp(now, "outbox.updated_at")
+        _validate_delivery_terminal_channel(channel, error_code)
+        with self.database.transaction():
+            row = self.connection.execute(
+                "SELECT payload_json FROM outbox WHERE id = ? AND status = 'leased' "
+                "AND lease_owner = ? AND lease_token = ?",
+                (job_id, lease_owner, lease_token),
+            ).fetchone()
+            if row is None:
+                raise PlanningLeaseLostError(f"lease lost while recording outbox channel {job_id}")
+            payload = _decode_json(str(row["payload_json"]), "outbox payload")
+            if not isinstance(payload, Mapping):
+                raise PlanningValidationError("stored outbox payload is not an object")
+            existing = payload.get("delivery_terminal_channels")
+            if existing is None:
+                terminal_channels: dict[str, str] = {}
+            elif isinstance(existing, Mapping):
+                terminal_channels = {}
+                for existing_channel, existing_code in existing.items():
+                    if not isinstance(existing_channel, str) or not isinstance(existing_code, str):
+                        raise PlanningValidationError("stored outbox terminal channel state is invalid")
+                    _validate_delivery_terminal_channel(existing_channel, existing_code)
+                    terminal_channels[existing_channel] = existing_code
+            else:
+                raise PlanningValidationError("stored outbox terminal channel state is invalid")
+            terminal_channels[channel] = error_code
+            updated_payload = dict(payload)
+            updated_payload["delivery_terminal_channels"] = terminal_channels
+            safe_payload = _json_ready(updated_payload)
+            reject_secret_fields(safe_payload, field="outbox.payload")
+            payload_json = json.dumps(safe_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if len(payload_json) > 1_048_576:
+                raise PlanningValidationError("outbox.payload is too large")
+            cursor = self.connection.execute(
+                "UPDATE outbox SET payload_json = ?, updated_at = ? WHERE id = ? "
+                "AND status = 'leased' AND lease_owner = ? AND lease_token = ?",
+                (payload_json, now, job_id, lease_owner, lease_token),
+            )
+            if cursor.rowcount != 1:
+                raise PlanningLeaseLostError(f"lease lost while recording outbox channel {job_id}")
+            return self.get_outbox(job_id)
+
     def transition_outbox(
         self,
         *,
@@ -1896,7 +2006,7 @@ class PlanningRepository:
                 (reminder_id, REMINDER_DELIVERY_JOB_TYPE),
             ).fetchone()
             delivery_cycle_id = cycle_row["delivery_cycle_id"] if cycle_row is not None else None
-            if channel == "telegram" and delivery_cycle_id is None:
+            if delivery_cycle_id is None:
                 delivery_cycle_id = new_uuid4()
                 if cycle_row is not None:
                     self.connection.execute(
@@ -2144,6 +2254,8 @@ class PlanningRepository:
                     raise PlanningValidationError("terminal reminder has no durable delivery job to retry")
                 payload = dict(delivery_payload)
                 payload.setdefault("reminder_id", reminder_id)
+                payload.pop("delivery_policy", None)
+                payload.pop("delivery_terminal_channels", None)
                 self.enqueue_outbox(
                     job_type=REMINDER_DELIVERY_JOB_TYPE,
                     payload=payload,
@@ -2157,16 +2269,30 @@ class PlanningRepository:
                 if job_status == "leased" and job_row["lease_expires_at"] is not None:
                     if str(job_row["lease_expires_at"]) > now:
                         raise PlanningValidationError("terminal reminder delivery job still has a live lease")
+                existing_payload = _decode_json(str(job_row["payload_json"]), "outbox payload")
+                if not isinstance(existing_payload, Mapping):
+                    raise PlanningValidationError("stored outbox payload is not an object")
+                # A manual retry starts a new logical delivery cycle.  Do not
+                # silently reuse the policy snapshot from the failed cycle.
+                retry_payload = dict(existing_payload)
+                retry_payload.pop("delivery_policy", None)
+                retry_payload.pop("delivery_terminal_channels", None)
+                retry_payload_json = json.dumps(
+                    retry_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 self.connection.execute(
                     """
                     UPDATE outbox
-                    SET status = 'queued', available_at = ?, lease_owner = NULL,
+                    SET status = 'queued', available_at = ?, payload_json = ?, lease_owner = NULL,
                         lease_expires_at = NULL, lease_token = NULL, attempt_count = 0,
                         attempt_window_started_at = NULL, last_error = NULL,
                         last_error_code = NULL, delivery_cycle_id = NULL, updated_at = ?
                     WHERE id = ?
                     """,
-                    (now, now, str(job_row["id"])),
+                    (now, retry_payload_json, now, str(job_row["id"])),
                 )
 
             updated = replace(

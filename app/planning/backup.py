@@ -67,6 +67,7 @@ _CORE_TABLES = (
     "idempotency_keys",
     "outbox",
     "delivery_attempts",
+    "reminder_delivery_preferences",
     "audit_events",
     "provider_mappings",
     "sync_cursors",

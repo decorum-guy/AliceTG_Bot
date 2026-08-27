@@ -37,6 +37,8 @@ from app.services.control_center_coffee import (
 from app.services.coffee_machine import set_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.planning.api import setup_planning_routes
+from app.planning.delivery_settings import normalize_phone_channels
+from app.planning.errors import PlanningValidationError, PlanningVersionConflictError
 from app.workflows.coffee import CoffeeWorkflow, SonyaAnswer
 from app.workflows.reminders import ReminderWorkflow
 from app.workflows.tea import TeaAnswer, TeaWorkflow
@@ -833,7 +835,9 @@ async def alice_reminder_create(request: web.Request) -> web.Response:
         )
     reminder, parsed = result
     reminder_settings = await workflow.get_settings()
-    if reminder_settings.voice_enabled:
+    delivery_preferences = await workflow.get_delivery_preferences()
+    voice_enabled = reminder_settings.voice_enabled and delivery_preferences.spoken_endpoint == "alice"
+    if voice_enabled:
         LOGGER.info(
             "Reminder voice announcement will be sent by Home Assistant: voice_enabled=true voice_station_entity_id=%s",
             reminder_settings.voice_station_entity_id,
@@ -846,10 +850,86 @@ async def alice_reminder_create(request: web.Request) -> web.Response:
             "message": f"Поняла, отправлю напоминание через {parsed.human_delay_text}",
             "reminder_id": reminder.id,
             "delay_text": parsed.human_delay_text,
-            "voice_enabled": reminder_settings.voice_enabled,
+            "voice_enabled": voice_enabled,
             "voice_station_entity_id": reminder_settings.voice_station_entity_id,
+            "spoken_endpoint": delivery_preferences.spoken_endpoint,
+            "phone_channels": list(delivery_preferences.phone_channels),
         }
     )
+
+
+def _delivery_channel_health(settings, reminder_settings) -> dict[str, dict[str, str | None]]:
+    ha_configured = bool(settings.ha_url.strip() and settings.ha_long_lived_token.strip())
+    telegram_configured = bool(settings.telegram_bot_token.strip() and settings.telegram_admin_chat_id)
+    station_configured = bool(reminder_settings.voice_station_entity_id.strip())
+    if not reminder_settings.voice_enabled:
+        alice_status = "unavailable"
+        alice_code = "alice_voice_disabled"
+    elif not ha_configured or not station_configured:
+        alice_status = "not_configured"
+        alice_code = "alice_not_configured"
+    else:
+        alice_status = "available"
+        alice_code = None
+    return {
+        "spoken": {
+            "alice": {"status": alice_status, "code": alice_code},
+            "jarvis": {"status": "unavailable", "code": "jarvis_runtime_unavailable"},
+        },
+        "phone": {
+            "telegram": {
+                "status": "available" if telegram_configured else "not_configured",
+                "code": None if telegram_configured else "telegram_not_configured",
+            },
+            "home_assistant": {
+                "status": "available" if ha_configured and settings.ha_mobile_notify_services else "not_configured",
+                "code": None if ha_configured and settings.ha_mobile_notify_services else "ha_mobile_not_configured",
+            },
+        },
+    }
+
+
+async def control_center_reminder_delivery_get(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    workflow: ReminderWorkflow = request.app["reminder_workflow"]
+    preferences = await workflow.get_delivery_preferences()
+    settings = await workflow.get_settings()
+    payload = preferences.to_dict()
+    payload["channelHealth"] = _delivery_channel_health(request.app["settings"], settings)
+    return web.json_response(payload, headers={"Cache-Control": "no-store"})
+
+
+async def control_center_reminder_delivery_patch(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or set(payload) != {"expectedRevision", "spokenEndpoint", "phoneChannels"}:
+            raise ValueError
+        expected_revision = payload["expectedRevision"]
+        spoken_endpoint = payload["spokenEndpoint"]
+        phone_channels = payload["phoneChannels"]
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise ValueError
+        if not isinstance(spoken_endpoint, str) or not isinstance(phone_channels, list) or any(
+            not isinstance(item, str) for item in phone_channels
+        ):
+            raise ValueError
+        normalize_phone_channels(phone_channels)
+        preferences = await request.app["reminder_workflow"].update_delivery_preferences(
+            expected_revision=expected_revision,
+            spoken_endpoint=spoken_endpoint,
+            phone_channels=tuple(phone_channels),
+        )
+    except (ValueError, TypeError, PlanningValidationError):
+        return _control_center_error("invalid_request", 422)
+    except PlanningVersionConflictError:
+        return _control_center_error("revision_conflict", 409)
+    except RuntimeError:
+        return _control_center_error("reminder_delivery_unavailable", 503)
+    settings = await request.app["reminder_workflow"].get_settings()
+    response = preferences.to_dict()
+    response["channelHealth"] = _delivery_channel_health(request.app["settings"], settings)
+    return web.json_response(response, headers={"Cache-Control": "no-store"})
 
 
 async def shortcut_coffee_gif(_: web.Request) -> web.FileResponse:
@@ -1018,6 +1098,8 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/internal/water/sonya-comment-answer", water_comment_answer)
     app.router.add_post("/internal/water/sonya-direct-request", water_direct_request)
     app.router.add_post("/internal/reminders/alice-create", alice_reminder_create)
+    app.router.add_get("/internal/reminders/delivery-settings", control_center_reminder_delivery_get)
+    app.router.add_patch("/internal/reminders/delivery-settings", control_center_reminder_delivery_patch)
     settings = app["settings"]
     if getattr(settings, "planning_api_enabled", False) or getattr(
         settings, "planning_alice_interpret_enabled", False
