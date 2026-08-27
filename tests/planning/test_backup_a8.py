@@ -31,6 +31,7 @@ from app.planning.backup import (
     _write_package_zip,
 )
 from app.planning.delivery import DeliveryResult
+from app.planning.delivery_settings import ReminderDeliveryPreferencesStore
 from app.planning.legacy_import import LegacyReminderImporter
 from app.planning.models import REMINDER_DELIVERY_JOB_TYPE
 from app.planning.scheduler import DurableReminderScheduler
@@ -156,6 +157,72 @@ class PlanningBackupA8Tests(unittest.TestCase):
         # The source remains writable after an online snapshot.
         self.reminder(title="A8 second synthetic fixture", due_at="2026-08-12T09:00:00.000000Z")
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM reminders").fetchone()[0], 2)
+
+    def test_reminder_delivery_preferences_survive_encrypted_backup_and_isolated_restore(self) -> None:
+        preferences = ReminderDeliveryPreferencesStore(self.database, now_fn=self.clock)
+        initial = preferences.ensure_from_legacy(
+            spoken_endpoint="alice",
+            notify_telegram_enabled=True,
+            notify_iphone_enabled=False,
+        )
+        updated = preferences.update(
+            expected_revision=initial.revision,
+            spoken_endpoint="jarvis",
+            phone_channels=("telegram", "home_assistant"),
+            context=CONTEXT,
+        )
+        self.assertEqual(updated.revision, 1)
+        self.assertEqual(updated.updated_at, NOW)
+
+        package = self.backup_dir / self.service().backup().package_name
+        with tempfile.TemporaryDirectory() as work_name:
+            work = Path(work_name)
+            payload = work / "payload.zip"
+            _decrypt_file(package, payload, bytes.fromhex(KEY))
+            with zipfile.ZipFile(payload) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["schema_version"], 7)
+            self.assertEqual(manifest["table_counts"]["reminder_delivery_preferences"], 1)
+
+        restored_path = self._extract_database(package)
+        restored = PlanningDatabase(restored_path)
+        try:
+            row = restored.connection.execute(
+                "SELECT spoken_endpoint, phone_channels_json, revision, updated_at "
+                "FROM reminder_delivery_preferences WHERE id = 1"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(
+                (row["spoken_endpoint"], json.loads(row["phone_channels_json"]), row["revision"], row["updated_at"]),
+                ("jarvis", ["telegram", "home_assistant"], 1, NOW),
+            )
+        finally:
+            restored.close()
+
+        verified = self.verifier().verify(package.name)
+        self.assertEqual(verified.verified_schema_version, 7)
+        self.assertEqual(verified.table_counts["reminder_delivery_preferences"], 1)
+
+    def test_restore_rejects_arbitrary_unknown_tables_after_schema_v7_allowlist_extension(self) -> None:
+        self.reminder()
+        package = self.backup_dir / self.service().backup().package_name
+
+        def add_unknown_table(path: Path) -> None:
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("CREATE TABLE arbitrary_owner_data (id INTEGER)")
+                connection.commit()
+            finally:
+                connection.close()
+
+        unknown = self._rewrite_package(
+            package,
+            "planning-20260812T080010Z-schema7-444444444444.sqlite3.a8",
+            mutate_database=add_unknown_table,
+            refresh_hash=True,
+        )
+        with self.assertRaisesRegex(PlanningBackupVerificationError, "unexpected_table"):
+            self.verifier().verify(unknown.name)
 
     def test_wrong_key_corrupt_ciphertext_and_truncated_package_fail_closed(self) -> None:
         self.reminder()
