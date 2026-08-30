@@ -25,6 +25,9 @@ from app.planning.providers.contracts import (
 )
 
 
+MAX_BACKWARDS_CLOCK_SKEW_SECONDS = 60
+
+
 @dataclass(frozen=True)
 class ProviderRefreshResult:
     source_id: str
@@ -63,6 +66,7 @@ class ProviderCalendarCache:
         configured: bool,
         now_fn: Callable[[], str] = utc_now,
         max_calendars: int = 32,
+        stale_after_seconds: int = 600,
     ) -> None:
         validate_text(provider_name, "provider.name", max_length=64)
         validate_text(display_label, "provider.display_label", max_length=100)
@@ -70,6 +74,8 @@ class ProviderCalendarCache:
             validate_text(account_id, "provider.account_id", max_length=128)
         if not 1 <= max_calendars <= 100:
             raise ValueError("provider calendar bound is invalid")
+        if stale_after_seconds <= 0:
+            raise ValueError("provider stale threshold must be positive")
         self.database = database
         self.provider = provider
         self.provider_name = provider_name
@@ -79,6 +85,7 @@ class ProviderCalendarCache:
         self.configured = configured
         self.now_fn = now_fn
         self.max_calendars = max_calendars
+        self.stale_after_seconds = stale_after_seconds
         self.source_id = _source_id(provider_name, account_id)
         self._refresh_lock: asyncio.Lock | None = None
         self._refresh_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -702,7 +709,7 @@ class ProviderCalendarCache:
             """,
             (self.source_id, self.source_id),
         ).fetchone()
-        status: ProviderStatus = "stale" if has_cache else "error"
+        status = self._failure_status(has_cache=has_cache, observed_at=observed_at)
         with self.database.transaction() as connection:
             self._set_source_state(
                 status=status,
@@ -718,22 +725,23 @@ class ProviderCalendarCache:
                 """,
                 (observed_at, self.source_id),
             )
-            connection.execute(
-                """
-                UPDATE calendar_events
-                SET sync_state = 'stale', updated_at = ?
-                WHERE id IN (
-                    SELECT canonical_event_id FROM provider_event_cache WHERE source_id = ?
-                ) AND deleted_at IS NULL
-                  AND provider_id IS NOT NULL AND provider_calendar_id IS NOT NULL
-                """,
-                (observed_at, self.source_id),
-            )
+            if status == "stale":
+                connection.execute(
+                    """
+                    UPDATE calendar_events
+                    SET sync_state = 'stale', updated_at = ?
+                    WHERE id IN (
+                        SELECT canonical_event_id FROM provider_event_cache WHERE source_id = ?
+                    ) AND deleted_at IS NULL
+                      AND provider_id IS NOT NULL AND provider_calendar_id IS NOT NULL
+                    """,
+                    (observed_at, self.source_id),
+                )
             connection.execute(
                 """
                 UPDATE provider_calendars
                 SET status = ?, observed_at = ?, last_error_code = ?, updated_at = ?
-                WHERE source_id = ?
+                WHERE source_id = ? AND status != 'disabled'
                 """,
                 (status, observed_at, error_code, observed_at, self.source_id),
             )
@@ -748,7 +756,37 @@ class ProviderCalendarCache:
             error_code,
         )
 
+    def _failure_status(self, *, has_cache: bool, observed_at: str) -> ProviderStatus:
+        """Separate latest refresh failure from retained-data freshness."""
+
+        if not has_cache:
+            return "error"
+        row = self.database.connection.execute(
+            "SELECT last_successful_sync_at FROM provider_sources WHERE source_id = ?",
+            (self.source_id,),
+        ).fetchone()
+        last_successful_sync_at = None if row is None else row["last_successful_sync_at"]
+        last_success = _parse_utc_timestamp(last_successful_sync_at)
+        observed = _parse_utc_timestamp(observed_at)
+        if last_success is None or observed is None:
+            return "stale"
+        age_seconds = (observed - last_success).total_seconds()
+        if age_seconds < -MAX_BACKWARDS_CLOCK_SKEW_SECONDS:
+            return "stale"
+        # Small NTP/system-clock corrections do not make retained data older;
+        # larger backwards movement cannot establish trustworthy freshness.
+        age_seconds = max(0.0, age_seconds)
+        return "current" if age_seconds < self.stale_after_seconds else "stale"
+
     def _ensure_source(self) -> None:
+        existing = self.database.connection.execute(
+            "SELECT 1 FROM provider_sources WHERE source_id = ?",
+            (self.source_id,),
+        ).fetchone()
+        # Freshness and the latest attempt result are durable provider facts.
+        # A process restart must not erase them before the next refresh attempt.
+        if existing is not None and self.enabled and self.configured:
+            return
         status: ProviderStatus
         if not self.enabled:
             status = "disabled"
@@ -801,3 +839,15 @@ def _source_id(provider: str, account_id: str | None) -> str:
 
 def _timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)

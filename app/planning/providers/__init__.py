@@ -16,7 +16,7 @@ from app.planning.providers.contracts import (
     ProviderTimeoutError,
 )
 from app.planning.providers.icloud import AiohttpCalDavTransport, ICloudCalDavProvider
-from app.planning.providers.sync import ICloudCalendarRefreshLoop
+from app.planning.providers.sync import ICloudCalendarRefreshLoop, provider_stale_after_seconds
 
 __all__ = [
     "CalendarWindow",
@@ -36,4 +36,5 @@ __all__ = [
     "ProviderPayloadError",
     "ProviderRefreshResult",
     "ProviderTimeoutError",
+    "provider_stale_after_seconds",
 ]

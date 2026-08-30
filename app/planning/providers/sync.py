@@ -7,6 +7,14 @@ from app.planning.providers.cache import ProviderCalendarCache, ProviderRefreshR
 from app.planning.providers.contracts import CalendarWindow
 
 
+def provider_stale_after_seconds(refresh_interval_seconds: int) -> int:
+    """Retained iCloud data is stale after two refresh periods, minimum ten minutes."""
+
+    if refresh_interval_seconds <= 0:
+        raise ValueError("iCloud refresh interval must be positive")
+    return max(600, refresh_interval_seconds * 2)
+
+
 def calendar_refresh_window(*, now: datetime | None = None) -> CalendarWindow:
     selected = now or datetime.now(timezone.utc)
     return CalendarWindow(
