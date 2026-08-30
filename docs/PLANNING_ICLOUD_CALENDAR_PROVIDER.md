@@ -174,6 +174,32 @@ restart. Repeated confirmed misses do not change the tombstone again, and a
 later valid provider observation restores the same canonical event identity.
 No CalDAV `DELETE` is issued.
 
+## Transport failure categories
+
+`aiohttp==3.13.2` failures are persisted only as fixed, sanitized provider
+codes. HTTP 401/403 are `provider_authentication_failed`; 429 is
+`provider_rate_limited`; 5xx is `provider_server_failure`; other non-success
+HTTP responses are `provider_read_failed`. Connection and socket timeout
+classes remain distinct as `provider_connection_timeout` and
+`provider_read_timeout`; an otherwise indistinguishable total timeout is
+`provider_timeout`.
+
+The transport also distinguishes `provider_dns_failed`,
+`provider_connection_refused`, `provider_connection_failed`,
+`provider_tls_failed`, `provider_connection_reset`,
+`provider_connection_aborted`, and `provider_server_disconnected` when the
+pinned aiohttp class or OS errno proves that condition. Other aiohttp client
+errors become `provider_transport_unknown`. These categories do not prove an
+Apple service cause, network path, hostname, URL, account, response body, or
+raw exception detail.
+
+Existing fixed redirect (`provider_redirect_invalid`,
+`provider_redirect_untrusted`, `provider_redirect_limit`) and payload/protocol
+codes remain distinct. The latest category is retained in the existing source
+and calendar `errorCode` fields and is cleared by a complete successful
+refresh. This slice adds no proxy support and does not change provider
+freshness, severity, refresh cadence, or the read-only CalDAV boundary.
+
 A calendar-list refresh that no longer returns a previously known calendar
 marks that calendar `disabled` with `provider_calendar_disappeared` and marks
 its cached events `stale`; it does not falsely delete their provider objects.
