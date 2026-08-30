@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from app.planning.providers.contracts import (
     CalendarWindow,
     ExternalCalendar,
     ExternalProviderAccount,
+    ProviderFailureCode,
+    ProviderFetchError,
     ProviderTimeoutError,
 )
 from app.planning.providers.sync import ICloudCalendarRefreshLoop
@@ -136,6 +139,51 @@ class CalendarSourceRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.gather(self.cache.refresh(WINDOW), self.cache.refresh(WINDOW))
         self.assertEqual(self.provider.max_active_discoveries, 1)
+
+    async def test_fixed_latest_failure_code_is_safe_and_success_clears_it(self) -> None:
+        self.provider.calendars = [calendar("stable-a", "Team", "#112233")]
+        await self.cache.refresh(WINDOW)
+
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        failed = await self.cache.refresh(WINDOW)
+        self.assertEqual(failed.status, "stale")  # Existing cache/freshness behavior is unchanged.
+        self.assertEqual(failed.error_code, ProviderFailureCode.DNS_FAILED.value)
+        failed_source = self.cache.source_metadata()[1]
+        self.assertEqual(failed_source["errorCode"], ProviderFailureCode.DNS_FAILED.value)
+        self.assertEqual(failed_source["calendars"][0]["errorCode"], ProviderFailureCode.DNS_FAILED.value)
+        self.assertEqual(self.cache.health_snapshot()["providerErrorCode"], ProviderFailureCode.DNS_FAILED.value)
+
+        recovered = await self.cache.refresh(WINDOW)
+        self.assertEqual(recovered.status, "current")
+        self.assertIsNone(recovered.error_code)
+        recovered_source = self.cache.source_metadata()[1]
+        self.assertIsNone(recovered_source["errorCode"])
+        self.assertIsNone(recovered_source["calendars"][0]["errorCode"])
+        self.assertIsNone(self.cache.health_snapshot()["providerErrorCode"])
+
+    async def test_status_serialization_never_uses_private_exception_detail_as_a_category(self) -> None:
+        self.provider.calendars = [calendar("stable-a", "Team", "#112233")]
+        await self.cache.refresh(WINDOW)
+        private_values = (
+            "owner@example.invalid",
+            "FAKE_SECRET_ICLOUD_159A",
+            "https://calendar.example.invalid/private/path",
+            "PRIVATE_EVENT_TITLE_159A",
+            "RAW_SOCKET_DETAIL_159A",
+        )
+        self.provider.fail_next = ProviderFetchError(" ".join(private_values))
+        failed = await self.cache.refresh(WINDOW)
+        self.assertEqual(failed.error_code, ProviderFailureCode.FETCH_FAILED.value)
+        serialized = json.dumps(
+            {
+                "result": failed.error_code,
+                "source": self.cache.source_metadata(),
+                "health": self.cache.health_snapshot(),
+            },
+            sort_keys=True,
+        )
+        for private_value in private_values:
+            self.assertNotIn(private_value, serialized)
 
     async def test_authenticated_route_runs_real_discovery_returns_safe_result_and_rejects_ha(self) -> None:
         self.provider.calendars = [calendar("stable-a", "Team", "#112233")]

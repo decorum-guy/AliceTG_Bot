@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import errno
+import ssl
 import tempfile
 import re
 import unittest
@@ -7,6 +10,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+import aiohttp
 
 from app.planning.api.service import PlanningApiService
 from app.planning.db import PlanningDatabase
@@ -17,12 +22,15 @@ from app.planning.repositories import PlanningRepository
 from app.planning.providers.cache import ProviderCalendarCache
 from app.planning.providers.contracts import (
     CalendarWindow,
+    ProviderAdapterError,
     ProviderAuthError,
+    ProviderFailureCode,
     ProviderFetchError,
     ProviderPayloadError,
     ProviderTimeoutError,
 )
 from app.planning.providers.icloud import (
+    AiohttpCalDavTransport,
     ICloudCalDavProvider,
     _CALDAV,
     _DAV,
@@ -430,6 +438,207 @@ class FixtureCalDavTransport:
             icals=resource_icals,
             resource_hrefs=resource_hrefs,
         )
+
+
+class _ResponseContext:
+    def __init__(self, response: object | None = None, error: BaseException | None = None) -> None:
+        self.response = response
+        self.error = error
+
+    async def __aenter__(self) -> object:
+        if self.error is not None:
+            raise self.error
+        assert self.response is not None
+        return self.response
+
+    async def __aexit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+
+class _FakeResponse:
+    def __init__(self, status: int, *, headers: dict[str, str] | None = None) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self.content = self
+
+    async def iter_chunked(self, size: int):
+        del size
+        if False:
+            yield b""
+
+
+class _ScriptedSession:
+    def __init__(self, *results: object | BaseException) -> None:
+        self.results = list(results)
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def request(self, method: str, url: str, **kwargs: object) -> _ResponseContext:
+        self.calls.append((method, url, kwargs))
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            return _ResponseContext(error=result)
+        return _ResponseContext(response=result)
+
+
+class ICloudTransportFailureTests(unittest.IsolatedAsyncioTestCase):
+    _PRIVATE_URL = "https://calendar.example.invalid/private/path"
+    _PRIVATE_USERNAME = "owner@example.invalid"
+    _PRIVATE_PASSWORD = "FAKE_SECRET_ICLOUD_159A"
+    _PRIVATE_DETAIL = "RAW_SOCKET_DETAIL_159A PRIVATE_EVENT_TITLE_159A"
+
+    async def _request_error(self, result: object | BaseException) -> ProviderAdapterError:
+        session = _ScriptedSession(result)
+        transport = AiohttpCalDavTransport(
+            bootstrap_url=self._PRIVATE_URL,
+            username=self._PRIVATE_USERNAME,
+            password=self._PRIVATE_PASSWORD,
+            session=session,  # type: ignore[arg-type]
+        )
+        with self.assertRaises(ProviderAdapterError) as raised:
+            await transport.propfind(self._PRIVATE_URL, body=b"private request body", depth="0")
+        self.assertEqual([call[0] for call in session.calls], ["PROPFIND"])
+        self.assertNotIn("proxy", session.calls[0][2])
+        return raised.exception
+
+    async def test_http_statuses_map_to_fixed_categories(self) -> None:
+        cases = (
+            (401, ProviderFailureCode.AUTHENTICATION_FAILED),
+            (403, ProviderFailureCode.AUTHENTICATION_FAILED),
+            (429, ProviderFailureCode.RATE_LIMITED),
+            (503, ProviderFailureCode.SERVER_FAILURE),
+            (418, ProviderFailureCode.READ_FAILED),
+        )
+        for status, expected in cases:
+            with self.subTest(status=status):
+                raised = await self._request_error(_FakeResponse(status))
+                self.assertEqual(raised.code, expected.value)
+
+    async def test_aiohttp_313_transport_categories_are_fixed_and_private(self) -> None:
+        cases = (
+            (aiohttp.ConnectionTimeoutError(), ProviderFailureCode.CONNECTION_TIMEOUT),
+            (aiohttp.SocketTimeoutError(), ProviderFailureCode.READ_TIMEOUT),
+            (asyncio.TimeoutError(self._PRIVATE_DETAIL), ProviderFailureCode.TIMEOUT),
+            (
+                aiohttp.ClientConnectorDNSError(
+                    None,
+                    OSError(errno.EHOSTUNREACH, self._PRIVATE_DETAIL),
+                ),
+                ProviderFailureCode.DNS_FAILED,
+            ),
+            (
+                aiohttp.ClientConnectorError(
+                    None,
+                    OSError(errno.ECONNREFUSED, self._PRIVATE_DETAIL),
+                ),
+                ProviderFailureCode.CONNECTION_REFUSED,
+            ),
+            (
+                aiohttp.ClientConnectorError(
+                    None,
+                    OSError(errno.ECONNABORTED, self._PRIVATE_DETAIL),
+                ),
+                ProviderFailureCode.CONNECTION_ABORTED,
+            ),
+            (
+                aiohttp.ClientConnectorError(
+                    None,
+                    OSError(errno.EHOSTUNREACH, self._PRIVATE_DETAIL),
+                ),
+                ProviderFailureCode.CONNECTION_FAILED,
+            ),
+            (
+                aiohttp.ClientConnectorCertificateError(
+                    None,
+                    ssl.SSLCertVerificationError(self._PRIVATE_DETAIL),
+                ),
+                ProviderFailureCode.TLS_FAILED,
+            ),
+            (
+                aiohttp.ClientConnectorSSLError(
+                    None,
+                    ssl.SSLError(self._PRIVATE_DETAIL),
+                ),
+                ProviderFailureCode.TLS_FAILED,
+            ),
+            (aiohttp.ClientConnectionResetError(self._PRIVATE_DETAIL), ProviderFailureCode.CONNECTION_RESET),
+            (aiohttp.ServerDisconnectedError(self._PRIVATE_DETAIL), ProviderFailureCode.SERVER_DISCONNECTED),
+            (aiohttp.ClientError(self._PRIVATE_DETAIL), ProviderFailureCode.TRANSPORT_UNKNOWN),
+        )
+        private_values = (
+            self._PRIVATE_URL,
+            self._PRIVATE_USERNAME,
+            self._PRIVATE_PASSWORD,
+            self._PRIVATE_DETAIL,
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                raised = await self._request_error(error)
+                self.assertEqual(raised.code, expected.value)
+                serialized = str(raised)
+                for private_value in private_values:
+                    self.assertNotIn(private_value, serialized)
+
+    async def test_redirect_and_payload_limits_remain_safe_and_distinct(self) -> None:
+        transport = AiohttpCalDavTransport(
+            bootstrap_url=self._PRIVATE_URL,
+            username=self._PRIVATE_USERNAME,
+            password=self._PRIVATE_PASSWORD,
+            session=_ScriptedSession(_FakeResponse(302)),  # type: ignore[arg-type]
+        )
+        with self.assertRaises(ProviderFetchError) as invalid_redirect:
+            await transport.propfind(self._PRIVATE_URL, body=b"", depth="0")
+        self.assertEqual(invalid_redirect.exception.code, ProviderFailureCode.REDIRECT_INVALID.value)
+
+        redirect_limit_transport = AiohttpCalDavTransport(
+            bootstrap_url=self._PRIVATE_URL,
+            username=self._PRIVATE_USERNAME,
+            password=self._PRIVATE_PASSWORD,
+            max_redirects=0,
+            session=_ScriptedSession(  # type: ignore[arg-type]
+                _FakeResponse(302, headers={"Location": "/redirected"})
+            ),
+        )
+        with self.assertRaises(ProviderFetchError) as redirect_limit:
+            await redirect_limit_transport.propfind(self._PRIVATE_URL, body=b"", depth="0")
+        self.assertEqual(redirect_limit.exception.code, ProviderFailureCode.REDIRECT_LIMIT.value)
+
+        payload_too_large = await self._request_error(
+            _FakeResponse(207, headers={"Content-Length": str(8 * 1024 * 1024 + 1)})
+        )
+        self.assertEqual(payload_too_large.code, ProviderFailureCode.PAYLOAD_TOO_LARGE.value)
+
+        untrusted_transport = AiohttpCalDavTransport(
+            bootstrap_url=self._PRIVATE_URL,
+            username=self._PRIVATE_USERNAME,
+            password=self._PRIVATE_PASSWORD,
+            session=_ScriptedSession(  # type: ignore[arg-type]
+                _FakeResponse(302, headers={"Location": "https://untrusted.example.invalid/private"})
+            ),
+        )
+        with self.assertRaises(ProviderFetchError) as untrusted_redirect:
+            await untrusted_transport.propfind(self._PRIVATE_URL, body=b"", depth="0")
+        self.assertEqual(untrusted_redirect.exception.code, ProviderFailureCode.REDIRECT_UNTRUSTED.value)
+
+    async def test_caldav_transport_remains_read_only(self) -> None:
+        session = _ScriptedSession(_FakeResponse(207))
+        transport = AiohttpCalDavTransport(
+            bootstrap_url=self._PRIVATE_URL,
+            username=self._PRIVATE_USERNAME,
+            password=self._PRIVATE_PASSWORD,
+            session=session,  # type: ignore[arg-type]
+        )
+        self.assertEqual(transport._READ_METHODS, frozenset({"PROPFIND", "REPORT"}))
+        self.assertFalse(hasattr(transport, "put"))
+        self.assertFalse(hasattr(transport, "delete"))
+        with self.assertRaises(ProviderFetchError) as blocked:
+            await transport._request("PUT", self._PRIVATE_URL, body=b"", depth="0")
+        self.assertEqual(blocked.exception.code, ProviderFailureCode.METHOD_NOT_ALLOWED.value)
+        self.assertEqual(session.calls, [])
+
+    def test_provider_error_rejects_arbitrary_dynamic_categories(self) -> None:
+        error = ProviderFetchError(f"provider_{self._PRIVATE_DETAIL}")
+        self.assertEqual(error.code, ProviderFailureCode.FETCH_FAILED.value)
+        self.assertNotIn(self._PRIVATE_DETAIL, str(error))
 
 
 class ICloudXmlBuilderTests(unittest.TestCase):

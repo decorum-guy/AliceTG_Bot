@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import re
 import xml.etree.ElementTree as ET
@@ -25,6 +26,7 @@ from app.planning.providers.contracts import (
     ExternalResourceVerification,
     ProviderAdapterError,
     ProviderAuthError,
+    ProviderFailureCode,
     ProviderFetchError,
     ProviderPayloadError,
     ProviderTimeoutError,
@@ -91,7 +93,7 @@ class AiohttpCalDavTransport:
 
     async def _request(self, method: str, url: str, *, body: bytes, depth: str) -> bytes:
         if method not in self._READ_METHODS:
-            raise ProviderFetchError("unsupported_provider_method")
+            raise ProviderFetchError(ProviderFailureCode.METHOD_NOT_ALLOWED)
         current_url = self._trusted_url(url)
         session = self._session
         if session is None:
@@ -118,17 +120,15 @@ class AiohttpCalDavTransport:
                         current_url = self._trusted_url(urljoin(current_url, location))
                         continue
                     if response.status in {401, 403}:
-                        raise ProviderAuthError("provider_authentication_failed")
+                        raise ProviderAuthError(ProviderFailureCode.AUTHENTICATION_FAILED)
                     if response.status < 200 or response.status >= 300:
-                        raise ProviderFetchError("provider_read_failed")
+                        raise _provider_error_for_http_status(response.status)
                     return await self._read_bounded(response)
             except ProviderAdapterError:
                 raise
-            except asyncio.TimeoutError as exc:
-                raise ProviderTimeoutError("provider_timeout") from exc
-            except aiohttp.ClientError as exc:
-                raise ProviderFetchError("provider_transport_failed") from exc
-        raise ProviderFetchError("provider_redirect_limit")
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                raise _provider_error_for_aiohttp_exception(exc) from exc
+        raise ProviderFetchError(ProviderFailureCode.REDIRECT_LIMIT)
 
     async def _read_bounded(self, response: aiohttp.ClientResponse) -> bytes:
         content_length = response.headers.get("Content-Length")
@@ -168,6 +168,89 @@ class AiohttpCalDavTransport:
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
+
+
+def _provider_error_for_http_status(status: int) -> ProviderAdapterError:
+    """Map an HTTP status to a fixed, URL-free provider category."""
+
+    if status in {401, 403}:
+        return ProviderAuthError(ProviderFailureCode.AUTHENTICATION_FAILED)
+    if status == 429:
+        return ProviderFetchError(ProviderFailureCode.RATE_LIMITED)
+    if 500 <= status <= 599:
+        return ProviderFetchError(ProviderFailureCode.SERVER_FAILURE)
+    return ProviderFetchError(ProviderFailureCode.READ_FAILED)
+
+
+def _provider_error_for_aiohttp_exception(exc: BaseException) -> ProviderAdapterError:
+    """Classify aiohttp 3.13.2 failures without rendering exception details.
+
+    The order follows the pinned hierarchy: both specific timeout classes are
+    ``asyncio.TimeoutError`` subclasses; connector DNS/TLS classes and reset
+    classes are also broad ``aiohttp.ClientError`` instances.
+    """
+
+    if isinstance(exc, aiohttp.ConnectionTimeoutError):
+        return ProviderTimeoutError(ProviderFailureCode.CONNECTION_TIMEOUT)
+    if isinstance(exc, aiohttp.SocketTimeoutError):
+        return ProviderTimeoutError(ProviderFailureCode.READ_TIMEOUT)
+    if isinstance(exc, aiohttp.ServerTimeoutError | asyncio.TimeoutError):
+        return ProviderTimeoutError(ProviderFailureCode.TIMEOUT)
+
+    if isinstance(exc, aiohttp.ClientConnectorDNSError):
+        return ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+    if isinstance(
+        exc,
+        (
+            aiohttp.ClientConnectorCertificateError,
+            aiohttp.ClientConnectorSSLError,
+            aiohttp.ClientSSLError,
+            aiohttp.ServerFingerprintMismatch,
+        ),
+    ):
+        return ProviderFetchError(ProviderFailureCode.TLS_FAILED)
+    if isinstance(exc, aiohttp.ClientConnectionResetError):
+        return ProviderFetchError(ProviderFailureCode.CONNECTION_RESET)
+    if isinstance(exc, aiohttp.ServerDisconnectedError):
+        return ProviderFetchError(ProviderFailureCode.SERVER_DISCONNECTED)
+
+    if isinstance(exc, aiohttp.ClientConnectorError | aiohttp.ClientOSError):
+        return ProviderFetchError(_provider_connection_os_error_code(exc))
+    if isinstance(exc, aiohttp.ClientConnectionError):
+        return ProviderFetchError(ProviderFailureCode.CONNECTION_FAILED)
+
+    if isinstance(exc, aiohttp.ClientPayloadError):
+        return ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID)
+    if isinstance(exc, aiohttp.TooManyRedirects):
+        return ProviderFetchError(ProviderFailureCode.REDIRECT_LIMIT)
+    if isinstance(
+        exc,
+        (
+            aiohttp.InvalidUrlRedirectClientError,
+            aiohttp.NonHttpUrlRedirectClientError,
+            aiohttp.InvalidURL,
+        ),
+    ):
+        return ProviderFetchError(ProviderFailureCode.REDIRECT_INVALID)
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return _provider_error_for_http_status(exc.status)
+    return ProviderFetchError(ProviderFailureCode.TRANSPORT_UNKNOWN)
+
+
+def _provider_connection_os_error_code(exc: BaseException) -> ProviderFailureCode:
+    """Use errno-only evidence; host and OS-provided messages stay private."""
+
+    os_error = getattr(exc, "os_error", None)
+    error_number = getattr(os_error, "errno", None)
+    if not isinstance(error_number, int):
+        error_number = getattr(exc, "errno", None)
+    if error_number == errno.ECONNREFUSED:
+        return ProviderFailureCode.CONNECTION_REFUSED
+    if error_number == errno.ECONNRESET:
+        return ProviderFailureCode.CONNECTION_RESET
+    if error_number == errno.ECONNABORTED:
+        return ProviderFailureCode.CONNECTION_ABORTED
+    return ProviderFailureCode.CONNECTION_FAILED
 
 
 @dataclass
