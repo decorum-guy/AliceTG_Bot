@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,12 +17,13 @@ from app.planning.providers.cache import ProviderCalendarCache
 from app.planning.providers.contracts import (
     CalendarWindow,
     ExternalCalendar,
+    ExternalCalendarEvent,
     ExternalProviderAccount,
     ProviderFailureCode,
     ProviderFetchError,
     ProviderTimeoutError,
 )
-from app.planning.providers.sync import ICloudCalendarRefreshLoop
+from app.planning.providers.sync import ICloudCalendarRefreshLoop, provider_stale_after_seconds
 
 
 NOW = "2026-08-27T09:00:00Z"
@@ -38,6 +39,7 @@ HA_SECRET = "synthetic-ha-secret"
 class DiscoveryProvider:
     def __init__(self) -> None:
         self.calendars: list[ExternalCalendar] = []
+        self.events: list[ExternalCalendarEvent] = []
         self.fail_next: Exception | None = None
         self.discover_calls = 0
         self.list_calls = 0
@@ -66,7 +68,7 @@ class DiscoveryProvider:
     async def fetch_events(self, calendar: ExternalCalendar, window: CalendarWindow):
         del calendar, window
         self.fetch_calls += 1
-        return []
+        return list(self.events)
 
 
 def calendar(calendar_id: str, name: str, color: str) -> ExternalCalendar:
@@ -77,6 +79,34 @@ def calendar(calendar_id: str, name: str, color: str) -> ExternalCalendar:
         enabled=True,
         fetch_ref=f"server-only-ref-{calendar_id}",
     )
+
+
+def provider_event(calendar_id: str) -> ExternalCalendarEvent:
+    return ExternalCalendarEvent(
+        provider_calendar_id=calendar_id,
+        provider_event_id="event-1",
+        recurrence_instance_key="2026-08-17",
+        title="Provider event",
+        notes=None,
+        location=None,
+        all_day=True,
+        timezone="Europe/Moscow",
+        start_at_utc=None,
+        end_at_utc=None,
+        start_date="2026-08-17",
+        end_date_exclusive="2026-08-18",
+    )
+
+
+class MutableClock:
+    def __init__(self, value: datetime) -> None:
+        self.value = value
+
+    def now(self) -> str:
+        return self.value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def advance(self, seconds: int) -> None:
+        self.value += timedelta(seconds=seconds)
 
 
 class CalendarSourceRefreshTests(unittest.IsolatedAsyncioTestCase):
@@ -130,10 +160,10 @@ class CalendarSourceRefreshTests(unittest.IsolatedAsyncioTestCase):
         await self.cache.refresh(WINDOW)
         self.provider.fail_next = ProviderTimeoutError()
         failed = await self.cache.refresh(WINDOW)
-        self.assertEqual(failed.status, "stale")
+        self.assertEqual(failed.status, "current")
         self.assertEqual(failed.error_code, "provider_timeout")
         failed_metadata = self.cache.source_metadata()[1]
-        self.assertEqual(failed_metadata["status"], "stale")
+        self.assertEqual(failed_metadata["status"], "current")
         self.assertEqual(failed_metadata["calendars"][0]["calendarId"], "stable-a")
         self.assertEqual(failed_metadata["calendars"][0]["displayName"], "Team")
 
@@ -146,7 +176,7 @@ class CalendarSourceRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
         failed = await self.cache.refresh(WINDOW)
-        self.assertEqual(failed.status, "stale")  # Existing cache/freshness behavior is unchanged.
+        self.assertEqual(failed.status, "current")
         self.assertEqual(failed.error_code, ProviderFailureCode.DNS_FAILED.value)
         failed_source = self.cache.source_metadata()[1]
         self.assertEqual(failed_source["errorCode"], ProviderFailureCode.DNS_FAILED.value)
@@ -160,6 +190,158 @@ class CalendarSourceRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(recovered_source["errorCode"])
         self.assertIsNone(recovered_source["calendars"][0]["errorCode"])
         self.assertIsNone(self.cache.health_snapshot()["providerErrorCode"])
+
+    async def test_age_based_failure_state_preserves_fresh_data_then_stales_and_recovers(self) -> None:
+        clock = MutableClock(datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc))
+        cache = ProviderCalendarCache(
+            self.database,
+            provider=self.provider,
+            provider_name="icloud",
+            account_id="opaque-account",
+            display_label="iCloud",
+            enabled=True,
+            configured=True,
+            now_fn=clock.now,
+            stale_after_seconds=600,
+        )
+        self.provider.calendars = [calendar("stable-a", "Team", "#112233")]
+        self.provider.events = [provider_event("stable-a")]
+        first = await cache.refresh(WINDOW)
+        self.assertEqual(first.status, "current")
+        first_success = first.last_successful_sync_at
+
+        clock.advance(300)
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        transient = await cache.refresh(WINDOW)
+        self.assertEqual(transient.status, "current")
+        self.assertEqual(transient.error_code, ProviderFailureCode.DNS_FAILED.value)
+        self.assertEqual(transient.last_successful_sync_at, first_success)
+        source = cache.source_metadata()[1]
+        self.assertEqual(source["status"], "current")
+        self.assertEqual(source["observedAt"], clock.now())
+        self.assertEqual(source["errorCode"], ProviderFailureCode.DNS_FAILED.value)
+        self.assertEqual(source["calendars"][0]["status"], "current")
+        self.assertEqual(source["calendars"][0]["errorCode"], ProviderFailureCode.DNS_FAILED.value)
+        self.assertEqual(
+            self.database.connection.execute("SELECT sync_state FROM calendar_events").fetchone()[0],
+            "synced",
+        )
+
+        for code in (ProviderFailureCode.AUTHENTICATION_FAILED, ProviderFailureCode.RATE_LIMITED):
+            self.provider.fail_next = ProviderFetchError(code)
+            repeated = await cache.refresh(WINDOW)
+            self.assertEqual(repeated.status, "current")
+            self.assertEqual(repeated.error_code, code.value)
+
+        clock.advance(300)
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.RATE_LIMITED)
+        stale = await cache.refresh(WINDOW)
+        self.assertEqual(stale.status, "stale")
+        self.assertEqual(stale.error_code, ProviderFailureCode.RATE_LIMITED.value)
+        self.assertEqual(stale.last_successful_sync_at, first_success)
+        stale_source = cache.source_metadata()[1]
+        self.assertEqual(stale_source["status"], "stale")
+        self.assertEqual(stale_source["calendars"][0]["status"], "stale")
+        self.assertEqual(
+            self.database.connection.execute("SELECT sync_state FROM calendar_events").fetchone()[0],
+            "stale",
+        )
+
+        clock.advance(1)
+        recovered = await cache.refresh(WINDOW)
+        self.assertEqual(recovered.status, "current")
+        self.assertIsNone(recovered.error_code)
+        self.assertEqual(cache.source_metadata()[1]["calendars"][0]["status"], "current")
+        self.assertIsNone(cache.source_metadata()[1]["errorCode"])
+        self.assertEqual(
+            self.database.connection.execute("SELECT sync_state FROM calendar_events").fetchone()[0],
+            "synced",
+        )
+
+    async def test_no_cache_malformed_last_success_and_clock_skew_fail_safely(self) -> None:
+        clock = MutableClock(datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc))
+        cache = ProviderCalendarCache(
+            self.database,
+            provider=self.provider,
+            provider_name="icloud",
+            account_id="opaque-account",
+            display_label="iCloud",
+            enabled=True,
+            configured=True,
+            now_fn=clock.now,
+            stale_after_seconds=600,
+        )
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        self.assertEqual((await cache.refresh(WINDOW)).status, "error")
+
+        self.provider.calendars = [calendar("stable-a", "Team", "#112233")]
+        await cache.refresh(WINDOW)
+        self.database.connection.execute(
+            "UPDATE provider_sources SET last_successful_sync_at = 'not-a-timestamp' WHERE source_id = ?",
+            (cache.source_id,),
+        )
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        self.assertEqual((await cache.refresh(WINDOW)).status, "stale")
+
+        await cache.refresh(WINDOW)
+        self.database.connection.execute(
+            "UPDATE provider_sources SET last_successful_sync_at = NULL WHERE source_id = ?",
+            (cache.source_id,),
+        )
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        self.assertEqual((await cache.refresh(WINDOW)).status, "stale")
+
+        await cache.refresh(WINDOW)
+        clock.advance(-60)
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        self.assertEqual((await cache.refresh(WINDOW)).status, "current")
+
+    async def test_restart_uses_persisted_age_not_an_in_memory_failure_counter(self) -> None:
+        clock = MutableClock(datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc))
+        self.provider.calendars = [calendar("stable-a", "Team", "#112233")]
+        first_cache = ProviderCalendarCache(
+            self.database,
+            provider=self.provider,
+            provider_name="icloud",
+            account_id="opaque-account",
+            display_label="iCloud",
+            enabled=True,
+            configured=True,
+            now_fn=clock.now,
+            stale_after_seconds=600,
+        )
+        await first_cache.refresh(WINDOW)
+        clock.advance(300)
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.DNS_FAILED)
+        self.assertEqual((await first_cache.refresh(WINDOW)).status, "current")
+
+        restarted_cache = ProviderCalendarCache(
+            self.database,
+            provider=self.provider,
+            provider_name="icloud",
+            account_id="opaque-account",
+            display_label="iCloud",
+            enabled=True,
+            configured=True,
+            now_fn=clock.now,
+            stale_after_seconds=600,
+        )
+        self.assertEqual(restarted_cache.source_metadata()[1]["status"], "current")
+        self.assertEqual(
+            restarted_cache.source_metadata()[1]["errorCode"],
+            ProviderFailureCode.DNS_FAILED.value,
+        )
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.AUTHENTICATION_FAILED)
+        self.assertEqual((await restarted_cache.refresh(WINDOW)).status, "current")
+        clock.advance(300)
+        self.provider.fail_next = ProviderFetchError(ProviderFailureCode.RATE_LIMITED)
+        self.assertEqual((await restarted_cache.refresh(WINDOW)).status, "stale")
+
+    def test_stale_threshold_policy(self) -> None:
+        self.assertEqual(provider_stale_after_seconds(60), 600)
+        self.assertEqual(provider_stale_after_seconds(300), 600)
+        self.assertEqual(provider_stale_after_seconds(600), 1200)
+        self.assertEqual(provider_stale_after_seconds(3600), 7200)
 
     async def test_status_serialization_never_uses_private_exception_detail_as_a_category(self) -> None:
         self.provider.calendars = [calendar("stable-a", "Team", "#112233")]

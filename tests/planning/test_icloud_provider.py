@@ -898,7 +898,7 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.transport.empty_calendar_numbers = {1, 2}
         self.transport.multiget_mode = "empty"
         result = await self.cache.refresh(W2)
-        self.assertEqual(result.status, "stale")
+        self.assertEqual(result.status, "current")
         self.assertEqual(result.tombstones_created, 0)
         self.assertEqual(
             self.database.connection.execute(
@@ -1028,13 +1028,13 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         await self.cache.refresh(WINDOW)
         self.transport.invalid_next_report = True
         malformed = await self.cache.refresh(WINDOW)
-        self.assertEqual(malformed.status, "stale")
+        self.assertEqual(malformed.status, "current")
         self.assertEqual(malformed.error_code, "provider_xml_invalid")
         self.assertEqual(self.cache.health_snapshot()["providerErrorCode"], "provider_xml_invalid")
 
         self.transport.auth_next_report = True
         auth = await self.cache.refresh(WINDOW)
-        self.assertEqual(auth.status, "stale")
+        self.assertEqual(auth.status, "current")
         self.assertEqual(auth.error_code, "provider_authentication_failed")
         self.assertEqual(
             self.database.connection.execute(
@@ -1055,11 +1055,11 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.transport.fail_next_report = True
         failed = await self.cache.refresh(W2)
-        self.assertEqual(failed.status, "stale")
+        self.assertEqual(failed.status, "current")
         self.assertEqual(failed.error_code, "provider_timeout")
         self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM calendar_events WHERE deleted_at IS NOT NULL").fetchone()[0], 0)
         self.assertEqual(EventService(self.database).get(before_native.id).deleted_at, None)
-        self.assertEqual(self.cache.source_metadata()[1]["status"], "stale")
+        self.assertEqual(self.cache.source_metadata()[1]["status"], "current")
 
         self.transport.include_second_event = False
         recovered = await self.cache.refresh(W2)
@@ -1137,7 +1137,7 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_missing.deletions_deferred, 2)
         self.transport.fail_next_report = True
         failed = await self.cache.refresh(W2)
-        self.assertEqual(failed.status, "stale")
+        self.assertEqual(failed.status, "current")
         self.assertEqual(failed.tombstones_created, 0)
         self.transport.include_second_event = False
         after_failure = await self.cache.refresh(W2)

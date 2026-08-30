@@ -22,6 +22,7 @@ from app.planning.providers import (
     ICloudCalDavProvider,
     ICloudCalendarRefreshLoop,
     ProviderCalendarCache,
+    provider_stale_after_seconds,
 )
 from app.planning.scheduler import DurableReminderScheduler, validate_scheduler_modes
 from app.planning.telegram_ui import PlanningTelegramService
@@ -162,6 +163,9 @@ async def create_app() -> web.Application:
             display_label="iCloud",
             enabled=settings.planning_icloud_enabled,
             configured=icloud_configured,
+            stale_after_seconds=provider_stale_after_seconds(
+                settings.planning_icloud_refresh_interval_seconds
+            ),
         )
         if settings.planning_icloud_enabled and icloud_provider is not None:
             planning_icloud_refresh_loop = ICloudCalendarRefreshLoop(

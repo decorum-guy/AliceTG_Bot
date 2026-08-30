@@ -197,8 +197,18 @@ Existing fixed redirect (`provider_redirect_invalid`,
 `provider_redirect_untrusted`, `provider_redirect_limit`) and payload/protocol
 codes remain distinct. The latest category is retained in the existing source
 and calendar `errorCode` fields and is cleared by a complete successful
-refresh. This slice adds no proxy support and does not change provider
-freshness, severity, refresh cadence, or the read-only CalDAV boundary.
+refresh.
+
+Provider data freshness is intentionally separate from the latest refresh
+attempt. The stale threshold is `max(600 seconds, 2 * configured iCloud refresh
+interval)`; the default 300-second refresh interval therefore retains data as
+current for 600 seconds after its last successful sync. During that window a
+failed attempt records its fixed `errorCode` while source/calendar status stays
+`current` and cached events stay `synced`. Once the persisted last-success age
+reaches the threshold, a failed attempt marks retained provider data stale.
+Malformed or missing last-success timestamps fail closed to stale; a backwards
+clock movement is treated as zero age. This slice adds no proxy, retry/backoff,
+or refresh-cadence change, and preserves the read-only CalDAV boundary.
 
 A calendar-list refresh that no longer returns a previously known calendar
 marks that calendar `disabled` with `provider_calendar_disappeared` and marks
