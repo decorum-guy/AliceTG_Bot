@@ -207,8 +207,10 @@ failed attempt records its fixed `errorCode` while source/calendar status stays
 `current` and cached events stay `synced`. Once the persisted last-success age
 reaches the threshold, a failed attempt marks retained provider data stale.
 Malformed or missing last-success timestamps fail closed to stale; a backwards
-clock movement is treated as zero age. This slice adds no proxy, retry/backoff,
-or refresh-cadence change, and preserves the read-only CalDAV boundary.
+clock movement of at most 60 seconds is treated as zero age for a small
+NTP/system-clock correction, while a larger backwards movement fails closed to
+stale. This slice adds no proxy, retry/backoff, or refresh-cadence change, and
+preserves the read-only CalDAV boundary.
 
 A calendar-list refresh that no longer returns a previously known calendar
 marks that calendar `disabled` with `provider_calendar_disappeared` and marks

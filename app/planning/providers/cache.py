@@ -25,6 +25,9 @@ from app.planning.providers.contracts import (
 )
 
 
+MAX_BACKWARDS_CLOCK_SKEW_SECONDS = 60
+
+
 @dataclass(frozen=True)
 class ProviderRefreshResult:
     source_id: str
@@ -738,7 +741,7 @@ class ProviderCalendarCache:
                 """
                 UPDATE provider_calendars
                 SET status = ?, observed_at = ?, last_error_code = ?, updated_at = ?
-                WHERE source_id = ?
+                WHERE source_id = ? AND status != 'disabled'
                 """,
                 (status, observed_at, error_code, observed_at, self.source_id),
             )
@@ -767,9 +770,12 @@ class ProviderCalendarCache:
         observed = _parse_utc_timestamp(observed_at)
         if last_success is None or observed is None:
             return "stale"
-        # A backwards clock jump cannot make data artificially old. The next
-        # normally ordered attempt will resume ordinary age calculation.
-        age_seconds = max(0.0, (observed - last_success).total_seconds())
+        age_seconds = (observed - last_success).total_seconds()
+        if age_seconds < -MAX_BACKWARDS_CLOCK_SKEW_SECONDS:
+            return "stale"
+        # Small NTP/system-clock corrections do not make retained data older;
+        # larger backwards movement cannot establish trustworthy freshness.
+        age_seconds = max(0.0, age_seconds)
         return "current" if age_seconds < self.stale_after_seconds else "stale"
 
     def _ensure_source(self) -> None:
