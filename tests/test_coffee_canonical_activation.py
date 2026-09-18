@@ -154,4 +154,3 @@ class CoffeeCanonicalActivationTests(unittest.IsolatedAsyncioTestCase):
             content = build_coffee_widget_content(self.state, policy)
 
         self.assertEqual(content["stat_rows"][1]["value"], "10 мин")
-
