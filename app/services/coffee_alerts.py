@@ -8,7 +8,10 @@ from app.config import Settings
 from app.keyboards.coffee import coffee_turn_off_only
 from app.messages import coffee as coffee_messages
 from app.services.app_state import AppStateStore
-from app.services.coffee_timing_policy import CoffeeTimingPolicyService
+from app.services.coffee_timing_policy import (
+    COFFEE_LAST_TURNED_ON_HELPER,
+    CoffeeTimingPolicyService,
+)
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.services.pushward import PushWardCoffeeActivity
 from app.services.pushward_widgets import PushWardCoffeeWidget
@@ -39,39 +42,58 @@ class CoffeeAlertScheduler:
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def restore(self) -> None:
-        if self._app_state.coffee_machine_state != "on" or not self._app_state.coffee_on_since:
-            LOGGER.info("Coffee alert restore skipped: state=%s", self._app_state.coffee_machine_state)
+        resolution, canonical_on_since = await self._canonical_activation_time()
+        if resolution == "off":
+            await self._clear_local_cycle_if_needed()
+            LOGGER.info("Coffee alert restore skipped: Home Assistant reports coffee is off")
             return
-        LOGGER.info("Coffee alert restore started: on_since=%s", self._app_state.coffee_on_since)
-        if self._pushward_activity:
-            await self._pushward_activity.start_or_restore()
-        if self._pushward_widget:
-            self._pushward_widget.start()
-        self._schedule_active_alerts()
+        if resolution == "confirmed" and canonical_on_since:
+            changed = await self._adopt_canonical_activation(canonical_on_since)
+            LOGGER.info(
+                "Coffee alert restore reconciled with Home Assistant: on_since=%s changed=%s",
+                canonical_on_since,
+                changed,
+            )
+            await self._start_active_cycle(reschedule=True)
+            return
+        if self._app_state.coffee_machine_state != "on" or not self._app_state.coffee_on_since:
+            LOGGER.warning(
+                "Coffee alert restore skipped: canonical Home Assistant activation is unavailable and no persisted cycle exists"
+            )
+            return
+        LOGGER.warning(
+            "Coffee alert restore is using persisted fallback because canonical Home Assistant activation is unavailable: on_since=%s",
+            self._app_state.coffee_on_since,
+        )
+        await self._start_active_cycle(reschedule=True)
 
     async def handle_state(self, state: str, *, changed_at: str | None = None) -> None:
         normalized = state.strip().lower()
         if normalized == "on":
-            if self._app_state.coffee_machine_state == "on" and self._app_state.coffee_on_since:
+            resolution, canonical_on_since = await self._canonical_activation_time()
+            if resolution == "confirmed" and canonical_on_since:
+                changed = await self._adopt_canonical_activation(canonical_on_since)
                 LOGGER.info(
-                    "Coffee machine duplicate state=on ignored: existing_on_since=%s changed_at=%s",
+                    "Coffee machine state=on reconciled with Home Assistant: on_since=%s changed=%s changed_at=%s",
+                    canonical_on_since,
+                    changed,
+                    changed_at,
+                )
+                await self._start_active_cycle(reschedule=changed)
+                return
+            if self._app_state.coffee_machine_state == "on" and self._app_state.coffee_on_since:
+                LOGGER.warning(
+                    "Coffee machine state=on retained persisted fallback because canonical Home Assistant activation is unavailable: on_since=%s changed_at=%s",
                     self._app_state.coffee_on_since,
                     changed_at,
                 )
-                if self._pushward_activity:
-                    await self._pushward_activity.start_or_restore()
-                if self._pushward_widget:
-                    self._pushward_widget.start()
+                await self._start_active_cycle(reschedule=False)
                 return
-            on_since = _normalize_datetime(changed_at) or datetime.now(timezone.utc).isoformat()
-            await self._app_state.mark_coffee_machine_on(on_since)
-            LOGGER.info("Coffee machine state received: state=on on_since=%s", on_since)
-            self._cancel_tasks()
-            if self._pushward_activity:
-                await self._pushward_activity.start_or_restore()
-            if self._pushward_widget:
-                self._pushward_widget.start()
-            self._schedule_active_alerts()
+            LOGGER.warning(
+                "Coffee machine state=on ignored because canonical Home Assistant activation is unavailable; no local activation time was invented: resolution=%s changed_at=%s",
+                resolution,
+                changed_at,
+            )
             return
         if normalized == "off":
             LOGGER.info("Coffee machine state received: state=off")
@@ -83,6 +105,56 @@ class CoffeeAlertScheduler:
                 self._pushward_widget.stop()
             return
         raise ValueError(f"Unsupported coffee machine state: {state}")
+
+    async def _canonical_activation_time(self) -> tuple[str, str | None]:
+        """Read the confirmed active-cycle start from Home Assistant.
+
+        Alice's persisted value is a recovery fallback only.  It must never win
+        over an available HA switch state plus the companion activation helper.
+        """
+
+        try:
+            switch_state = await self._ha.get_state(self._settings.coffee_switch_entity)
+            if not switch_state or switch_state.get("state") in {"unknown", "unavailable", None}:
+                return "unavailable", None
+            if switch_state.get("state") != "on":
+                return "off", None
+            helper_state = await self._ha.get_state(COFFEE_LAST_TURNED_ON_HELPER)
+        except HomeAssistantError:
+            return "unavailable", None
+        canonical_on_since = _activation_timestamp_from_helper(helper_state)
+        if canonical_on_since is None:
+            return "unavailable", None
+        return "confirmed", canonical_on_since
+
+    async def _adopt_canonical_activation(self, canonical_on_since: str) -> bool:
+        if (
+            self._app_state.coffee_machine_state == "on"
+            and _same_timestamp(self._app_state.coffee_on_since, canonical_on_since)
+        ):
+            return False
+        await self._app_state.mark_coffee_machine_on(canonical_on_since)
+        return True
+
+    async def _clear_local_cycle_if_needed(self) -> None:
+        if self._app_state.coffee_machine_state != "on" and not self._app_state.coffee_on_since:
+            return
+        self._cancel_tasks(reason="coffee_machine_off")
+        if self._pushward_activity:
+            await self._pushward_activity.stop()
+        await self._app_state.mark_coffee_machine_off()
+        if self._pushward_widget:
+            self._pushward_widget.stop()
+
+    async def _start_active_cycle(self, *, reschedule: bool) -> None:
+        if reschedule:
+            self._cancel_tasks()
+        if self._pushward_activity:
+            await self._pushward_activity.start_or_restore()
+        if self._pushward_widget:
+            self._pushward_widget.start()
+        if reschedule:
+            self._schedule_active_alerts()
 
     def reschedule_active_alerts(self) -> None:
         if self._app_state.coffee_machine_state != "on" or not self._app_state.coffee_on_since:
@@ -298,14 +370,29 @@ class CoffeeAlertScheduler:
         return sent
 
 
-def _normalize_datetime(value: str | None) -> str | None:
-    if not value:
-        return None
+def _activation_timestamp_from_helper(state: dict | None) -> str | None:
+    """Return HA's UTC activation timestamp without interpreting local wall time."""
+
+    attributes = state.get("attributes") if isinstance(state, dict) else None
+    timestamp = attributes.get("timestamp") if isinstance(attributes, dict) else None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
-    except ValueError:
-        LOGGER.warning("Cannot parse coffee state changed_at: %s", value)
+        if isinstance(timestamp, bool):
+            raise TypeError
+        return datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        LOGGER.warning("Canonical coffee activation helper has no valid timestamp")
         return None
+
+
+def _same_timestamp(left: str | None, right: str) -> bool:
+    if not left:
+        return False
+    try:
+        return datetime.fromisoformat(left.replace("Z", "+00:00")).astimezone(timezone.utc) == datetime.fromisoformat(
+            right.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except ValueError:
+        return False
 
 
 def _elapsed_seconds(on_since: str) -> int:
