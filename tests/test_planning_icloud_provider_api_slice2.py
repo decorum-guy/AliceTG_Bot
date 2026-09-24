@@ -183,10 +183,35 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
 
         calendar_id, _ = self._calendar_ids()
         self.service.icloud_writes_enabled = False
+        gated_destinations = await self._request("GET", f"{PLANNING_PREFIX}/calendar-destinations")
+        gated_payload = await gated_destinations.json()
+        self.assertFalse(gated_payload["capabilities"]["canCreateCalendar"])
+        self.assertTrue(all(not item["canCreateEvent"] for item in gated_payload["items"]))
+        self.assertTrue(all(not item["canDeleteCalendar"] for item in gated_payload["items"]))
+        gated_candidate = next(item for item in gated_payload["items"] if item["id"] == candidate_id)
+        self.assertEqual(gated_candidate["writeState"], "candidate")
+
         gated, _ = await self._create_event(key="gate-off", calendar_id=calendar_id)
         self.assertEqual(gated.status, 503)
         self.assertEqual((await gated.json())["error"]["code"], "provider_write_disabled")
         self.service.icloud_writes_enabled = True
+
+        self.cache.configured = False
+        unavailable_destinations = await self._request("GET", f"{PLANNING_PREFIX}/calendar-destinations")
+        unavailable_payload = await unavailable_destinations.json()
+        self.assertFalse(unavailable_payload["capabilities"]["canCreateCalendar"])
+        self.assertTrue(all(not item["canCreateEvent"] for item in unavailable_payload["items"]))
+        self.assertTrue(all(not item["canDeleteCalendar"] for item in unavailable_payload["items"]))
+        unavailable_candidate = next(item for item in unavailable_payload["items"] if item["id"] == candidate_id)
+        self.assertEqual(unavailable_candidate["writeState"], "candidate")
+        self.cache.configured = True
+
+        restored_destinations = await self._request("GET", f"{PLANNING_PREFIX}/calendar-destinations")
+        restored_payload = await restored_destinations.json()
+        self.assertTrue(restored_payload["capabilities"]["canCreateCalendar"])
+        restored_candidate = next(item for item in restored_payload["items"] if item["id"] == candidate_id)
+        self.assertTrue(restored_candidate["canCreateEvent"])
+        self.assertTrue(restored_candidate["canDeleteCalendar"])
 
         invalid, _ = await self._create_event(key="bad-calendar", calendar_id="https://example.invalid/calendar")
         self.assertEqual(invalid.status, 400)
