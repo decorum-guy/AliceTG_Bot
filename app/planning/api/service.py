@@ -539,7 +539,9 @@ class PlanningApiService:
         )
 
     def list_calendar_destinations(self, *, correlation_id: str) -> dict[str, Any]:
-        cache = self._require_provider_cache()
+        cache = self.provider_cache
+        if cache is None:
+            raise self._provider_not_configured_error()
         provider_writes_available = bool(
             self.icloud_writes_enabled and self._provider_can_attempt(cache=cache)
         )
