@@ -4,19 +4,20 @@ import asyncio
 import errno
 import hashlib
 import re
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
-from typing import Protocol
-from urllib.parse import urljoin, urlsplit
+from typing import Protocol, cast
+from urllib.parse import unquote, urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from xml.sax.saxutils import escape
 
 import aiohttp
 import recurring_ical_events
-from icalendar import Calendar
+from icalendar import Calendar, Event
 
-from app.planning.models import validate_date, validate_timezone
+from app.planning.models import validate_date, validate_event_shape, validate_timezone
 from app.planning.providers.contracts import (
     CalendarWindow,
     ExternalCalendar,
@@ -37,18 +38,27 @@ _DAV = "DAV:"
 _CALDAV = "urn:ietf:params:xml:ns:caldav"
 _MAX_RESOURCE_VERIFICATIONS = 512
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6,8}$")
+_ETAG_RE = re.compile(r'^(?:W/)?"[\x21\x23-\x7e]{1,200}"$')
+_SEGMENT_RE = re.compile(r"^[0-9a-f]{32}(?:\.ics)?$")
 
 
 class ReadOnlyCalDavTransport(Protocol):
-    """The transport surface intentionally has no PUT/DELETE/write operation."""
+    """Provider-neutral reads; iCloud writes use the separate typed transport."""
 
     async def propfind(self, url: str, *, body: bytes, depth: str) -> bytes: ...
 
     async def report(self, url: str, *, body: bytes, depth: str) -> bytes: ...
 
 
+@dataclass(frozen=True)
+class CalDavWriteResponse:
+    status: int
+    etag: str | None = None
+    body: bytes = b""
+
+
 class AiohttpCalDavTransport:
-    """Bounded HTTPS CalDAV transport restricted to discovery and reads."""
+    """Bounded HTTPS transport with fixed CalDAV read and write operations."""
 
     _READ_METHODS = frozenset({"PROPFIND", "REPORT"})
 
@@ -66,7 +76,7 @@ class AiohttpCalDavTransport:
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         parsed = urlsplit(bootstrap_url)
-        if parsed.scheme != "https" or not parsed.hostname:
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("iCloud CalDAV bootstrap URL must be HTTPS")
         if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0 or total_timeout_seconds <= 0:
             raise ValueError("CalDAV timeouts must be positive")
@@ -90,6 +100,67 @@ class AiohttpCalDavTransport:
 
     async def report(self, url: str, *, body: bytes, depth: str) -> bytes:
         return await self._request("REPORT", url, body=body, depth=depth)
+
+    async def create_event(self, collection_ref: str, resource_name: str,
+                           uid: str, draft: ICloudEventDraft) -> CalDavWriteResponse:
+        draft.validate()
+        return await self._write_request("PUT", _child_ref(collection_ref, resource_name), body=_event_body(uid, draft),
+                                         headers={"Content-Type": "text/calendar; charset=utf-8", "If-None-Match": "*"})
+
+    async def update_event(self, collection_ref: str, resource_ref: str,
+                           uid: str, draft: ICloudEventDraft, etag: str) -> CalDavWriteResponse:
+        draft.validate()
+        return await self._write_request("PUT", _event_child_ref(collection_ref, resource_ref), body=_event_body(uid, draft),
+                                         headers={"Content-Type": "text/calendar; charset=utf-8", "If-Match": _required_etag(etag)})
+
+    async def delete_event(self, collection_ref: str, resource_ref: str, etag: str) -> CalDavWriteResponse:
+        return await self._write_request("DELETE", _event_child_ref(collection_ref, resource_ref), body=None,
+                                         headers={"If-Match": _required_etag(etag)})
+
+    async def get_event(self, collection_ref: str, resource_ref: str) -> CalDavWriteResponse:
+        return await self._write_request("GET", _event_child_ref(collection_ref, resource_ref), body=None,
+                                         headers={"Accept": "text/calendar"})
+
+    async def create_calendar(self, home_ref: str, segment: str,
+                              display_name: str, color: str | None) -> CalDavWriteResponse:
+        _validate_calendar_fields(display_name, color)
+        return await self._write_request("MKCALENDAR", _child_ref(home_ref, segment), body=_mkcalendar_body(display_name, color),
+                                         headers={"Content-Type": "application/xml; charset=utf-8"})
+
+    async def delete_calendar(self, home_ref: str, collection_ref: str) -> CalDavWriteResponse:
+        return await self._write_request("DELETE", _collection_child_ref(home_ref, collection_ref), body=None,
+                                         headers={})
+
+    async def _write_request(self, method: str, url: str, *, body: bytes | None,
+                             headers: dict[str, str]) -> CalDavWriteResponse:
+        if method not in {"PUT", "GET", "DELETE", "MKCALENDAR"}:
+            raise ProviderFetchError(ProviderFailureCode.METHOD_NOT_ALLOWED)
+        current_url = self._trusted_url(url)
+        session = self._session
+        if session is None:
+            session = aiohttp.ClientSession(timeout=self._timeout, raise_for_status=False)
+            self._session = session
+        for _ in range(self._max_redirects + 1):
+            try:
+                async with session.request(method, current_url, data=body, headers=headers,
+                                           auth=self._auth, allow_redirects=False) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ProviderFetchError(ProviderFailureCode.REDIRECT_INVALID)
+                        next_url = self._trusted_url(urljoin(current_url, location))
+                        # A write redirect must preserve method and body.
+                        if method in {"PUT", "DELETE", "MKCALENDAR"} and response.status not in {307, 308}:
+                            raise ProviderFetchError(ProviderFailureCode.REDIRECT_INVALID)
+                        current_url = next_url
+                        continue
+                    return CalDavWriteResponse(response.status, response.headers.get("ETag"),
+                                               await self._read_bounded(response))
+            except ProviderAdapterError:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                raise _provider_error_for_aiohttp_exception(exc) from exc
+        raise ProviderFetchError(ProviderFailureCode.REDIRECT_LIMIT)
 
     async def _request(self, method: str, url: str, *, body: bytes, depth: str) -> bytes:
         if method not in self._READ_METHODS:
@@ -269,8 +340,54 @@ class _CalendarResource:
     calendar_data: bytes | None
 
 
+@dataclass(frozen=True)
+class ICloudEventDraft:
+    title: str
+    all_day: bool
+    timezone: str
+    start_at_utc: str | None = None
+    end_at_utc: str | None = None
+    start_date: str | None = None
+    end_date_exclusive: str | None = None
+    notes: str | None = None
+    location: str | None = None
+
+    def validate(self) -> None:
+        try:
+            if type(self.all_day) is not bool:
+                raise ValueError("invalid event shape")
+            validate_event_shape(
+                all_day=self.all_day, timezone_name=self.timezone,
+                start_at_utc=self.start_at_utc, end_at_utc=self.end_at_utc,
+                start_date=self.start_date, end_date_exclusive=self.end_date_exclusive,
+                sync_state="local_only", title=self.title, notes=self.notes,
+                location=self.location, recurrence_rule=None,
+                provider_id=None, provider_calendar_id=None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProviderFetchError(ProviderFailureCode.WRITE_INPUT_INVALID) from exc
+
+
+@dataclass(frozen=True)
+class ICloudEventWriteResult:
+    event: ExternalCalendarEvent
+    etag: str
+
+
+class ICloudWriteTransport(ReadOnlyCalDavTransport, Protocol):
+    async def create_event(self, collection_ref: str, resource_name: str, uid: str,
+                           draft: ICloudEventDraft) -> CalDavWriteResponse: ...
+    async def update_event(self, collection_ref: str, resource_ref: str, uid: str,
+                           draft: ICloudEventDraft, etag: str) -> CalDavWriteResponse: ...
+    async def delete_event(self, collection_ref: str, resource_ref: str, etag: str) -> CalDavWriteResponse: ...
+    async def get_event(self, collection_ref: str, resource_ref: str) -> CalDavWriteResponse: ...
+    async def create_calendar(self, home_ref: str, segment: str, display_name: str,
+                              color: str | None) -> CalDavWriteResponse: ...
+    async def delete_calendar(self, home_ref: str, collection_ref: str) -> CalDavWriteResponse: ...
+
+
 class ICloudCalDavProvider(ExternalCalendarProvider):
-    """iCloud/CalDAV adapter exposing discovery and event reads only."""
+    """iCloud adapter; writes are server-only and absent from the Planning API."""
 
     provider = "icloud"
 
@@ -302,12 +419,14 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         self.max_calendars = max_calendars
         self.max_events_per_calendar = max_events_per_calendar
         self._state: _DiscoveredState | None = None
+        self._write_events: dict[str, ExternalCalendarEvent] = {}
 
     async def discover_account(self) -> ExternalProviderAccount:
         account_id = self.account_id_for(self._account_name)
         account = ExternalProviderAccount(provider=self.provider, account_id=account_id, display_label="iCloud")
         principal_url, home_url = await self._discover_principal_and_home()
         self._state = _DiscoveredState(account, principal_url, home_url, [])
+        self._write_events.clear()
         return account
 
     async def list_calendars(self) -> list[ExternalCalendar]:
@@ -315,7 +434,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             await self.discover_account()
         assert self._state is not None
         body = _propfind_body(
-            "<d:resourcetype/><d:displayname/><x:calendar-color/>",
+            "<d:resourcetype/><d:displayname/><x:calendar-color/><d:current-user-privilege-set/>",
             {"d": _DAV, "x": "http://apple.com/ns/ical/"},
         )
         response = await self.transport.propfind(self._state.calendar_home_url, body=body, depth="1")
@@ -334,6 +453,10 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         if self._state is None:
             await self.discover_account()
         assert self._state is not None
+        self._write_events = {
+            key: value for key, value in self._write_events.items()
+            if value.provider_calendar_id != calendar.provider_calendar_id
+        }
         body = _calendar_query_body(window)
         response = await self.transport.report(calendar.fetch_ref, body=body, depth="1")
         results: list[ExternalCalendarEvent] = []
@@ -354,8 +477,11 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                     window,
                     resource_ref=resource.href,
                     remaining_limit=self.max_events_per_calendar - len(results),
+                    etag=resource.etag,
                 )
             )
+        for event in results:
+            self._write_events[event.provider_event_id] = event
         return _deduplicate_occurrences(results)
 
     async def verify_resources(
@@ -408,6 +534,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         *,
         resource_ref: str,
         remaining_limit: int,
+        etag: str | None = None,
     ) -> list[ExternalCalendarEvent]:
         if remaining_limit <= 0:
             raise ProviderPayloadError("provider_event_limit")
@@ -419,6 +546,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                 max_events=remaining_limit,
             )
             occurrences = recurring_ical_events.of(calendar_data).between(window.start, window.end)
+            write_safe = _simple_event_resource(calendar_data) and _valid_etag(etag)
             results: list[ExternalCalendarEvent] = []
             for component in occurrences:
                 if len(results) >= remaining_limit:
@@ -431,6 +559,8 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                         calendar_data,
                         component,
                         resource_ref=resource_ref,
+                        etag=etag if write_safe else None,
+                        write_safe=write_safe,
                     )
                 )
             return results
@@ -476,6 +606,7 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             display_name = (_first_text(response, "displayname") or "Calendar")[:200]
             color = _first_text(response, "calendar-color")
             color = color if color and _COLOR_RE.fullmatch(color) else None
+            can_read, can_write = _collection_privileges(response)
             results.append(
                 ExternalCalendar(
                     provider_calendar_id=_opaque(
@@ -486,6 +617,8 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                     color=color,
                     enabled=True,
                     fetch_ref=absolute_href,
+                    can_read=can_read,
+                    can_write=can_write,
                 )
             )
         return results
@@ -549,6 +682,8 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
         component: object,
         *,
         resource_ref: str,
+        etag: str | None = None,
+        write_safe: bool = False,
     ) -> ExternalCalendarEvent:
         uid_value = _component_value(component, "UID")
         if not isinstance(uid_value, str) or not uid_value.strip():
@@ -592,6 +727,8 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
                 start_date=validate_date(start_value.isoformat(), "provider.start_date"),
                 end_date_exclusive=validate_date(end_value.isoformat(), "provider.end_date_exclusive"),
                 resource_ref=resource_ref,
+                provider_etag=etag,
+                write_safe=write_safe,
             )
         if not isinstance(start_value, datetime):
             raise ProviderPayloadError("provider_event_start_invalid")
@@ -621,7 +758,155 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             start_date=None,
             end_date_exclusive=None,
             resource_ref=resource_ref,
+            provider_etag=etag,
+            write_safe=write_safe,
         )
+
+    def _write_transport(self) -> ICloudWriteTransport:
+        if not all(callable(getattr(self.transport, name, None)) for name in (
+            "create_event", "update_event", "delete_event", "get_event",
+            "create_calendar", "delete_calendar",
+        )):
+            raise ProviderFetchError(ProviderFailureCode.METHOD_NOT_ALLOWED)
+        return cast(ICloudWriteTransport, self.transport)
+
+    def _discovered_calendar(self, calendar_id: str) -> ExternalCalendar:
+        if self._state is None:
+            raise ProviderFetchError(ProviderFailureCode.NOT_FOUND)
+        for calendar in self._state.calendars:
+            if calendar.provider_calendar_id == calendar_id:
+                return calendar
+        raise ProviderFetchError(ProviderFailureCode.NOT_FOUND)
+
+    @staticmethod
+    def _require_writable(calendar: ExternalCalendar) -> None:
+        if calendar.can_write is False:
+            raise ProviderFetchError(ProviderFailureCode.WRITE_FORBIDDEN)
+
+    def _existing_event(self, event_id: str) -> tuple[ExternalCalendar, ExternalCalendarEvent]:
+        event = self._write_events.get(event_id)
+        if event is None:
+            raise ProviderFetchError(ProviderFailureCode.NOT_FOUND)
+        calendar = self._discovered_calendar(event.provider_calendar_id)
+        self._require_writable(calendar)
+        if not event.write_safe or not event.resource_ref or not event.provider_etag:
+            raise ProviderFetchError(ProviderFailureCode.EVENT_WRITE_UNSUPPORTED)
+        _event_child_ref(calendar.fetch_ref, event.resource_ref)
+        return calendar, event
+
+    async def create_event(self, calendar_id: str, draft: ICloudEventDraft) -> ICloudEventWriteResult:
+        calendar = self._discovered_calendar(calendar_id)
+        self._require_writable(calendar)
+        draft.validate()
+        transport = self._write_transport()
+        uid = f"{uuid.uuid4()}@alice-planning"
+        name = f"{uuid.uuid4().hex}.ics"
+        response = await transport.create_event(calendar.fetch_ref, name, uid, draft)
+        _require_write_status(response.status, {201})
+        resource_ref = _child_ref(calendar.fetch_ref, name)
+        return await self._readback_event(calendar, resource_ref, uid)
+
+    async def update_event(self, event_id: str, *, etag: str, draft: ICloudEventDraft) -> ICloudEventWriteResult:
+        calendar, event = self._existing_event(event_id)
+        draft.validate()
+        _required_etag(etag)
+        if etag != event.provider_etag:
+            raise ProviderFetchError(ProviderFailureCode.ETAG_CONFLICT)
+        assert event.resource_ref is not None
+        uid = await self._current_simple_uid(calendar, event)
+        response = await self._write_transport().update_event(
+            calendar.fetch_ref, event.resource_ref, uid, draft, etag
+        )
+        _require_write_status(response.status, {200, 204})
+        return await self._readback_event(calendar, event.resource_ref, uid)
+
+    async def delete_event(self, event_id: str, *, etag: str) -> None:
+        calendar, event = self._existing_event(event_id)
+        _required_etag(etag)
+        if etag != event.provider_etag:
+            raise ProviderFetchError(ProviderFailureCode.ETAG_CONFLICT)
+        assert event.resource_ref is not None
+        await self._current_simple_uid(calendar, event)
+        transport = self._write_transport()
+        response = await transport.delete_event(calendar.fetch_ref, event.resource_ref, etag)
+        _require_write_status(response.status, {200, 204})
+        try:
+            readback = await transport.get_event(calendar.fetch_ref, event.resource_ref)
+        except ProviderAdapterError as exc:
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN) from exc
+        if readback.status not in {404, 410}:
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN)
+        self._write_events.pop(event_id, None)
+
+    async def _current_simple_uid(self, calendar: ExternalCalendar, event: ExternalCalendarEvent) -> str:
+        assert event.resource_ref is not None
+        response = await self._write_transport().get_event(calendar.fetch_ref, event.resource_ref)
+        _require_read_status(response.status)
+        if not _valid_etag(response.etag) or response.etag != event.provider_etag:
+            raise ProviderFetchError(ProviderFailureCode.ETAG_CONFLICT)
+        source = _simple_calendar(response.body)
+        component = next(item for item in source.subcomponents if _local_component_name(item) == "VEVENT")
+        uid = str(_component_value(component, "UID") or "").strip()
+        if not uid or _opaque("event", f"{calendar.provider_calendar_id}|{uid}|base") != event.provider_event_id:
+            raise ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID)
+        return uid
+
+    async def _readback_event(self, calendar: ExternalCalendar, resource_ref: str,
+                              uid: str) -> ICloudEventWriteResult:
+        try:
+            response = await self._write_transport().get_event(calendar.fetch_ref, resource_ref)
+        except ProviderAdapterError as exc:
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN) from exc
+        if response.status != 200 or not _valid_etag(response.etag):
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN)
+        source = _single_event_calendar(response.body)
+        component = next(item for item in source.subcomponents if _local_component_name(item) == "VEVENT")
+        if str(_component_value(component, "UID") or "").strip() != uid:
+            raise ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID)
+        event = self._normalize_event(calendar, source, component, resource_ref=resource_ref,
+                                      etag=response.etag, write_safe=_simple_event_resource(source))
+        self._write_events[event.provider_event_id] = event
+        return ICloudEventWriteResult(event, _required_etag(response.etag))
+
+    async def create_calendar(self, display_name: str, *, color: str | None = None) -> ExternalCalendar:
+        _validate_calendar_fields(display_name, color)
+        if self._state is None:
+            await self.discover_account()
+        await self.list_calendars()
+        assert self._state is not None
+        segment = uuid.uuid4().hex
+        target = _child_ref(self._state.calendar_home_url, segment)
+        response = await self._write_transport().create_calendar(
+            self._state.calendar_home_url, segment, display_name, color
+        )
+        _require_write_status(response.status, {201})
+        try:
+            calendars = await self.list_calendars()
+        except ProviderAdapterError as exc:
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN) from exc
+        for calendar in calendars:
+            if calendar.fetch_ref.rstrip("/") == target.rstrip("/"):
+                return calendar
+        raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN)
+
+    async def delete_calendar(self, calendar_id: str) -> None:
+        calendar = self._discovered_calendar(calendar_id)
+        self._require_writable(calendar)
+        assert self._state is not None
+        response = await self._write_transport().delete_calendar(
+            self._state.calendar_home_url, calendar.fetch_ref
+        )
+        _require_write_status(response.status, {200, 204})
+        try:
+            calendars = await self.list_calendars()
+        except ProviderAdapterError as exc:
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN) from exc
+        if any(item.provider_calendar_id == calendar_id for item in calendars):
+            raise ProviderFetchError(ProviderFailureCode.READBACK_UNCERTAIN)
+        self._write_events = {
+            key: value for key, value in self._write_events.items()
+            if value.provider_calendar_id != calendar_id
+        }
 
     async def close(self) -> None:
         close = getattr(self.transport, "close", None)
@@ -948,6 +1233,182 @@ def _trusted_resource_ref(resource_ref: str, base_url: str) -> str:
     if not (host == base_host or host.endswith(".icloud.com") or host.endswith(".apple.com")):
         raise ProviderFetchError("provider_resource_ref_untrusted")
     return resource_ref
+
+
+def _valid_etag(value: str | None) -> bool:
+    return isinstance(value, str) and _ETAG_RE.fullmatch(value) is not None
+
+
+def _required_etag(value: str | None) -> str:
+    if not _valid_etag(value):
+        raise ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID)
+    return cast(str, value)
+
+
+def _child_ref(collection_ref: str, segment: str) -> str:
+    base = urlsplit(collection_ref)
+    if not _SEGMENT_RE.fullmatch(segment) or not base.path.endswith("/") or base.query or base.fragment:
+        raise ProviderFetchError(ProviderFailureCode.RESOURCE_REF_UNTRUSTED)
+    _trusted_resource_ref(collection_ref, collection_ref)
+    return _trusted_resource_ref(urljoin(collection_ref, segment), collection_ref)
+
+
+def _event_child_ref(collection_ref: str, resource_ref: str) -> str:
+    base = urlsplit(_trusted_resource_ref(collection_ref, collection_ref))
+    resource = urlsplit(_trusted_resource_ref(resource_ref, collection_ref))
+    if resource.scheme != base.scheme or not base.path.endswith("/"):
+        raise ProviderFetchError(ProviderFailureCode.RESOURCE_REF_UNTRUSTED)
+    child = resource.path.removeprefix(base.path)
+    if (not resource.path.startswith(base.path) or not child or "/" in child
+            or not child.endswith(".ics") or not _safe_child_segment(child)
+            or resource.query or resource.fragment):
+        raise ProviderFetchError(ProviderFailureCode.RESOURCE_REF_UNTRUSTED)
+    return resource_ref
+
+
+def _collection_child_ref(home_ref: str, collection_ref: str) -> str:
+    home = urlsplit(_trusted_resource_ref(home_ref, home_ref))
+    collection = urlsplit(_trusted_resource_ref(collection_ref, home_ref))
+    if collection.scheme != home.scheme or not home.path.endswith("/"):
+        raise ProviderFetchError(ProviderFailureCode.RESOURCE_REF_UNTRUSTED)
+    child = collection.path.removeprefix(home.path).rstrip("/")
+    if (not collection.path.startswith(home.path) or not child or "/" in child
+            or not _safe_child_segment(child) or collection.query or collection.fragment):
+        raise ProviderFetchError(ProviderFailureCode.RESOURCE_REF_UNTRUSTED)
+    return collection_ref
+
+
+def _safe_child_segment(segment: str) -> bool:
+    decoded = unquote(segment)
+    return (decoded not in {".", ".."} and not any(
+        char in "/\\" or ord(char) < 32 for char in decoded
+    ))
+
+
+def _require_write_status(status: int, expected: set[int]) -> None:
+    if status in expected:
+        return
+    if status == 401:
+        raise ProviderAuthError(ProviderFailureCode.AUTHENTICATION_FAILED)
+    if status == 403:
+        raise ProviderFetchError(ProviderFailureCode.WRITE_FORBIDDEN)
+    if status in {409, 412}:
+        raise ProviderFetchError(ProviderFailureCode.ETAG_CONFLICT)
+    if status in {404, 410}:
+        raise ProviderFetchError(ProviderFailureCode.NOT_FOUND)
+    if status == 429:
+        raise ProviderFetchError(ProviderFailureCode.RATE_LIMITED)
+    if 500 <= status <= 599:
+        raise ProviderFetchError(ProviderFailureCode.SERVER_FAILURE)
+    raise ProviderFetchError(ProviderFailureCode.WRITE_STATUS_UNEXPECTED)
+
+
+def _require_read_status(status: int) -> None:
+    if status != 200:
+        _require_write_status(status, {200})
+
+
+def _collection_privileges(response: ET.Element) -> tuple[bool | None, bool | None]:
+    for propstat in _direct_children(response, "propstat", namespace=_DAV):
+        status = _http_status_code(_direct_child_text(propstat, "status", namespace=_DAV))
+        if status is not None and not 200 <= status < 300:
+            continue
+        prop = _direct_child(propstat, "prop", namespace=_DAV)
+        privileges = _direct_child(prop, "current-user-privilege-set", namespace=_DAV) if prop is not None else None
+        if privileges is None:
+            continue
+        names = {
+            _local_name(item.tag) for privilege in _direct_children(privileges, "privilege", namespace=_DAV)
+            for item in privilege if _namespace(item.tag) == _DAV
+        }
+        return (bool(names & {"read", "all"}), bool(names & {"write", "write-content", "bind", "unbind", "all"}))
+    return None, None
+
+
+def _simple_event_resource(source: Calendar) -> bool:
+    components = list(source.subcomponents)
+    events = [item for item in components if _local_component_name(item) == "VEVENT"]
+    if len(events) != 1 or any(_local_component_name(item) not in {"VEVENT", "VTIMEZONE"}
+                               for item in components):
+        return False
+    event = events[0]
+    if not _component_value(event, "UID"):
+        return False
+    if getattr(event, "subcomponents", None):
+        return False
+    forbidden = {"RRULE", "RDATE", "EXDATE", "EXRULE", "RECURRENCE-ID", "ATTENDEE",
+                 "ORGANIZER", "ATTACH", "URL", "CONFERENCE"}
+    allowed = {"UID", "DTSTAMP", "DTSTART", "DTEND", "SUMMARY", "DESCRIPTION", "LOCATION"}
+    return all(key not in forbidden and key in allowed for key in event.keys())
+
+
+def _single_event_calendar(payload: bytes) -> Calendar:
+    if not payload or len(payload) > 8 * 1024 * 1024:
+        raise ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID)
+    try:
+        source = Calendar.from_ical(payload)
+    except Exception as exc:
+        raise ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID) from exc
+    components = list(source.subcomponents)
+    if (sum(_local_component_name(item) == "VEVENT" for item in components) != 1
+            or any(_local_component_name(item) not in {"VEVENT", "VTIMEZONE"} for item in components)):
+        raise ProviderPayloadError(ProviderFailureCode.PAYLOAD_INVALID)
+    return source
+
+
+def _simple_calendar(payload: bytes) -> Calendar:
+    source = _single_event_calendar(payload)
+    if not _simple_event_resource(source):
+        raise ProviderFetchError(ProviderFailureCode.EVENT_WRITE_UNSUPPORTED)
+    return source
+
+
+def _event_body(uid: str, draft: ICloudEventDraft) -> bytes:
+    if (not isinstance(uid, str) or not 1 <= len(uid) <= 255
+            or any(not 33 <= ord(char) <= 126 for char in uid)):
+        raise ProviderFetchError(ProviderFailureCode.WRITE_INPUT_INVALID)
+    source = Calendar()
+    source.add("prodid", "-//Alice Planning//iCloud Write Foundation//EN")
+    source.add("version", "2.0")
+    event = Event()
+    event.add("uid", uid)
+    event.add("dtstamp", datetime.now(timezone.utc))
+    event.add("summary", draft.title)
+    if draft.all_day:
+        assert draft.start_date is not None and draft.end_date_exclusive is not None
+        event.add("dtstart", date.fromisoformat(draft.start_date))
+        event.add("dtend", date.fromisoformat(draft.end_date_exclusive))
+    else:
+        assert draft.start_at_utc is not None and draft.end_at_utc is not None
+        zone = ZoneInfo(draft.timezone)
+        event.add("dtstart", datetime.fromisoformat(draft.start_at_utc[:-1] + "+00:00").astimezone(zone))
+        event.add("dtend", datetime.fromisoformat(draft.end_at_utc[:-1] + "+00:00").astimezone(zone))
+    if draft.notes is not None:
+        event.add("description", draft.notes)
+    if draft.location is not None:
+        event.add("location", draft.location)
+    source.add_component(event)
+    return source.to_ical()
+
+
+def _validate_calendar_fields(display_name: str, color: str | None) -> None:
+    if (not isinstance(display_name, str) or not 1 <= len(display_name.strip()) <= 200
+            or any(ord(char) < 32 for char in display_name)):
+        raise ProviderFetchError(ProviderFailureCode.WRITE_INPUT_INVALID)
+    if color is not None and (not isinstance(color, str) or not _COLOR_RE.fullmatch(color)):
+        raise ProviderFetchError(ProviderFailureCode.WRITE_INPUT_INVALID)
+
+
+def _mkcalendar_body(display_name: str, color: str | None) -> bytes:
+    color_prop = f"<i:calendar-color>{escape(color)}</i:calendar-color>" if color else ""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" '
+        'xmlns:i="http://apple.com/ns/ical/"><d:set><d:prop>'
+        f'<d:displayname>{escape(display_name)}</d:displayname>{color_prop}'
+        '<c:supported-calendar-component-set><c:comp name="VEVENT"/>'
+        '</c:supported-calendar-component-set></d:prop></d:set></c:mkcalendar>'
+    ).encode("utf-8")
 
 
 def _propfind_body(properties: str, namespaces: dict[str, str]) -> bytes:

@@ -1,8 +1,10 @@
 # Planning iCloud Calendar Provider (Phase A)
 
-This phase adds a server-only, read-only iCloud/CalDAV adapter and a bounded
-SQLite cache. It does not change Control Center and it does not enable any
-provider write path.
+The existing server-only iCloud/CalDAV read adapter and bounded SQLite cache
+remain the production read path. This slice adds a typed provider write
+foundation in AliceTG_Bot. It is **not production-enabled**: no Planning HTTP
+route, Control Center editor, deployment change, or runtime write trigger was
+added.
 
 ## Trust boundary
 
@@ -28,7 +30,7 @@ limits payload size and redirects, and accepts redirects only to the original
 host or Apple-owned `*.icloud.com`/`*.apple.com` hosts. URLs containing userinfo
 are rejected.
 
-## Read-only contract
+## Existing read path
 
 `ExternalCalendarProvider` exposes only:
 
@@ -38,13 +40,11 @@ are rejected.
 
 The iCloud adapter also implements a separate optional read-only
 `verify_resources(calendar, resource_refs, window)` capability for bounded
-authoritative reconciliation. It has no mutation methods and does not widen
-the provider-neutral fetch contract.
+authoritative reconciliation. The provider-neutral contract remains read-only.
 
-The concrete transport has only `PROPFIND` and `REPORT` methods. There is no
-CalDAV `PUT`, `DELETE`, event creation/update/move, calendar mutation, invite
-response, or writeback method in the adapter surface. Fixture transports assert
-that every call is `PROPFIND` or `REPORT`.
+The read request surface still permits only `PROPFIND` and `REPORT`. The
+separate iCloud write surface uses fixed typed operations described below;
+there is no generic DAV executor or browser-supplied URL.
 
 Discovery follows CalDAV `current-user-principal` and `calendar-home-set`
 properties, then discovers calendar collections and calendar data. The DAV
@@ -68,8 +68,8 @@ account name and is displayed only as an opaque ID. The display label is
 Calendar IDs are one-way opaque values over account identity plus the canonical
 discovered calendar reference. Calendar display names are not identifiers, so
 two calendars with the same name remain distinct. A trusted resource href may
-be retained only in the internal provider cache for read-only deletion
-verification; it is never a browser-facing identity, `CalendarEvent.source_ref`,
+be retained only in the internal provider cache for deletion verification and
+typed server-side writes; it is never a browser-facing identity, `CalendarEvent.source_ref`,
 health/API metadata, log field, or audit field.
 
 Event IDs are canonical Alice UUIDv4 values. SQLite maps the opaque provider
@@ -172,7 +172,61 @@ as deletion evidence; provider failure also clears pending deletion evidence.
 Pending confirmation is stored in the provider cache and survives process
 restart. Repeated confirmed misses do not change the tombstone again, and a
 later valid provider observation restores the same canonical event identity.
-No CalDAV `DELETE` is issued.
+The production refresh path issues no CalDAV `DELETE`.
+
+## Typed write foundation (inactive)
+
+`ICloudCalDavProvider` adds `create_event(calendar_id, draft)`,
+`update_event(event_id, etag=..., draft=...)`, `delete_event(event_id,
+etag=...)`, `create_calendar(display_name, color=None)`, and
+`delete_calendar(calendar_id)`. `ICloudEventDraft` is limited to title,
+timed or all-day range, IANA timezone, optional notes, and location. The
+provider resolves opaque IDs against discovered collections and fetched
+resources. Resource names and calendar collection segments are generated on
+the server. The transport exposes only typed `create_event`, `update_event`,
+`delete_event`, `get_event`, `create_calendar`, and `delete_calendar` methods.
+Its existing HTTPS and trusted Apple-host checks apply to writes and
+readbacks. It refuses untrusted event paths, arbitrary method names, and
+arbitrary XML/ICS supplied by a browser.
+
+Event creation sends a new `PUT` with `Content-Type: text/calendar` and
+`If-None-Match: *`, accepts only HTTP 201, then requires GET readback with a
+valid ETag and a matching single VEVENT UID. Update rebuilds the full bounded
+VEVENT, requires a current ETag, sends `PUT` with `If-Match`, and requires a
+fresh GET and ETag after HTTP 200/204. Delete requires `If-Match`, accepts
+HTTP 200/204, then requires an exact-resource GET returning 404 or 410.
+HTTP 412 is a stable conflict. A successful write followed by missing or
+incomplete readback is reported as uncertain; it is never silently called a
+confirmed success. A fetched recurring series, occurrence, or event carrying
+fields outside the safe single-event write shape remains read-only.
+
+Calendar discovery requests `DAV:current-user-privilege-set`. A successful
+property response with write privileges marks the collection writable; a
+set without write privileges marks it read-only. If the property is absent,
+the collection remains a writable candidate and the actual DAV response is
+authoritative. No display-name allow-list exists. Names are not identity:
+the opaque calendar ID derives from the trusted collection URL. `MKCALENDAR`
+uses a generated child collection URL and bounded XML containing display
+name, optional Apple color, and VEVENT component set. HTTP 201 must be
+followed by normal rediscovery of that exact collection. Calendar deletion
+targets only a discovered child collection, accepts HTTP 200/204, and
+requires rediscovery to show its absence. Provider restrictions on shared,
+system, or non-empty calendars are returned as stable errors.
+
+Migration 008 stores collection ref, read/write privilege state, event ETag,
+and single-event write safety only in provider cache tables. These fields do
+not enter source metadata or Planning API envelopes. The cache may be
+reconstructed by a normal provider refresh. Stable write errors separate
+auth, privilege, ETag conflict, not found, rate limit, server failure,
+transport timeout/failure, malformed payload, unexpected status, and
+uncertain readback without including raw URLs, XML, ICS, or credentials.
+
+The physical owner-account evidence for PUT/GET/If-Match/DELETE and
+MKCALENDAR/calendar DELETE already exists outside this commit. This commit
+contains synthetic tests only; it does not run a real iCloud probe, deploy,
+or enable writes in production. Apple Reminders/VTODO, recurrence writes,
+attendees, invitations, alarms, attachments, conference links, and moves are
+outside this foundation.
 
 ## Transport failure categories
 
@@ -209,8 +263,8 @@ reaches the threshold, a failed attempt marks retained provider data stale.
 Malformed or missing last-success timestamps fail closed to stale; a backwards
 clock movement of at most 60 seconds is treated as zero age for a small
 NTP/system-clock correction, while a larger backwards movement fails closed to
-stale. This slice adds no proxy, retry/backoff, or refresh-cadence change, and
-preserves the read-only CalDAV boundary.
+stale. This slice adds no proxy, retry/backoff, or refresh-cadence change. The
+production refresh loop remains read-only.
 
 A calendar-list refresh that no longer returns a previously known calendar
 marks that calendar `disabled` with `provider_calendar_disappeared` and marks
@@ -263,4 +317,5 @@ response. Existing native Planning data is not rewritten.
    calendar.
 
 There is intentionally no iCloud-specific browser endpoint, arbitrary CalDAV
-proxy, Panel Agent credential, or provider mutation capability in this phase.
+proxy, or Panel Agent credential. The typed write foundation has no runtime
+activation in this slice.

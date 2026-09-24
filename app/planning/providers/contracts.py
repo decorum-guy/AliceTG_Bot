@@ -98,6 +98,15 @@ class ProviderFailureCode(str, Enum):
     VTODO_RESOURCE_LIMIT = "provider_vtodo_resource_limit"
     VTODO_UID_MISSING = "provider_vtodo_uid_missing"
 
+    # iCloud typed write foundation; never include a provider response body.
+    WRITE_FORBIDDEN = "provider_write_forbidden"
+    ETAG_CONFLICT = "provider_etag_conflict"
+    NOT_FOUND = "provider_not_found"
+    WRITE_STATUS_UNEXPECTED = "provider_write_status_unexpected"
+    READBACK_UNCERTAIN = "provider_readback_uncertain"
+    WRITE_INPUT_INVALID = "provider_write_input_invalid"
+    EVENT_WRITE_UNSUPPORTED = "provider_event_write_unsupported"
+
 
 def _safe_failure_code(
     detail: ProviderFailureCode | str | None,
@@ -170,8 +179,11 @@ class ExternalCalendar:
     display_name: str
     color: str | None
     enabled: bool
-    # This is an adapter-internal fetch reference. It is never serialized or persisted.
+    # Adapter-internal collection ref; persisted only in provider cache.
     fetch_ref: str
+    # Adapter/cache internal metadata; omitted from API source projections.
+    can_read: bool | None = None
+    can_write: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -188,9 +200,11 @@ class ExternalCalendarEvent:
     end_at_utc: str | None
     start_date: str | None
     end_date_exclusive: str | None
-    # Provider-internal resource identity used only by a read-only verifier.
+    # Provider-internal resource identity used for verification and typed writes.
     # It is never copied into CalendarEvent.source_ref or API envelopes.
     resource_ref: str | None = None
+    provider_etag: str | None = None
+    write_safe: bool = False
 
 
 @dataclass(frozen=True)
