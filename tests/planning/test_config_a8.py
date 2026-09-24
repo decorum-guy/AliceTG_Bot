@@ -26,10 +26,20 @@ class PlanningBackupConfigA8Tests(unittest.TestCase):
         self.assertEqual(settings.planning_backup_interval_seconds, 86_400)
         self.assertEqual(settings.planning_backup_dir, "/app/data/backups/planning")
         self.assertFalse(settings.planning_icloud_enabled)
+        self.assertFalse(settings.planning_icloud_writes_enabled)
         self.assertEqual(settings.planning_icloud_account, "")
         self.assertEqual(settings.planning_icloud_password, "")
         self.assertEqual(settings.planning_icloud_caldav_url, "")
         self.assertEqual(settings.planning_icloud_refresh_interval_seconds, 300)
+
+    def test_icloud_writes_can_be_enabled_only_by_explicit_flag(self) -> None:
+        with patch.dict(
+            os.environ,
+            {**BASELINE, "PLANNING_ICLOUD_WRITES_ENABLED": "true"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertTrue(settings.planning_icloud_writes_enabled)
 
     def test_icloud_refresh_interval_is_bounded(self) -> None:
         for value in ("59", "3601"):

@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from app.planning.db import PlanningDatabase
@@ -158,6 +158,242 @@ class ProviderCalendarCache:
             "providerStatus": str(row["status"]),
             "providerLastSyncAt": row["last_successful_sync_at"],
             "providerErrorCode": row["last_error_code"],
+        }
+
+    def write_availability(self) -> dict[str, Any]:
+        """Return server-internal provider availability facts for API gates."""
+
+        row = self.database.connection.execute(
+            "SELECT status, enabled, configured FROM provider_sources WHERE source_id = ?",
+            (self.source_id,),
+        ).fetchone()
+        return {
+            "configured": bool(self.configured),
+            "providerAvailable": self.provider is not None,
+            "readEnabled": bool(self.enabled),
+            "status": None if row is None else str(row["status"]),
+        }
+
+    def calendar_destinations(self, *, writes_enabled: bool) -> list[dict[str, Any]]:
+        rows = self.database.connection.execute(
+            """
+            SELECT pc.provider_calendar_id, pc.display_name, pc.color, pc.enabled,
+                   pc.status, pc.can_write, ps.status AS source_status
+            FROM provider_calendars AS pc
+            JOIN provider_sources AS ps ON ps.source_id = pc.source_id
+            WHERE pc.source_id = ? AND pc.enabled = 1
+            ORDER BY pc.provider_calendar_id
+            """,
+            (self.source_id,),
+        ).fetchall()
+        return [
+            self._destination_projection(row, writes_enabled=writes_enabled)
+            for row in rows
+        ]
+
+    def calendar_destination(self, calendar_id: str, *, writes_enabled: bool) -> dict[str, Any] | None:
+        row = self.database.connection.execute(
+            """
+            SELECT pc.provider_calendar_id, pc.display_name, pc.color, pc.enabled,
+                   pc.status, pc.can_write, ps.status AS source_status
+            FROM provider_calendars AS pc
+            JOIN provider_sources AS ps ON ps.source_id = pc.source_id
+            WHERE pc.source_id = ? AND pc.provider_calendar_id = ?
+            """,
+            (self.source_id, calendar_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._destination_projection(row, writes_enabled=writes_enabled)
+
+    def event_write_metadata(self, canonical_event_id: str) -> dict[str, Any] | None:
+        """Return internal ETag/resource/write facts for one iCloud event."""
+
+        row = self.database.connection.execute(
+            """
+            SELECT ce.id, ce.provider_id, ce.provider_calendar_id, ce.deleted_at,
+                   ce.recurrence_rule, ce.source, pec.provider_event_id,
+                   pec.recurrence_instance_key, pec.resource_ref, pec.provider_etag,
+                   pec.write_safe, pc.enabled AS calendar_enabled,
+                   pc.can_write, pc.status AS calendar_status,
+                   ps.status AS source_status
+            FROM calendar_events AS ce
+            JOIN provider_event_cache AS pec ON pec.canonical_event_id = ce.id
+            JOIN provider_calendars AS pc ON pc.provider_calendar_id = pec.provider_calendar_id
+            JOIN provider_sources AS ps ON ps.source_id = pec.source_id
+            WHERE ce.id = ? AND pec.source_id = ?
+            """,
+            (canonical_event_id, self.source_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {key: row[key] for key in row.keys()}
+
+    async def prepare_provider_write(
+        self,
+        *,
+        calendar_id: str | None = None,
+        canonical_event_id: str | None = None,
+    ) -> None:
+        """Prime a provider's process-local trusted identity before mutation."""
+
+        provider = self.provider
+        prepare = getattr(provider, "prepare_write_state", None) if provider is not None else None
+        if not callable(prepare):
+            return
+        cached_event: ExternalCalendarEvent | None = None
+        if canonical_event_id is not None:
+            row = self.database.connection.execute(
+                """
+                SELECT ce.provider_calendar_id, ce.provider_id, ce.title, ce.notes,
+                       ce.location, ce.all_day, ce.timezone, ce.start_at_utc,
+                       ce.end_at_utc, ce.start_date, ce.end_date_exclusive,
+                       pec.recurrence_instance_key, pec.resource_ref, pec.provider_etag,
+                       pec.write_safe
+                FROM calendar_events AS ce
+                JOIN provider_event_cache AS pec ON pec.canonical_event_id = ce.id
+                WHERE ce.id = ? AND pec.source_id = ?
+                """,
+                (canonical_event_id, self.source_id),
+            ).fetchone()
+            if row is not None:
+                cached_event = ExternalCalendarEvent(
+                    provider_calendar_id=str(row["provider_calendar_id"]),
+                    provider_event_id=str(row["provider_id"]),
+                    recurrence_instance_key=str(row["recurrence_instance_key"]),
+                    title=str(row["title"]),
+                    notes=row["notes"],
+                    location=row["location"],
+                    all_day=bool(row["all_day"]),
+                    timezone=str(row["timezone"]),
+                    start_at_utc=row["start_at_utc"],
+                    end_at_utc=row["end_at_utc"],
+                    start_date=row["start_date"],
+                    end_date_exclusive=row["end_date_exclusive"],
+                    resource_ref=row["resource_ref"],
+                    provider_etag=row["provider_etag"],
+                    write_safe=bool(row["write_safe"]),
+                )
+                calendar_id = calendar_id or cached_event.provider_calendar_id
+        await prepare(calendar_id=calendar_id, event=cached_event)
+
+    def reconcile_confirmed_event(
+        self,
+        event: ExternalCalendarEvent,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """Apply authoritative provider readback without a rolling refresh."""
+
+        if connection is None:
+            with self.database.transaction() as connection:
+                self.reconcile_confirmed_event(event, connection=connection)
+            return
+        observed_at = self.now_fn()
+        self._upsert_event(
+            connection,
+            event=event,
+            window=_reconciliation_window(observed_at),
+            refresh_token=new_uuid4(),
+            observed_at=observed_at,
+        )
+
+    def reconcile_confirmed_deleted_event(
+        self,
+        canonical_event_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """Tombstone one confirmed provider deletion immediately."""
+
+        if connection is None:
+            with self.database.transaction() as connection:
+                self.reconcile_confirmed_deleted_event(canonical_event_id, connection=connection)
+            return
+        observed_at = self.now_fn()
+        connection.execute(
+            """
+            UPDATE calendar_events
+            SET deleted_at = ?, updated_at = ?, version = version + 1
+            WHERE id = ? AND deleted_at IS NULL
+              AND provider_id IS NOT NULL AND provider_calendar_id IS NOT NULL
+            """,
+            (observed_at, observed_at, canonical_event_id),
+        )
+        connection.execute(
+            """
+            UPDATE provider_event_cache
+            SET missing_successes = 0, updated_at = ?
+            WHERE canonical_event_id = ?
+            """,
+            (observed_at, canonical_event_id),
+        )
+
+    def reconcile_created_calendar(
+        self,
+        calendar: ExternalCalendar,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """Persist a provider-confirmed calendar discovery immediately."""
+
+        if connection is None:
+            with self.database.transaction() as connection:
+                self.reconcile_created_calendar(calendar, connection=connection)
+            return
+        observed_at = self.now_fn()
+        self._upsert_source(
+            connection,
+            account_id=self.account_id or "not-configured",
+            status="current",
+            observed_at=observed_at,
+            last_successful_sync_at=observed_at,
+            error_code=None,
+        )
+        self._upsert_calendar(connection, calendar, observed_at)
+
+    def reconcile_deleted_calendar(
+        self,
+        calendar_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """Remove a confirmed provider calendar from destination projections."""
+
+        if connection is None:
+            with self.database.transaction() as connection:
+                self.reconcile_deleted_calendar(calendar_id, connection=connection)
+            return
+        observed_at = self.now_fn()
+        connection.execute(
+            """
+            UPDATE provider_calendars
+            SET enabled = 0, status = 'disabled', last_error_code = NULL,
+                observed_at = ?, updated_at = ?
+            WHERE source_id = ? AND provider_calendar_id = ?
+            """,
+            (observed_at, observed_at, self.source_id, calendar_id),
+        )
+
+    @staticmethod
+    def _destination_projection(row: sqlite3.Row, *, writes_enabled: bool) -> dict[str, Any]:
+        if int(row["enabled"]) != 1 or str(row["status"]) in {"disabled", "error", "not_configured"}:
+            write_state = "read_only"
+        elif row["can_write"] is True or row["can_write"] == 1:
+            write_state = "writable"
+        elif row["can_write"] is False or row["can_write"] == 0:
+            write_state = "read_only"
+        else:
+            write_state = "candidate"
+        available = writes_enabled and write_state != "read_only"
+        return {
+            "id": str(row["provider_calendar_id"]),
+            "label": str(row["display_name"]),
+            "color": row["color"],
+            "providerKind": "icloud",
+            "writeState": write_state,
+            "canCreateEvent": available,
+            "canDeleteCalendar": available,
         }
 
     async def refresh(self, window: CalendarWindow) -> ProviderRefreshResult:
@@ -862,3 +1098,11 @@ def _parse_utc_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _reconciliation_window(observed_at: str) -> CalendarWindow:
+    observed = _parse_utc_timestamp(observed_at) or datetime.now(timezone.utc)
+    return CalendarWindow(
+        start=observed.replace(microsecond=0) - timedelta(days=30),
+        end=observed.replace(microsecond=0) + timedelta(days=365),
+    )

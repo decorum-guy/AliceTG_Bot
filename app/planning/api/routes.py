@@ -20,6 +20,10 @@ from app.planning.api.schemas import (
     parse_event_create,
     parse_event_patch,
     parse_event_query,
+    parse_provider_calendar_create,
+    parse_provider_calendar_id,
+    parse_provider_event_create,
+    parse_provider_event_patch,
     parse_object_id,
     parse_parse_preview_request,
     parse_project_query,
@@ -400,6 +404,82 @@ async def _delete_event(request: web.Request, auth: AuthenticatedPlanningContext
     )
 
 
+async def _get_calendar_destinations(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    del auth
+    if request.query_string:
+        raise PlanningApiError(
+            code="validation_error",
+            message="Calendar destinations do not accept query parameters.",
+            status=400,
+        )
+    correlation_id = new_uuid4()
+    payload = _service(request).list_calendar_destinations(correlation_id=correlation_id)
+    return _json_response(payload, correlation_id=correlation_id)
+
+
+async def _create_provider_event(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    key, expected_version = validate_mutation_headers(request, expected_version=False)
+    del expected_version
+    payload = parse_provider_event_create(await read_json_body(request))
+    return _stored_response(
+        await _service(request).create_provider_event(auth=auth, key=key, payload=payload)
+    )
+
+
+async def _patch_provider_event(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    event_id = parse_object_id(request.match_info["provider_event_id"], domain="calendar_event")
+    key, expected_version = validate_mutation_headers(request, expected_version=True)
+    assert expected_version is not None
+    payload = parse_provider_event_patch(await read_json_body(request))
+    return _stored_response(
+        await _service(request).update_provider_event(
+            auth=auth,
+            key=key,
+            event_id=event_id,
+            expected_version=expected_version,
+            payload=payload,
+        )
+    )
+
+
+async def _delete_provider_event(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    event_id = parse_object_id(request.match_info["provider_event_id"], domain="calendar_event")
+    key, expected_version = validate_mutation_headers(request, expected_version=True)
+    assert expected_version is not None
+    parse_empty_body(await read_json_body(request, required=False))
+    return _stored_response(
+        await _service(request).delete_provider_event(
+            auth=auth,
+            key=key,
+            event_id=event_id,
+            expected_version=expected_version,
+        )
+    )
+
+
+async def _create_provider_calendar(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    key, expected_version = validate_mutation_headers(request, expected_version=False)
+    del expected_version
+    payload = parse_provider_calendar_create(await read_json_body(request))
+    return _stored_response(
+        await _service(request).create_provider_calendar(auth=auth, key=key, payload=payload)
+    )
+
+
+async def _delete_provider_calendar(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
+    calendar_id = parse_provider_calendar_id(request.match_info["provider_calendar_id"])
+    key, expected_version = validate_mutation_headers(request, expected_version=False)
+    del expected_version
+    parse_empty_body(await read_json_body(request, required=False))
+    return _stored_response(
+        await _service(request).delete_provider_calendar(
+            auth=auth,
+            key=key,
+            calendar_id=calendar_id,
+        )
+    )
+
+
 async def _get_projects(request: web.Request, auth: AuthenticatedPlanningContext) -> web.Response:
     limit, offset = parse_project_query(request)
     correlation_id = new_uuid4()
@@ -530,6 +610,7 @@ def setup_planning_routes(
             stale_after_seconds=int(getattr(settings, "planning_api_stale_after_seconds", 300)),
             health_service=app.get("planning_health_service"),
             provider_cache=app.get("planning_icloud_cache"),
+            icloud_writes_enabled=bool(getattr(settings, "planning_icloud_writes_enabled", False)),
         )
         app["planning_api_service"] = service
     app["planning_authenticator"] = PlanningAuthenticator.from_settings(
@@ -596,6 +677,30 @@ def setup_planning_routes(
     app.router.add_delete(
         f"{PLANNING_PREFIX}/events/{{event_id}}",
         _route(_delete_event, "DELETE /events/{id}"),
+    )
+    app.router.add_get(
+        f"{PLANNING_PREFIX}/calendar-destinations",
+        _route(_get_calendar_destinations, "GET /calendar-destinations"),
+    )
+    app.router.add_post(
+        f"{PLANNING_PREFIX}/provider-events",
+        _route(_create_provider_event, "POST /provider-events"),
+    )
+    app.router.add_patch(
+        f"{PLANNING_PREFIX}/provider-events/{{provider_event_id}}",
+        _route(_patch_provider_event, "PATCH /provider-events/{id}"),
+    )
+    app.router.add_delete(
+        f"{PLANNING_PREFIX}/provider-events/{{provider_event_id}}",
+        _route(_delete_provider_event, "DELETE /provider-events/{id}"),
+    )
+    app.router.add_post(
+        f"{PLANNING_PREFIX}/provider-calendars",
+        _route(_create_provider_calendar, "POST /provider-calendars"),
+    )
+    app.router.add_delete(
+        f"{PLANNING_PREFIX}/provider-calendars/{{provider_calendar_id}}",
+        _route(_delete_provider_calendar, "DELETE /provider-calendars/{id}"),
     )
     app.router.add_get(f"{PLANNING_PREFIX}/projects", _route(_get_projects, "GET /projects"))
     app.router.add_get(f"{PLANNING_PREFIX}/status", _route(_get_status, "GET /status"))

@@ -116,6 +116,7 @@ async def create_app() -> web.Application:
         or settings.planning_alice_interpret_enabled
         or settings.planning_backup_enabled
         or settings.planning_icloud_enabled
+        or settings.planning_icloud_writes_enabled
     ) and planning_database is None:
         # A4/A5a have their own disabled-by-default API gates.  Opening the
         # Planning database here does not enable the A2 cutover or A3 worker.
@@ -334,6 +335,10 @@ async def create_app() -> web.Application:
     async def close_resources(_: web.Application) -> None:
         if planning_icloud_refresh_loop is not None:
             await planning_icloud_refresh_loop.close()
+        elif planning_icloud_cache is not None:
+            close = getattr(planning_icloud_cache.provider, "close", None)
+            if callable(close):
+                await close()
         if durable_reminder_scheduler is not None:
             await durable_reminder_scheduler.close()
         await coffee_timing_refresher.close()

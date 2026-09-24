@@ -1,10 +1,11 @@
 # Planning iCloud Calendar Provider (Phase A)
 
 The existing server-only iCloud/CalDAV read adapter and bounded SQLite cache
-remain the production read path. This slice adds a typed provider write
-foundation in AliceTG_Bot. It is **not production-enabled**: no Planning HTTP
-route, Control Center editor, deployment change, or runtime write trigger was
-added.
+remain the production read path. Slice 2 adds a narrow trusted Planning API
+around the typed provider write foundation in AliceTG_Bot. It is
+**not production-enabled by default**: no Control Center editor, deployment
+change, or runtime write trigger is enabled, and this slice does not implement
+Panel Agent or Dashboard UI integration.
 
 ## Trust boundary
 
@@ -13,6 +14,7 @@ only from server runtime configuration:
 
 ```text
 PLANNING_ICLOUD_ENABLED=false
+PLANNING_ICLOUD_WRITES_ENABLED=false
 PLANNING_ICLOUD_ACCOUNT=<runtime secret reference/value>
 PLANNING_ICLOUD_PASSWORD=<runtime secret>
 PLANNING_ICLOUD_CALDAV_URL=<server-only HTTPS bootstrap URL>
@@ -174,7 +176,7 @@ restart. Repeated confirmed misses do not change the tombstone again, and a
 later valid provider observation restores the same canonical event identity.
 The production refresh path issues no CalDAV `DELETE`.
 
-## Typed write foundation (inactive)
+## Typed write foundation and server-gated API
 
 `ICloudCalDavProvider` adds `create_event(calendar_id, draft)`,
 `update_event(event_id, etag=..., draft=...)`, `delete_event(event_id,
@@ -220,6 +222,104 @@ reconstructed by a normal provider refresh. Stable write errors separate
 auth, privilege, ETag conflict, not found, rate limit, server failure,
 transport timeout/failure, malformed payload, unexpected status, and
 uncertain readback without including raw URLs, XML, ICS, or credentials.
+
+### Planning route contract
+
+The exact versioned routes are:
+
+```text
+GET    /internal/planning/v1/calendar-destinations
+POST   /internal/planning/v1/provider-events
+PATCH  /internal/planning/v1/provider-events/{canonical-event-uuid}
+DELETE /internal/planning/v1/provider-events/{canonical-event-uuid}
+POST   /internal/planning/v1/provider-calendars
+DELETE /internal/planning/v1/provider-calendars/{opaque-calendar-id}
+```
+
+All six routes are explicit entries in `ROUTE_PERMISSIONS` and accept
+`panel-agent` only. HA, operator, Alice and browser-direct access do not
+receive provider CRUD routes. The legacy `/events` POST/PATCH/DELETE routes
+remain local-only and continue to reject provider-owned events with
+`event_not_local_only`.
+
+The write gate is the independent boolean
+`PLANNING_ICLOUD_WRITES_ENABLED=false`. It is separate from
+`PLANNING_ICLOUD_ENABLED`; read integration may be enabled while writes are
+disabled. The default is fail-closed, and credentials alone never enable
+writes. Destination GETs use canonical SQLite provider cache only and do not
+start a CalDAV refresh or status-poll network request.
+
+The safe destination projection is:
+
+```json
+{
+  "id": "icloud_calendar_<sha256>",
+  "label": "Calendar name",
+  "color": "#123456",
+  "providerKind": "icloud",
+  "writeState": "writable | candidate | read_only",
+  "canCreateEvent": true,
+  "canDeleteCalendar": true
+}
+```
+
+`can_write=true` is `writable`, `can_write=false` is `read_only`, and absent
+privilege metadata is `candidate`. A candidate can be attempted; the typed
+provider response remains authoritative. IDs, not display names, select
+destinations, so duplicate names remain distinct. Collection/resource refs,
+account names, ETags and raw DAV/ICS are internal-only.
+
+Provider event create accepts `calendar_id`, `title`, optional `notes` and
+`location`, `all_day`, `timezone`, and exactly one timed range
+(`start_at_utc`/`end_at_utc`) or all-day range
+(`start_date`/`end_date_exclusive`). It does not accept provider URLs, ETags,
+UIDs, resource names, provider IDs, source refs, recurrence, attendees,
+alarms, organizer fields or raw XML/ICS. Calendar create accepts only
+`display_name` and optional color; delete accepts only an opaque calendar ID.
+
+External update/delete use the canonical event UUID and positive numeric
+`If-Match` canonical version plus `Idempotency-Key`. The server resolves the
+internal provider event identity and ETag from `provider_event_cache`. It
+rejects stale canonical versions before network I/O; the provider foundation
+then enforces its own internal ETag check. No ETag is returned to callers.
+Provider event object envelopes add `mutationCapabilities` with `canEdit`,
+`canDelete`, `providerKind` and `writeState`; local events retain their
+existing local capability semantics. Unsafe recurring/occurrence or enriched
+events are read-only.
+
+Remote idempotency is deliberately outside the legacy `_mutate()` wrapper:
+
+1. authenticate, validate, check gate/capability/version and resolve cache state;
+2. claim the existing idempotency row and commit that claim;
+3. perform at most one typed remote mutation;
+4. require authoritative readback or verified absence;
+5. reconcile the confirmed result in the provider cache; and
+6. commit canonical state plus the exact API response in one final SQLite transaction.
+
+A durable claim with `response_json=NULL` returns bounded
+`idempotency_in_progress` with `mutationState=uncertain` and never repeats the
+remote request. Definitive provider refusal is stored as a bounded error for
+exact replay. A timeout, dropped connection, failed readback or failed final
+reconciliation is `provider_mutation_uncertain`, `mutationState=uncertain`,
+and `retryable=false`; callers must refresh rather than automatically retry.
+
+`ProviderCalendarCache` owns targeted reconciliation methods for confirmed
+event create/update/delete and calendar create/delete. They reuse existing
+provider identity mapping, preserve an event's canonical UUID across update,
+increment its version only when canonical fields change, create an immediate
+event tombstone after confirmed deletion, and remove a confirmed deleted
+calendar from the destination projection immediately.
+
+The Planning mapping is intentionally small: validation is `400`, canonical
+or provider conflicts are `409`, missing resources are `404`, rate limiting
+is `429`, unavailable/transient provider operations are `503`, and uncertain
+outcomes are `503` with `retryable=false`. Stable codes include
+`provider_write_disabled`, `provider_not_configured`, `provider_read_only`,
+`version_conflict`, `provider_etag_conflict`, `provider_not_found`,
+`provider_rate_limited`, `provider_transient_failure`,
+`provider_payload_invalid`, and `provider_mutation_uncertain`. Raw provider
+exceptions, URLs, response bodies, XML, ICS, accounts and credentials are
+never exposed.
 
 The physical owner-account evidence for PUT/GET/If-Match/DELETE and
 MKCALENDAR/calendar DELETE already exists outside this commit. This commit
@@ -317,5 +417,7 @@ response. Existing native Planning data is not rewritten.
    calendar.
 
 There is intentionally no iCloud-specific browser endpoint, arbitrary CalDAV
-proxy, or Panel Agent credential. The typed write foundation has no runtime
-activation in this slice.
+proxy, or generic provider endpoint. The trusted routes above are server-side
+Panel Agent API contracts only; Panel Agent and Dashboard implementation is a
+later slice. Production remains write-disabled unless the independent gate is
+explicitly reviewed and enabled outside this task.

@@ -387,7 +387,7 @@ class ICloudWriteTransport(ReadOnlyCalDavTransport, Protocol):
 
 
 class ICloudCalDavProvider(ExternalCalendarProvider):
-    """iCloud adapter; writes are server-only and absent from the Planning API."""
+    """iCloud adapter; typed writes are callable only by the server API layer."""
 
     provider = "icloud"
 
@@ -443,6 +443,34 @@ class ICloudCalDavProvider(ExternalCalendarProvider):
             raise ProviderPayloadError("provider_calendar_limit")
         self._state.calendars = calendars
         return list(calendars)
+
+    async def prepare_write_state(
+        self,
+        *,
+        calendar_id: str | None = None,
+        event: ExternalCalendarEvent | None = None,
+    ) -> None:
+        """Refresh trusted in-memory identity before a server-owned mutation.
+
+        The provider cache is durable, while the adapter's trusted collection
+        and event lookup state is intentionally process-local.  A Planning
+        mutation may therefore arrive before the background refresh has
+        populated this adapter after a restart.  This bounded discovery keeps
+        the browser/API opaque-ID contract intact and primes only the one
+        cached event needed by update/delete.
+        """
+
+        if self._state is None:
+            await self.discover_account()
+        calendars = await self.list_calendars()
+        if calendar_id is not None and not any(
+            calendar.provider_calendar_id == calendar_id for calendar in calendars
+        ):
+            raise ProviderFetchError(ProviderFailureCode.NOT_FOUND)
+        if event is not None:
+            if event.provider_calendar_id != calendar_id and calendar_id is not None:
+                raise ProviderFetchError(ProviderFailureCode.NOT_FOUND)
+            self._write_events[event.provider_event_id] = event
 
     async def fetch_events(
         self,
