@@ -91,6 +91,7 @@ class Settings:
     planning_backup_retention_count: int = 14
     planning_backup_interval_seconds: int = 86_400
     planning_icloud_enabled: bool = False
+    planning_icloud_writes_enabled: bool = False
     planning_icloud_account: str = ""
     planning_icloud_password: str = ""
     planning_icloud_caldav_url: str = ""
@@ -155,6 +156,7 @@ class Settings:
         planning_backup_retention_count = int(os.getenv("PLANNING_BACKUP_RETENTION_COUNT", "14"))
         planning_backup_interval_seconds = int(os.getenv("PLANNING_BACKUP_INTERVAL_SECONDS", "86400"))
         planning_icloud_enabled = _bool_env("PLANNING_ICLOUD_ENABLED", False)
+        planning_icloud_writes_enabled = _bool_env("PLANNING_ICLOUD_WRITES_ENABLED", False)
         planning_icloud_account = os.getenv("PLANNING_ICLOUD_ACCOUNT", "").strip()
         planning_icloud_password = os.getenv("PLANNING_ICLOUD_PASSWORD", "").strip()
         planning_icloud_caldav_url = os.getenv("PLANNING_ICLOUD_CALDAV_URL", "").strip()
@@ -292,6 +294,7 @@ class Settings:
             planning_backup_retention_count=planning_backup_retention_count,
             planning_backup_interval_seconds=planning_backup_interval_seconds,
             planning_icloud_enabled=planning_icloud_enabled,
+            planning_icloud_writes_enabled=planning_icloud_writes_enabled,
             planning_icloud_account=planning_icloud_account,
             planning_icloud_password=planning_icloud_password,
             planning_icloud_caldav_url=planning_icloud_caldav_url,

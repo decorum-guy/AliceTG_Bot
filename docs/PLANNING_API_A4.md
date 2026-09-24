@@ -1,8 +1,9 @@
 # Planning v1 API (A4)
 
 This document records the A4 implementation boundary for the internal
-Planning HTTP adapter.  The feature is disabled by default and does not
-enable the A2 reminder cutover or the A3 durable scheduler.
+Planning HTTP adapter plus the Slice 2 trusted iCloud mutation surface. The
+feature is disabled by default and does not enable the A2 reminder cutover or
+the A3 durable scheduler.
 
 ## Route surface
 
@@ -28,6 +29,13 @@ GET    /events/{id}
 POST   /events
 PATCH  /events/{id}
 DELETE /events/{id}
+
+GET    /calendar-destinations
+POST   /provider-events
+PATCH  /provider-events/{id}
+DELETE /provider-events/{id}
+POST   /provider-calendars
+DELETE /provider-calendars/{id}
 
 GET    /projects?limit=&offset=
 GET    /status
@@ -65,6 +73,8 @@ own, and a body `audience` field is rejected.
 | Reminder create/edit/complete/cancel | no | yes | yes |
 | Task create/edit/complete/archive | no | yes | yes |
 | Local event create/edit/delete | no | yes | yes |
+| iCloud calendar destinations | no | yes | no |
+| iCloud provider event/calendar mutations | no | yes | no |
 
 Authenticated mutation context is derived from the audience.  A4 does not
 accept caller-supplied actor, surface, source, or source reference fields:
@@ -107,7 +117,8 @@ Task dates remain date-only when no local time is supplied.  Timed tasks use a
 local wall-clock time plus IANA timezone.  Reminders and timed events require
 UTC `Z` timestamps plus IANA timezone.  Events enforce timed/all-day
 exclusivity, exclusive all-day end dates, `end > start`, disabled recurrence,
-and `sync_state=local_only`.  A4 performs no provider network writes.
+and `sync_state=local_only`.  These legacy event mutation routes perform no
+provider network writes.
 
 ### Task list views
 
@@ -180,6 +191,86 @@ Exact stored idempotency replays remain governed by the A4 replay contract.
 They return the original response before evaluating a new-mutation
 precondition and do not execute a second domain mutation.
 
+## Slice 2 iCloud provider API
+
+The following separate routes are the only Planning provider mutation surface:
+
+```text
+GET    /internal/planning/v1/calendar-destinations
+POST   /internal/planning/v1/provider-events
+PATCH  /internal/planning/v1/provider-events/{canonical-event-uuid}
+DELETE /internal/planning/v1/provider-events/{canonical-event-uuid}
+POST   /internal/planning/v1/provider-calendars
+DELETE /internal/planning/v1/provider-calendars/{opaque-calendar-id}
+```
+
+Every route above is allowlisted for `panel-agent` only. Home Assistant,
+operator credentials, Alice voice input, and browser-direct callers do not
+receive generic provider CRUD access. The existing `POST/PATCH/DELETE
+/events` routes remain strict local-only mutations.
+
+The independent server gate is `PLANNING_ICLOUD_WRITES_ENABLED=false` by
+default. `PLANNING_ICLOUD_ENABLED` controls read integration and does not
+enable writes; credentials never enable writes by presence. With the write
+gate off, provider mutation routes fail closed with
+`provider_write_disabled`, while destination reads remain cache-only.
+
+`GET /calendar-destinations` returns only this safe projection per enabled
+calendar: `id`, `label`, `color`, `providerKind=icloud`, `writeState`,
+`canCreateEvent`, and `canDeleteCalendar`. `writeState` is `writable` when
+DAV reports write privilege, `read_only` when it explicitly denies write, and
+`candidate` when privilege metadata is absent. Candidate writes may be
+attempted; the authoritative typed provider response decides the result.
+Duplicate labels remain distinct because IDs are opaque. Collection URLs,
+resource references, account identifiers, ETags and raw DAV/ICS are never
+returned.
+
+Provider event create accepts only an opaque `calendar_id`, title, optional
+notes/location, timezone, and either a timed UTC range or an all-day date
+range. It rejects URLs, ETags, UIDs, resource names, provider/source fields,
+recurrence, attendees, alarms and organizer fields. Calendar create accepts a
+display name and optional color only. Calendar delete accepts only the opaque
+calendar ID.
+
+Provider event responses use the existing canonical `CalendarEvent` UUID and
+numeric `version`. Update/delete require that version in `If-Match`; stale
+versions are rejected before any provider call. The internal cache resolves
+the provider event identity and ETag, and the typed foundation performs its
+own `If-Match` check. ETags are never part of an external request or response.
+Provider events expose additive top-level `mutationCapabilities` in object
+read/mutation envelopes (`canEdit`, `canDelete`, and iCloud `writeState`).
+Unsafe recurring occurrences, enriched representations, read-only calendars,
+closed gates, and unavailable providers are not advertised as writable.
+
+Provider writes do not use the legacy `_mutate()` transaction. The remote-safe
+sequence is: compute the request hash; read existing idempotency state and
+return an exact replay or bounded in-progress result before mutable preflight;
+run local preflight only for a missing row; durably claim and commit the key;
+repeat the claim as the race-close immediately before one typed provider
+mutation; require authoritative readback/absence confirmation; reconcile the
+cache; then use one final SQLite transaction to store canonical state and the
+exact response. A claim whose response is still `NULL` returns bounded
+`idempotency_in_progress` with `mutationState=uncertain` and never repeats the
+remote write. Failed new-request preflight creates no idempotency row.
+Definitive provider rejections are stored for exact replay. A timeout, dropped
+connection, failed readback, or reconciliation failure is
+`provider_mutation_uncertain` with `retryable=false`; clients must refresh
+authoritative state and must not automatically repeat the mutation.
+
+The cache has provider-owned targeted reconciliation for confirmed event
+create/update/delete and calendar create/delete. It preserves canonical UUIDs
+on update, increments the canonical version only when state changes, creates
+an immediate tombstone on confirmed event deletion, and removes confirmed
+deleted calendars from destination projections without waiting for the next
+rolling refresh.
+
+Stable provider API error mappings include `provider_read_only` (409),
+`version_conflict` (409), `provider_etag_conflict` (409),
+`provider_not_found` (404), `provider_rate_limited` (429),
+`provider_transient_failure` (503), `provider_payload_invalid` (400/502),
+and `provider_mutation_uncertain` (503). Messages and details never include
+provider URLs, response bodies, XML, ICS, account names, or credentials.
+
 ## Envelopes and status
 
 Object and list responses are built centrally with `schemaVersion:
@@ -202,6 +293,9 @@ audience secrets and the existing `INTERNAL_WEBHOOK_SECRET`; invalid security
 configuration fails closed.  A4 leaves
 `PLANNING_REMINDER_CUTOVER_ENABLED` and
 `PLANNING_DURABLE_SCHEDULER_ENABLED` unchanged.  `LIVE_PRODUCTION_PREFLIGHT_PENDING`
-remains a later rollout gate.  A4 tests use synthetic credentials and
-temporary file SQLite databases only; no deployment, restart, provider call,
-or real Telegram message is part of this phase.
+remains a later rollout gate. `PLANNING_ICLOUD_WRITES_ENABLED=false` remains
+the production default and is independent from read integration. Tests use
+synthetic credentials, a synthetic CalDAV transport and temporary file SQLite
+databases only; no real iCloud call, deployment, restart, or real Telegram
+message is part of this phase. This contract does not claim that Panel Agent
+or Dashboard UI integration already exists.

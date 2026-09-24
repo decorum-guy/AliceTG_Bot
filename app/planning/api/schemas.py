@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -32,6 +33,7 @@ MAX_LIST_LIMIT = 100
 DEFAULT_LIST_LIMIT = 50
 MAX_OFFSET = 10_000
 MAX_RANGE_DAYS = 366
+_PROVIDER_CALENDAR_ID_PATTERN = re.compile(r"^icloud_calendar_[0-9a-f]{64}$")
 
 _UNSAFE_STRUCTURAL_FIELDS = frozenset(
     {
@@ -472,6 +474,128 @@ def parse_event_patch(body: Mapping[str, Any]) -> dict[str, Any]:
         if field in body:
             result[field] = _optional_date(body[field], field)
     return result
+
+
+def parse_provider_event_create(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Parse the narrow server-owned iCloud event draft."""
+
+    body = _require_object(body)
+    allowed = {
+        "calendar_id",
+        "title",
+        "notes",
+        "location",
+        "all_day",
+        "timezone",
+        "start_at_utc",
+        "end_at_utc",
+        "start_date",
+        "end_date_exclusive",
+    }
+    _assert_keys(body, allowed, context="provider event create")
+    _assert_not_server_owned(body)
+    result = {
+        "calendar_id": _required_provider_calendar_id(_required(body, "calendar_id")),
+        "title": _required_text(_required(body, "title"), "title", max_length=500),
+        "notes": _optional_text(body.get("notes"), "notes", max_length=4000),
+        "location": _optional_text(body.get("location"), "location", max_length=1000),
+        "all_day": _required(body, "all_day"),
+        "timezone": _required_timezone(_required(body, "timezone"), "timezone"),
+        "start_at_utc": _optional_timestamp(body.get("start_at_utc"), "start_at_utc"),
+        "end_at_utc": _optional_timestamp(body.get("end_at_utc"), "end_at_utc"),
+        "start_date": _optional_date(body.get("start_date"), "start_date"),
+        "end_date_exclusive": _optional_date(body.get("end_date_exclusive"), "end_date_exclusive"),
+    }
+    if type(result["all_day"]) is not bool:
+        raise _validation("Request field 'all_day' is invalid.")
+    _validate_provider_event_shape(result)
+    return result
+
+
+def parse_provider_event_patch(body: Mapping[str, Any]) -> dict[str, Any]:
+    body = _require_object(body)
+    allowed = {
+        "title",
+        "notes",
+        "location",
+        "all_day",
+        "timezone",
+        "start_at_utc",
+        "end_at_utc",
+        "start_date",
+        "end_date_exclusive",
+    }
+    _assert_keys(body, allowed, context="provider event patch")
+    _assert_not_server_owned(body)
+    if not body:
+        raise _validation("Provider event patch must contain at least one mutable field.")
+    result: dict[str, Any] = {}
+    if "title" in body:
+        result["title"] = _required_text(body["title"], "title", max_length=500)
+    if "notes" in body:
+        result["notes"] = _optional_text(body["notes"], "notes", max_length=4000)
+    if "location" in body:
+        result["location"] = _optional_text(body["location"], "location", max_length=1000)
+    if "all_day" in body:
+        if type(body["all_day"]) is not bool:
+            raise _validation("Request field 'all_day' is invalid.")
+        result["all_day"] = body["all_day"]
+    if "timezone" in body:
+        result["timezone"] = _required_timezone(body["timezone"], "timezone")
+    for field in ("start_at_utc", "end_at_utc"):
+        if field in body:
+            result[field] = _required_timestamp(body[field], field)
+    for field in ("start_date", "end_date_exclusive"):
+        if field in body:
+            value = _optional_date(body[field], field)
+            if value is None:
+                raise _validation(f"Request field {field!r} is invalid.")
+            result[field] = value
+    return result
+
+
+def parse_provider_calendar_create(body: Mapping[str, Any]) -> dict[str, Any]:
+    body = _require_object(body)
+    _assert_keys(body, {"display_name", "color"}, context="provider calendar create")
+    _assert_not_server_owned(body)
+    color = _optional_text(body.get("color"), "color", max_length=9)
+    if color is not None and not re.fullmatch(r"#[0-9A-Fa-f]{6,8}", color):
+        raise _validation("Request field 'color' is invalid.")
+    return {
+        "display_name": _required_text(_required(body, "display_name"), "display_name", max_length=200),
+        "color": color,
+    }
+
+
+def parse_provider_calendar_id(value: str) -> str:
+    return _required_provider_calendar_id(value)
+
+
+def _required_provider_calendar_id(value: Any) -> str:
+    if not isinstance(value, str) or _PROVIDER_CALENDAR_ID_PATTERN.fullmatch(value) is None:
+        raise _validation("Provider calendar id is invalid.")
+    return value
+
+
+def _validate_provider_event_shape(value: Mapping[str, Any]) -> None:
+    try:
+        validate_event_shape(
+            all_day=value["all_day"],
+            timezone_name=value["timezone"],
+            start_at_utc=value["start_at_utc"],
+            end_at_utc=value["end_at_utc"],
+            start_date=value["start_date"],
+            end_date_exclusive=value["end_date_exclusive"],
+            sync_state="local_only",
+            title=value["title"],
+            notes=value["notes"],
+            location=value["location"],
+            recurrence_rule=None,
+            provider_id=None,
+            provider_calendar_id=None,
+        )
+    except ValueError as exc:
+        raise _validation("Provider event fields are inconsistent.") from exc
 
 
 def parse_empty_body(body: Mapping[str, Any]) -> None:
