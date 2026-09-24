@@ -31,11 +31,15 @@ from app.planning.providers.contracts import (
 )
 from app.planning.providers.icloud import (
     AiohttpCalDavTransport,
+    CalDavWriteResponse,
     ICloudCalDavProvider,
+    ICloudEventDraft,
     _CALDAV,
     _DAV,
     _calendar_multiget_body,
     _calendar_query_body,
+    _event_body,
+    _mkcalendar_body,
     _propfind_body,
 )
 
@@ -1395,6 +1399,318 @@ class ICloudProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         not_configured_result = await not_configured.refresh(WINDOW)
         self.assertEqual(not_configured_result.status, "not_configured")
+
+
+class WriteFixtureCalDavTransport(FixtureCalDavTransport):
+    """Synthetic Apple-shaped state; no network or real credentials."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.collections = {"one": True, "two": False}
+        self.resources: dict[str, tuple[bytes, str]] = {}
+        self.write_calls: list[tuple[str, str, str | None, bytes | None]] = []
+        self.next_status: int | None = None
+        self.readback_override: CalDavWriteResponse | None = None
+        self.absence_status = 404
+        self.skip_calendar_mutation = False
+
+    async def propfind(self, url: str, *, body: bytes, depth: str) -> bytes:
+        if b"resourcetype" not in body:
+            return await super().propfind(url, body=body, depth=depth)
+        self.calls.append(("PROPFIND", url, depth))
+        self.bodies.append(body.decode())
+        rows = []
+        for segment, writable in self.collections.items():
+            write = "<d:privilege><d:write/></d:privilege>" if writable else ""
+            rows.append(
+                f"<d:response><d:href>/home/{segment}/</d:href><d:propstat><d:prop>"
+                "<d:resourcetype><c:calendar/></d:resourcetype>"
+                "<d:displayname>Same name</d:displayname>"
+                f"<d:current-user-privilege-set><d:privilege><d:read/></d:privilege>{write}"
+                "</d:current-user-privilege-set></d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+                "</d:propstat></d:response>"
+            )
+        return ('<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                + "".join(rows) + "</d:multistatus>").encode()
+
+    async def create_event(self, collection_ref: str, resource_name: str,
+                           uid: str, draft: ICloudEventDraft) -> CalDavWriteResponse:
+        body = _event_body(uid, draft)
+        self.write_calls.append(("PUT_NEW", collection_ref, resource_name, body))
+        status = self.next_status or 201
+        self.next_status = None
+        if status == 201:
+            self.resources[collection_ref + resource_name] = (body, '"created"')
+        return CalDavWriteResponse(status)
+
+    async def update_event(self, collection_ref: str, resource_ref: str, uid: str,
+                           draft: ICloudEventDraft, etag: str) -> CalDavWriteResponse:
+        body = _event_body(uid, draft)
+        self.write_calls.append(("PUT_MATCH", resource_ref, etag, body))
+        status = self.next_status or 204
+        self.next_status = None
+        if status == 204:
+            self.resources[resource_ref] = (body, '"updated"')
+        return CalDavWriteResponse(status)
+
+    async def delete_event(self, collection_ref: str, resource_ref: str, etag: str) -> CalDavWriteResponse:
+        self.write_calls.append(("DELETE_MATCH", resource_ref, etag, None))
+        status = self.next_status or 204
+        self.next_status = None
+        if status == 204:
+            self.resources[resource_ref] = (b"", "")
+        return CalDavWriteResponse(status)
+
+    async def get_event(self, collection_ref: str, resource_ref: str) -> CalDavWriteResponse:
+        self.write_calls.append(("GET", resource_ref, None, None))
+        if self.readback_override is not None:
+            return self.readback_override
+        if resource_ref in self.resources:
+            body, etag = self.resources[resource_ref]
+            return CalDavWriteResponse(200, etag, body) if body else CalDavWriteResponse(self.absence_status)
+        index = int(resource_ref.rsplit("event-", 1)[1].split(".ics", 1)[0])
+        return CalDavWriteResponse(200, f'"etag-{index}"', _resource_icals(1)[index - 1].encode())
+
+    async def create_calendar(self, home_ref: str, segment: str, display_name: str,
+                              color: str | None) -> CalDavWriteResponse:
+        body = _mkcalendar_body(display_name, color)
+        self.write_calls.append(("MKCALENDAR", home_ref, segment, body))
+        status = self.next_status or 201
+        self.next_status = None
+        if status == 201 and not self.skip_calendar_mutation:
+            self.collections[segment] = True
+        return CalDavWriteResponse(status)
+
+    async def delete_calendar(self, home_ref: str, collection_ref: str) -> CalDavWriteResponse:
+        self.write_calls.append(("DELETE_CALENDAR", collection_ref, None, None))
+        status = self.next_status or 204
+        self.next_status = None
+        if status == 204 and not self.skip_calendar_mutation:
+            self.collections.pop(collection_ref.rstrip("/").rsplit("/", 1)[-1], None)
+        return CalDavWriteResponse(status)
+
+
+class ICloudWriteFoundationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.transport = WriteFixtureCalDavTransport()
+        self.provider = ICloudCalDavProvider(transport=self.transport, account_name="synthetic@example.invalid")
+        await self.provider.discover_account()
+        self.calendars = await self.provider.list_calendars()
+        self.draft = ICloudEventDraft(
+            title="Synthetic title", all_day=False, timezone="Europe/Moscow",
+            start_at_utc="2026-08-17T07:00:00Z", end_at_utc="2026-08-17T08:00:00Z",
+            notes="Synthetic notes", location="Synthetic room",
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.provider.close()
+
+    async def test_event_create_update_delete_and_confirmed_readbacks(self) -> None:
+        calendar = self.calendars[0]
+        result = await self.provider.create_event(calendar.provider_calendar_id, self.draft)
+        self.assertEqual(result.etag, '"created"')
+        self.assertEqual(result.event.title, "Synthetic title")
+        self.assertTrue(result.event.resource_ref.endswith(".ics"))
+        self.assertEqual([call[0] for call in self.transport.write_calls], ["PUT_NEW", "GET"])
+        updated = await self.provider.update_event(result.event.provider_event_id, etag=result.etag,
+                                                   draft=self.draft)
+        self.assertEqual(updated.etag, '"updated"')
+        self.assertEqual([call[0] for call in self.transport.write_calls[-3:]], ["GET", "PUT_MATCH", "GET"])
+        self.assertEqual(self.transport.write_calls[-2][2], '"created"')
+        await self.provider.delete_event(updated.event.provider_event_id, etag=updated.etag)
+        self.assertEqual([call[0] for call in self.transport.write_calls[-3:]], ["GET", "DELETE_MATCH", "GET"])
+        self.assertEqual(self.transport.write_calls[-2][2], '"updated"')
+
+    async def test_all_day_create_and_bounded_payload(self) -> None:
+        draft = ICloudEventDraft(title="All day", all_day=True, timezone="Europe/Moscow",
+                                 start_date="2026-08-18", end_date_exclusive="2026-08-20")
+        result = await self.provider.create_event(self.calendars[0].provider_calendar_id, draft)
+        self.assertTrue(result.event.all_day)
+        body = self.transport.write_calls[0][3]
+        self.assertIn(b"DTSTART;VALUE=DATE:20260818", body)
+        self.assertNotIn(b"ATTENDEE", body)
+        self.assertNotIn(b"RRULE", body)
+
+    async def test_event_conflicts_read_only_and_recurrence(self) -> None:
+        with self.assertRaises(ProviderFetchError) as raw_url:
+            await self.provider.create_event(self.calendars[0].fetch_ref, self.draft)
+        self.assertEqual(raw_url.exception.code, ProviderFailureCode.NOT_FOUND.value)
+        with self.assertRaises(ProviderFetchError) as readonly:
+            await self.provider.create_event(self.calendars[1].provider_calendar_id, self.draft)
+        self.assertEqual(readonly.exception.code, ProviderFailureCode.WRITE_FORBIDDEN.value)
+        self.assertEqual(self.transport.write_calls, [])
+        events = await self.provider.fetch_events(self.calendars[0], WINDOW)
+        recurring = next(item for item in events if item.recurrence_instance_key != "base")
+        with self.assertRaises(ProviderFetchError) as unsupported:
+            await self.provider.delete_event(recurring.provider_event_id, etag='"etag-4"')
+        self.assertEqual(unsupported.exception.code, ProviderFailureCode.EVENT_WRITE_UNSUPPORTED.value)
+        simple = next(item for item in events if item.write_safe)
+        with self.assertRaises(ProviderFetchError) as stale:
+            await self.provider.update_event(simple.provider_event_id, etag='"stale"', draft=self.draft)
+        self.assertEqual(stale.exception.code, ProviderFailureCode.ETAG_CONFLICT.value)
+        self.transport.next_status = 412
+        with self.assertRaises(ProviderFetchError) as update_conflict:
+            await self.provider.update_event(simple.provider_event_id, etag=simple.provider_etag,
+                                             draft=self.draft)
+        self.assertEqual(update_conflict.exception.code, ProviderFailureCode.ETAG_CONFLICT.value)
+        self.transport.next_status = 412
+        with self.assertRaises(ProviderFetchError) as provider_conflict:
+            await self.provider.delete_event(simple.provider_event_id, etag=simple.provider_etag)
+        self.assertEqual(provider_conflict.exception.code, ProviderFailureCode.ETAG_CONFLICT.value)
+
+    async def test_delete_requires_verified_absence_and_accepts_410(self) -> None:
+        first = await self.provider.create_event(self.calendars[0].provider_calendar_id, self.draft)
+        self.transport.absence_status = 410
+        await self.provider.delete_event(first.event.provider_event_id, etag=first.etag)
+        second = await self.provider.create_event(self.calendars[0].provider_calendar_id, self.draft)
+        self.transport.absence_status = 200
+        with self.assertRaises(ProviderFetchError) as uncertain:
+            await self.provider.delete_event(second.event.provider_event_id, etag=second.etag)
+        self.assertEqual(uncertain.exception.code, ProviderFailureCode.READBACK_UNCERTAIN.value)
+
+    async def test_provider_added_unsupported_fields_remain_read_only(self) -> None:
+        created = await self.provider.create_event(self.calendars[0].provider_calendar_id, self.draft)
+        ref = created.event.resource_ref
+        assert ref is not None
+        original, etag = self.transport.resources[ref]
+        self.transport.resources[ref] = (original.replace(b"END:VEVENT", b"STATUS:TENTATIVE\r\nEND:VEVENT"), etag)
+        # The create readback can still report the created event, while a
+        # subsequent full-representation update refuses to discard the extra field.
+        with self.assertRaises(ProviderFetchError) as unsupported:
+            await self.provider.update_event(created.event.provider_event_id, etag=created.etag, draft=self.draft)
+        self.assertEqual(unsupported.exception.code, ProviderFailureCode.EVENT_WRITE_UNSUPPORTED.value)
+
+    async def test_write_failure_categories_and_uncertain_readback(self) -> None:
+        cases = {401: ProviderFailureCode.AUTHENTICATION_FAILED,
+                 403: ProviderFailureCode.WRITE_FORBIDDEN,
+                 409: ProviderFailureCode.ETAG_CONFLICT,
+                 412: ProviderFailureCode.ETAG_CONFLICT,
+                 429: ProviderFailureCode.RATE_LIMITED,
+                 503: ProviderFailureCode.SERVER_FAILURE,
+                 202: ProviderFailureCode.WRITE_STATUS_UNEXPECTED}
+        for status, code in cases.items():
+            self.transport.next_status = status
+            with self.subTest(status=status), self.assertRaises(ProviderAdapterError) as raised:
+                await self.provider.create_event(self.calendars[0].provider_calendar_id, self.draft)
+            self.assertEqual(raised.exception.code, code.value)
+        self.transport.readback_override = CalDavWriteResponse(200, None, b"broken")
+        with self.assertRaises(ProviderFetchError) as uncertain:
+            await self.provider.create_event(self.calendars[0].provider_calendar_id, self.draft)
+        self.assertEqual(uncertain.exception.code, ProviderFailureCode.READBACK_UNCERTAIN.value)
+        self.transport.readback_override = CalDavWriteResponse(200, '"etag"', b"broken")
+        with self.assertRaises(ProviderPayloadError) as malformed:
+            await self.provider.create_event(self.calendars[0].provider_calendar_id, self.draft)
+        self.assertEqual(malformed.exception.code, ProviderFailureCode.PAYLOAD_INVALID.value)
+
+    async def test_calendar_create_delete_uses_url_identity_not_display_name(self) -> None:
+        created = await self.provider.create_calendar("Same name", color="#123456")
+        self.assertNotEqual(created.provider_calendar_id, self.calendars[0].provider_calendar_id)
+        self.assertEqual(created.display_name, self.calendars[0].display_name)
+        request = self.transport.write_calls[0]
+        self.assertEqual(request[0], "MKCALENDAR")
+        self.assertRegex(request[2], r"^[0-9a-f]{32}$")
+        self.assertIn(b'<c:comp name="VEVENT"/>', request[3])
+        await self.provider.delete_calendar(created.provider_calendar_id)
+        self.assertNotIn(created.provider_calendar_id,
+                         {item.provider_calendar_id for item in await self.provider.list_calendars()})
+        with self.assertRaises(ProviderFetchError) as readonly:
+            await self.provider.delete_calendar(self.calendars[1].provider_calendar_id)
+        self.assertEqual(readonly.exception.code, ProviderFailureCode.WRITE_FORBIDDEN.value)
+
+    async def test_calendar_provider_restriction_and_rediscovery_uncertainty(self) -> None:
+        self.transport.next_status = 403
+        with self.assertRaises(ProviderFetchError) as forbidden:
+            await self.provider.create_calendar("Blocked")
+        self.assertEqual(forbidden.exception.code, ProviderFailureCode.WRITE_FORBIDDEN.value)
+        self.transport.skip_calendar_mutation = True
+        with self.assertRaises(ProviderFetchError) as missing:
+            await self.provider.create_calendar("Absent")
+        self.assertEqual(missing.exception.code, ProviderFailureCode.READBACK_UNCERTAIN.value)
+        self.transport.skip_calendar_mutation = False
+        created = await self.provider.create_calendar("To delete")
+        self.transport.skip_calendar_mutation = True
+        with self.assertRaises(ProviderFetchError) as remains:
+            await self.provider.delete_calendar(created.provider_calendar_id)
+        self.assertEqual(remains.exception.code, ProviderFailureCode.READBACK_UNCERTAIN.value)
+
+    async def test_cache_write_metadata_stays_internal(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            database = PlanningDatabase(Path(folder) / "planning.sqlite3")
+            cache = ProviderCalendarCache(database, provider=self.provider, provider_name="icloud",
+                                          account_id=self.provider.account_id_for("synthetic@example.invalid"),
+                                          display_label="iCloud", enabled=True, configured=True, now_fn=lambda: NOW)
+            result = await cache.refresh(WINDOW)
+            self.assertEqual(result.status, "current")
+            row = database.connection.execute("SELECT collection_ref, can_read, can_write FROM provider_calendars "
+                                              "WHERE provider_calendar_id = ?", (self.calendars[0].provider_calendar_id,)).fetchone()
+            self.assertEqual(tuple(row)[1:], (1, 1))
+            event_row = database.connection.execute("SELECT provider_etag, write_safe FROM provider_event_cache "
+                                                    "WHERE write_safe = 1 LIMIT 1").fetchone()
+            self.assertIsNotNone(event_row)
+            self.assertTrue(str(event_row["provider_etag"]).startswith('"etag-'))
+            projection = str(cache.source_metadata())
+            self.assertNotIn("collection_ref", projection)
+            self.assertNotIn("provider_etag", projection)
+            self.assertNotIn("https://fixture.invalid", projection)
+            self.assertNotIn('"etag-', projection)
+            database.close()
+
+
+class ICloudWriteTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fixed_methods_and_headers(self) -> None:
+        session = _ScriptedSession(_FakeResponse(201), _FakeResponse(204), _FakeResponse(204),
+                                   _FakeResponse(404), _FakeResponse(201), _FakeResponse(204))
+        transport = AiohttpCalDavTransport(bootstrap_url="https://fixture.invalid/home/", username="synthetic",
+                                           password="synthetic-secret", session=session)  # type: ignore[arg-type]
+        home = "https://fixture.invalid/home/"
+        collection = home + "one/"
+        resource = collection + "event.ics"
+        draft = ICloudEventDraft(title="Synthetic", all_day=True, timezone="Europe/Moscow",
+                                 start_date="2026-08-18", end_date_exclusive="2026-08-19")
+        await transport.create_event(collection, "a" * 32 + ".ics", "uid-synthetic", draft)
+        await transport.update_event(collection, resource, "uid-synthetic", draft, '"etag"')
+        await transport.delete_event(collection, resource, '"etag"')
+        await transport.get_event(collection, resource)
+        await transport.create_calendar(home, "b" * 32, "Synthetic", None)
+        await transport.delete_calendar(home, collection)
+        self.assertEqual([call[0] for call in session.calls],
+                         ["PUT", "PUT", "DELETE", "GET", "MKCALENDAR", "DELETE"])
+        self.assertEqual(session.calls[0][2]["headers"]["If-None-Match"], "*")
+        self.assertEqual(session.calls[1][2]["headers"]["If-Match"], '"etag"')
+        self.assertEqual(session.calls[2][2]["headers"]["If-Match"], '"etag"')
+        self.assertEqual(session.calls[0][2]["headers"]["Content-Type"], "text/calendar; charset=utf-8")
+        with self.assertRaises(ProviderFetchError):
+            await transport._write_request("PATCH", resource, body=b"", headers={})
+        with self.assertRaises(ProviderFetchError):
+            await transport.create_event(collection, "../../private", "uid-synthetic", draft)
+        with self.assertRaises(ProviderFetchError):
+            await transport.update_event(collection, "https://evil.invalid/event.ics", "uid-synthetic", draft, '"etag"')
+        with self.assertRaises(ProviderFetchError):
+            await transport.delete_event(collection, collection + "encoded%2Fpath.ics", '"etag"')
+
+    async def test_timeout_redirect_and_safe_error_rendering(self) -> None:
+        private = "https://fixture.invalid/private/event.ics"
+        session = _ScriptedSession(asyncio.TimeoutError("SECRET body URL"))
+        transport = AiohttpCalDavTransport(bootstrap_url="https://fixture.invalid/home/", username="secret-user",
+                                           password="secret-pass", session=session)  # type: ignore[arg-type]
+        with self.assertRaises(ProviderTimeoutError) as timeout:
+            await transport.create_event("https://fixture.invalid/home/one/", "a" * 32 + ".ics",
+                                         "uid-synthetic", ICloudEventDraft(
+                                             title="Synthetic", all_day=True, timezone="Europe/Moscow",
+                                             start_date="2026-08-18", end_date_exclusive="2026-08-19"))
+        self.assertEqual(timeout.exception.code, ProviderFailureCode.TIMEOUT.value)
+        for secret in (private, "SECRET body URL", "secret-user", "secret-pass"):
+            self.assertNotIn(secret, str(timeout.exception))
+        redirected = AiohttpCalDavTransport(
+            bootstrap_url="https://fixture.invalid/home/", username="synthetic", password="secret",
+            session=_ScriptedSession(_FakeResponse(307, headers={"Location": "https://evil.invalid/x"})),
+        )
+        with self.assertRaises(ProviderFetchError) as untrusted:
+            await redirected.create_event("https://fixture.invalid/home/one/", "a" * 32 + ".ics",
+                                          "uid-synthetic", ICloudEventDraft(
+                                              title="Synthetic", all_day=True, timezone="Europe/Moscow",
+                                              start_date="2026-08-18", end_date_exclusive="2026-08-19"))
+        self.assertEqual(untrusted.exception.code, ProviderFailureCode.REDIRECT_UNTRUSTED.value)
 
 
 if __name__ == "__main__":

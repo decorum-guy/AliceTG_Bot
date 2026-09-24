@@ -393,8 +393,9 @@ class ProviderCalendarCache:
             """
             INSERT INTO provider_calendars(
                 provider_calendar_id, source_id, display_name, color, enabled, status,
-                last_successful_sync_at, observed_at, last_error_code, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'current', ?, ?, NULL, ?)
+                last_successful_sync_at, observed_at, last_error_code, updated_at,
+                collection_ref, can_read, can_write
+            ) VALUES (?, ?, ?, ?, ?, 'current', ?, ?, NULL, ?, ?, ?, ?)
             ON CONFLICT(provider_calendar_id) DO UPDATE SET
                 source_id = excluded.source_id,
                 display_name = excluded.display_name,
@@ -404,7 +405,10 @@ class ProviderCalendarCache:
                 last_successful_sync_at = excluded.last_successful_sync_at,
                 observed_at = excluded.observed_at,
                 last_error_code = NULL,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                collection_ref = excluded.collection_ref,
+                can_read = excluded.can_read,
+                can_write = excluded.can_write
             """,
             (
                 calendar.provider_calendar_id,
@@ -415,6 +419,9 @@ class ProviderCalendarCache:
                 observed_at,
                 observed_at,
                 observed_at,
+                calendar.fetch_ref,
+                None if calendar.can_read is None else int(calendar.can_read),
+                None if calendar.can_write is None else int(calendar.can_write),
             ),
         )
 
@@ -541,8 +548,8 @@ class ProviderCalendarCache:
                 canonical_event_id, source_id, provider_calendar_id, provider_event_id,
                 identity_key, recurrence_instance_key, resource_ref, window_start_utc,
                 window_end_utc, last_seen_refresh, last_seen_at, created_at, updated_at,
-                missing_successes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                missing_successes, provider_etag, write_safe
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(source_id, identity_key) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
                 provider_calendar_id = excluded.provider_calendar_id,
@@ -554,7 +561,9 @@ class ProviderCalendarCache:
                 last_seen_refresh = excluded.last_seen_refresh,
                 last_seen_at = excluded.last_seen_at,
                 updated_at = excluded.updated_at,
-                missing_successes = 0
+                missing_successes = 0,
+                provider_etag = excluded.provider_etag,
+                write_safe = excluded.write_safe
             """,
             (
                 canonical_id,
@@ -570,6 +579,8 @@ class ProviderCalendarCache:
                 observed_at,
                 observed_at,
                 observed_at,
+                event.provider_etag,
+                int(event.write_safe),
             ),
         )
 

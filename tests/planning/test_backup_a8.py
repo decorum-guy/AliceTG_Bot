@@ -181,7 +181,7 @@ class PlanningBackupA8Tests(unittest.TestCase):
             _decrypt_file(package, payload, bytes.fromhex(KEY))
             with zipfile.ZipFile(payload) as archive:
                 manifest = json.loads(archive.read("manifest.json"))
-            self.assertEqual(manifest["schema_version"], 7)
+            self.assertEqual(manifest["schema_version"], 8)
             self.assertEqual(manifest["table_counts"]["reminder_delivery_preferences"], 1)
 
         restored_path = self._extract_database(package)
@@ -200,7 +200,7 @@ class PlanningBackupA8Tests(unittest.TestCase):
             restored.close()
 
         verified = self.verifier().verify(package.name)
-        self.assertEqual(verified.verified_schema_version, 7)
+        self.assertEqual(verified.verified_schema_version, 8)
         self.assertEqual(verified.table_counts["reminder_delivery_preferences"], 1)
 
     def test_restore_rejects_arbitrary_unknown_tables_after_schema_v7_allowlist_extension(self) -> None:
