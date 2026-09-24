@@ -243,15 +243,19 @@ Unsafe recurring occurrences, enriched representations, read-only calendars,
 closed gates, and unavailable providers are not advertised as writable.
 
 Provider writes do not use the legacy `_mutate()` transaction. The remote-safe
-sequence is: local preflight; durable idempotency claim and commit; one typed
-provider mutation; authoritative readback/absence confirmation; targeted
-cache reconciliation; then one final SQLite transaction storing canonical
-state and the exact response. A claim whose response is still `NULL` returns
-bounded `idempotency_in_progress` with `mutationState=uncertain` and never
-repeats the remote write. Definitive provider rejections are stored for exact
-replay. A timeout, dropped connection, failed readback, or reconciliation
-failure is `provider_mutation_uncertain` with `retryable=false`; clients must
-refresh authoritative state and must not automatically repeat the mutation.
+sequence is: compute the request hash; read existing idempotency state and
+return an exact replay or bounded in-progress result before mutable preflight;
+run local preflight only for a missing row; durably claim and commit the key;
+repeat the claim as the race-close immediately before one typed provider
+mutation; require authoritative readback/absence confirmation; reconcile the
+cache; then use one final SQLite transaction to store canonical state and the
+exact response. A claim whose response is still `NULL` returns bounded
+`idempotency_in_progress` with `mutationState=uncertain` and never repeats the
+remote write. Failed new-request preflight creates no idempotency row.
+Definitive provider rejections are stored for exact replay. A timeout, dropped
+connection, failed readback, or reconciliation failure is
+`provider_mutation_uncertain` with `retryable=false`; clients must refresh
+authoritative state and must not automatically repeat the mutation.
 
 The cache has provider-owned targeted reconciliation for confirmed event
 create/update/delete and calendar create/delete. It preserves canonical UUIDs

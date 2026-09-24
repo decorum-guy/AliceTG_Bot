@@ -1318,6 +1318,36 @@ class PlanningRepository:
             )
             return updated
 
+    def lookup_idempotency(self, *, audience: str, key: str, request_hash: str) -> IdempotencyClaim | None:
+        """Read an idempotency row without opening or requiring a transaction."""
+
+        if audience not in AUDIENCES:
+            raise PlanningValidationError("idempotency.audience has an invalid enum")
+        validate_text(audience, "idempotency.audience", max_length=64)
+        validate_text(key, "idempotency.key", max_length=256)
+        validate_request_hash(request_hash)
+        row = self.connection.execute(
+            """
+            SELECT request_hash, response_json, response_status, correlation_id
+            FROM idempotency_keys
+            WHERE audience = ? AND key = ?
+            """,
+            (audience, key),
+        ).fetchone()
+        if row is None:
+            return None
+        if str(row["request_hash"]) != request_hash:
+            raise PlanningIdempotencyConflictError(audience, key)
+        return IdempotencyClaim(
+            audience=audience,
+            key=key,
+            request_hash=request_hash,
+            is_new=False,
+            response_json=row["response_json"],
+            response_status=row["response_status"],
+            correlation_id=row["correlation_id"],
+        )
+
     def claim_idempotency(self, *, audience: str, key: str, request_hash: str) -> IdempotencyClaim:
         """Claim a key inside the caller's transaction before mutating domain state."""
 
@@ -1343,23 +1373,14 @@ class PlanningRepository:
         )
         if cursor.rowcount == 1:
             return IdempotencyClaim(audience, key, request_hash, True, None, None, None)
-        row = self.connection.execute(
-            "SELECT request_hash, response_json, response_status, correlation_id FROM idempotency_keys WHERE audience = ? AND key = ?",
-            (audience, key),
-        ).fetchone()
-        if row is None:
-            raise PlanningNotFoundError("idempotency claim disappeared during transaction")
-        if str(row["request_hash"]) != request_hash:
-            raise PlanningIdempotencyConflictError(audience, key)
-        return IdempotencyClaim(
+        claim = self.lookup_idempotency(
             audience=audience,
             key=key,
             request_hash=request_hash,
-            is_new=False,
-            response_json=row["response_json"],
-            response_status=row["response_status"],
-            correlation_id=row["correlation_id"],
         )
+        if claim is None:
+            raise PlanningNotFoundError("idempotency claim disappeared during transaction")
+        return claim
 
     def store_idempotency_response(
         self,

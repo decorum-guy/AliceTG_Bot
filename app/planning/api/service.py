@@ -561,11 +561,6 @@ class PlanningApiService:
         key: str,
         payload: Mapping[str, Any],
     ) -> StoredMutationResponse:
-        self._require_provider_write_gate()
-        cache = self._require_provider_cache()
-        calendar_id = str(payload["calendar_id"])
-        self._require_writable_destination(cache, calendar_id)
-        draft = self._provider_event_draft(payload)
         route_key = "POST /provider-events"
         request_hash = self._request_hash(
             auth=auth,
@@ -574,6 +569,14 @@ class PlanningApiService:
             body=payload,
             expected_version=None,
         )
+        replay = self._lookup_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
+        if replay is not None:
+            return replay
+        self._require_provider_write_gate()
+        cache = self._require_provider_cache()
+        calendar_id = str(payload["calendar_id"])
+        self._require_writable_destination(cache, calendar_id)
+        draft = self._provider_event_draft(payload)
         replay = self._claim_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
         if replay is not None:
             return replay
@@ -630,14 +633,6 @@ class PlanningApiService:
         expected_version: int,
         payload: Mapping[str, Any],
     ) -> StoredMutationResponse:
-        self._require_provider_write_gate()
-        cache = self._require_provider_cache()
-        current, metadata = self._provider_event_preflight(
-            cache,
-            event_id=event_id,
-            expected_version=expected_version,
-        )
-        draft = self._provider_event_draft(self._merge_provider_event_payload(current, payload))
         route_key = "PATCH /provider-events/{id}"
         request_hash = self._request_hash(
             auth=auth,
@@ -646,6 +641,17 @@ class PlanningApiService:
             body=payload,
             expected_version=expected_version,
         )
+        replay = self._lookup_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
+        if replay is not None:
+            return replay
+        self._require_provider_write_gate()
+        cache = self._require_provider_cache()
+        current, metadata = self._provider_event_preflight(
+            cache,
+            event_id=event_id,
+            expected_version=expected_version,
+        )
+        draft = self._provider_event_draft(self._merge_provider_event_payload(current, payload))
         replay = self._claim_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
         if replay is not None:
             return replay
@@ -709,19 +715,22 @@ class PlanningApiService:
         event_id: str,
         expected_version: int,
     ) -> StoredMutationResponse:
-        self._require_provider_write_gate()
-        cache = self._require_provider_cache()
-        _, metadata = self._provider_event_preflight(
-            cache,
-            event_id=event_id,
-            expected_version=expected_version,
-        )
         route_key = "DELETE /provider-events/{id}"
         request_hash = self._request_hash(
             auth=auth,
             route_key=route_key,
             object_id=event_id,
             body={},
+            expected_version=expected_version,
+        )
+        replay = self._lookup_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
+        if replay is not None:
+            return replay
+        self._require_provider_write_gate()
+        cache = self._require_provider_cache()
+        _, metadata = self._provider_event_preflight(
+            cache,
+            event_id=event_id,
             expected_version=expected_version,
         )
         replay = self._claim_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
@@ -781,10 +790,6 @@ class PlanningApiService:
         key: str,
         payload: Mapping[str, Any],
     ) -> StoredMutationResponse:
-        self._require_provider_write_gate()
-        cache = self._require_provider_cache()
-        if not self._provider_can_attempt():
-            raise self._provider_not_configured_error()
         route_key = "POST /provider-calendars"
         request_hash = self._request_hash(
             auth=auth,
@@ -793,6 +798,13 @@ class PlanningApiService:
             body=payload,
             expected_version=None,
         )
+        replay = self._lookup_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
+        if replay is not None:
+            return replay
+        self._require_provider_write_gate()
+        cache = self._require_provider_cache()
+        if not self._provider_can_attempt():
+            raise self._provider_not_configured_error()
         replay = self._claim_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
         if replay is not None:
             return replay
@@ -857,9 +869,6 @@ class PlanningApiService:
         key: str,
         calendar_id: str,
     ) -> StoredMutationResponse:
-        self._require_provider_write_gate()
-        cache = self._require_provider_cache()
-        self._require_writable_destination(cache, calendar_id)
         route_key = "DELETE /provider-calendars/{id}"
         request_hash = self._request_hash(
             auth=auth,
@@ -868,6 +877,12 @@ class PlanningApiService:
             body={},
             expected_version=None,
         )
+        replay = self._lookup_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
+        if replay is not None:
+            return replay
+        self._require_provider_write_gate()
+        cache = self._require_provider_cache()
+        self._require_writable_destination(cache, calendar_id)
         replay = self._claim_provider_idempotency(auth=auth, key=key, request_hash=request_hash)
         if replay is not None:
             return replay
@@ -1156,6 +1171,37 @@ class PlanningApiService:
             "writesEnabled": self.icloud_writes_enabled,
             "canCreateCalendar": bool(self.icloud_writes_enabled and self._provider_can_attempt()),
         }
+
+    def _lookup_provider_idempotency(
+        self,
+        *,
+        auth: AuthenticatedPlanningContext,
+        key: str,
+        request_hash: str,
+    ) -> StoredMutationResponse | None:
+        """Replay an existing provider mutation before mutable preflight."""
+
+        claim = self.repository.lookup_idempotency(
+            audience=auth.audience,
+            key=key,
+            request_hash=request_hash,
+        )
+        if claim is None:
+            return None
+        if claim.is_replay:
+            assert claim.response_json is not None
+            return StoredMutationResponse(
+                response_json=claim.response_json,
+                status=claim.response_status or 200,
+                replay=True,
+            )
+        raise PlanningApiError(
+            code="idempotency_in_progress",
+            message="The provider mutation has no confirmed stored result; refresh before retrying.",
+            status=409,
+            details={"mutationState": "uncertain"},
+            retryable=False,
+        )
 
     def _claim_provider_idempotency(
         self,

@@ -289,16 +289,19 @@ events are read-only.
 
 Remote idempotency is deliberately outside the legacy `_mutate()` wrapper:
 
-1. authenticate, validate, check gate/capability/version and resolve cache state;
-2. claim the existing idempotency row and commit that claim;
-3. perform at most one typed remote mutation;
-4. require authoritative readback or verified absence;
-5. reconcile the confirmed result in the provider cache; and
-6. commit canonical state plus the exact API response in one final SQLite transaction.
+1. authenticate, validate and compute the request hash;
+2. read existing idempotency state and immediately return an exact replay or bounded in-progress result;
+3. for a missing row only, check the gate/capability/version and resolve cache state;
+4. claim the existing idempotency row transactionally immediately before provider I/O, closing the concurrent race;
+5. perform at most one typed remote mutation;
+6. require authoritative readback or verified absence;
+7. reconcile the confirmed result in the provider cache; and
+8. commit canonical state plus the exact API response in one final SQLite transaction.
 
 A durable claim with `response_json=NULL` returns bounded
 `idempotency_in_progress` with `mutationState=uncertain` and never repeats the
-remote request. Definitive provider refusal is stored as a bounded error for
+remote request. A new request that fails local preflight does not create an
+idempotency row. Definitive provider refusal is stored as a bounded error for
 exact replay. A timeout, dropped connection, failed readback or failed final
 reconciliation is `provider_mutation_uncertain`, `mutationState=uncertain`,
 and `retryable=false`; callers must refresh rather than automatically retry.

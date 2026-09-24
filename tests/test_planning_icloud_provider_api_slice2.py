@@ -238,6 +238,27 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_bytes, await replay.read())
         self.assertEqual([call[0] for call in self.transport.write_calls].count("PUT_NEW"), 1)
 
+        self.service.icloud_writes_enabled = False
+        replay_after_gate_change = await self._request(
+            "POST",
+            f"{PLANNING_PREFIX}/provider-events",
+            headers={"Idempotency-Key": "create-event"},
+            json_body=body,
+        )
+        self.assertEqual(replay_after_gate_change.status, 200)
+        self.assertEqual(first_bytes, await replay_after_gate_change.read())
+        different_request = dict(body)
+        different_request["title"] = "different request"
+        conflict = await self._request(
+            "POST",
+            f"{PLANNING_PREFIX}/provider-events",
+            headers={"Idempotency-Key": "create-event"},
+            json_body=different_request,
+        )
+        self.assertEqual(conflict.status, 409)
+        self.assertEqual((await conflict.json())["error"]["code"], "idempotency_conflict")
+        self.service.icloud_writes_enabled = True
+
         all_day, _ = await self._create_event(key="create-all-day", calendar_id=calendar_id, all_day=True)
         self.assertEqual(all_day.status, 200)
         all_day_event = (await all_day.json())["object"]
@@ -252,19 +273,32 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
         event_id = created_event["id"]
         provider_puts_before = len([call for call in self.transport.write_calls if call[0] == "PUT_MATCH"])
 
+        update_body = {"title": "Updated title", "notes": "Updated notes", "location": "Updated room"}
         updated = await self._request(
             "PATCH",
             f"{PLANNING_PREFIX}/provider-events/{event_id}",
             headers={"Idempotency-Key": "update-event", "If-Match": "1"},
-            json_body={"title": "Updated title", "notes": "Updated notes", "location": "Updated room"},
+            json_body=update_body,
         )
+        updated_bytes = await updated.read()
         self.assertEqual(updated.status, 200)
-        updated_event = (await updated.json())["object"]
+        updated_payload = json.loads(updated_bytes)
+        updated_event = updated_payload["object"]
         self.assertEqual(updated_event["id"], event_id)
         self.assertEqual(updated_event["version"], 2)
         self.assertEqual(updated_event["title"], "Updated title")
         self.assertEqual(updated_event["notes"], "Updated notes")
         self.assertEqual(updated_event["location"], "Updated room")
+        self.assertEqual(len([call for call in self.transport.write_calls if call[0] == "PUT_MATCH"]), provider_puts_before + 1)
+
+        exact_replay = await self._request(
+            "PATCH",
+            f"{PLANNING_PREFIX}/provider-events/{event_id}",
+            headers={"Idempotency-Key": "update-event", "If-Match": "1"},
+            json_body=update_body,
+        )
+        self.assertEqual(exact_replay.status, 200)
+        self.assertEqual(updated_bytes, await exact_replay.read())
         self.assertEqual(len([call for call in self.transport.write_calls if call[0] == "PUT_MATCH"]), provider_puts_before + 1)
 
         stale = await self._request(
@@ -275,6 +309,13 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(stale.status, 409)
         self.assertEqual((await stale.json())["error"]["code"], "version_conflict")
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM idempotency_keys WHERE audience = 'panel-agent' AND key = ?",
+                ("update-stale",),
+            ).fetchone()[0],
+            0,
+        )
         self.assertEqual(len([call for call in self.transport.write_calls if call[0] == "PUT_MATCH"]), provider_puts_before + 1)
 
         self.transport.next_status = 412
@@ -297,11 +338,20 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
             f"{PLANNING_PREFIX}/provider-events/{event_id}",
             headers={"Idempotency-Key": "delete-event", "If-Match": "1"},
         )
+        deleted_bytes = await deleted.read()
         self.assertEqual(deleted.status, 200)
-        tombstone = (await deleted.json())["object"]
+        tombstone = json.loads(deleted_bytes)["object"]
         self.assertEqual(tombstone["id"], event_id)
         self.assertIsNotNone(tombstone["deleted_at"])
         self.assertEqual(tombstone["version"], 2)
+        exact_replay = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/provider-events/{event_id}",
+            headers={"Idempotency-Key": "delete-event", "If-Match": "1"},
+        )
+        self.assertEqual(exact_replay.status, 200)
+        self.assertEqual(deleted_bytes, await exact_replay.read())
+        self.assertEqual([call[0] for call in self.transport.write_calls].count("DELETE_MATCH"), 1)
         readback = await self._request("GET", f"{PLANNING_PREFIX}/events/{event_id}")
         self.assertEqual(readback.status, 200)
         self.assertIsNotNone((await readback.json())["object"]["deleted_at"])
@@ -372,6 +422,7 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
                 request_hash=request_hash,
             )
         self.assertTrue(claim.is_new)
+        self.service.icloud_writes_enabled = False
         before = len([call for call in self.transport.write_calls if call[0] == "PUT_NEW"])
         in_progress = await self._request(
             "POST",
@@ -384,6 +435,24 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(in_progress_payload["error"]["code"], "idempotency_in_progress")
         self.assertFalse(in_progress_payload["error"]["retryable"])
         self.assertEqual(len([call for call in self.transport.write_calls if call[0] == "PUT_NEW"]), before)
+        self.service.icloud_writes_enabled = True
+
+    async def test_failed_new_preflight_does_not_poison_idempotency_key(self) -> None:
+        calendar_id, _ = self._calendar_ids()
+        self.service.icloud_writes_enabled = False
+        rejected, body = await self._create_event(key="preflight-no-claim", calendar_id=calendar_id)
+        self.assertEqual(rejected.status, 503)
+        self.assertEqual(
+            self.database.connection.execute(
+                "SELECT COUNT(*) FROM idempotency_keys WHERE audience = 'panel-agent' AND key = ?",
+                ("preflight-no-claim",),
+            ).fetchone()[0],
+            0,
+        )
+        self.service.icloud_writes_enabled = True
+        recovered, _ = await self._create_event(key="preflight-no-claim", calendar_id=calendar_id)
+        self.assertEqual(recovered.status, 200)
+        self.assertEqual((await recovered.json())["object"]["title"], body["title"])
 
     async def test_uncertain_provider_outcome_is_stable_and_not_replayed(self) -> None:
         calendar_id, _ = self._calendar_ids()
@@ -422,7 +491,16 @@ class PlanningICloudProviderApiSlice2Tests(unittest.IsolatedAsyncioTestCase):
             headers={"Idempotency-Key": "delete-calendar"},
         )
         self.assertEqual(delete.status, 200)
-        self.assertTrue((await delete.json())["deleted"])
+        delete_response_bytes = await delete.read()
+        self.assertTrue(json.loads(delete_response_bytes)["deleted"])
+        delete_bytes = await self._request(
+            "DELETE",
+            f"{PLANNING_PREFIX}/provider-calendars/{calendar_id}",
+            headers={"Idempotency-Key": "delete-calendar"},
+        )
+        self.assertEqual(delete_bytes.status, 200)
+        self.assertEqual((await delete_bytes.read()), delete_response_bytes)
+        self.assertEqual([call[0] for call in self.transport.write_calls].count("DELETE_CALENDAR"), 1)
         after = await self._request("GET", f"{PLANNING_PREFIX}/calendar-destinations")
         self.assertNotIn(calendar_id, {item["id"] for item in (await after.json())["items"]})
 
