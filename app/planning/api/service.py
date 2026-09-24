@@ -540,14 +540,17 @@ class PlanningApiService:
 
     def list_calendar_destinations(self, *, correlation_id: str) -> dict[str, Any]:
         cache = self._require_provider_cache()
-        items = cache.calendar_destinations(writes_enabled=self.icloud_writes_enabled)
+        provider_writes_available = bool(
+            self.icloud_writes_enabled and self._provider_can_attempt(cache=cache)
+        )
+        items = cache.calendar_destinations(writes_enabled=provider_writes_available)
         return {
             "schemaVersion": "planning.v1",
             "kind": "calendar_destinations",
             "domain": "calendar_destination",
             "items": items,
             "capabilities": {
-                "canCreateCalendar": self._provider_can_attempt(),
+                "canCreateCalendar": provider_writes_available,
             },
             "generatedAt": self.envelopes.now(),
             **self.envelopes.freshness(),
