@@ -121,6 +121,7 @@ class Settings:
     yandex_dialog_skill_name: str = "домашний помощник"
     bedroom_player_entity: str = "media_player.stantsiia_mini_spalnia"
     living_room_player_entity: str = "media_player.stantsiia_mini_zal"
+    station_player_entity: str = "media_player.stantsiia_mini_zal"
     coffee_sensors: dict[str, str] = field(default_factory=lambda: COFFEE_SENSORS.copy())
 
     @property
@@ -262,6 +263,9 @@ class Settings:
             internal_webhook_secret=_required("INTERNAL_WEBHOOK_SECRET"),
             shortcuts_secret_token=os.getenv("SHORTCUTS_SECRET_TOKEN", "").strip(),
             control_center_api_token=os.getenv("CONTROL_CENTER_API_TOKEN", "").strip(),
+            station_player_entity=os.getenv("STATION_PLAYER_ENTITY", "").strip()
+            or os.getenv("LIVING_ROOM_PLAYER_ENTITY", "").strip()
+            or "media_player.stantsiia_mini_zal",
             app_version=os.getenv("APP_VERSION", "unknown").strip() or "unknown",
             app_commit=os.getenv("APP_COMMIT", "unknown").strip() or "unknown",
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()
