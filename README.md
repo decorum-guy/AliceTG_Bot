@@ -30,6 +30,7 @@ Main menu:
 
 - `Кофемашина`
 - `Чайник`
+- `🔊 Станция Mini 2` (seven fixed media commands)
 - `Назад`
 
 ### Sonya Menu
@@ -40,6 +41,7 @@ Sonya sees only her own order menu:
 - `🍵 Чай`
 
 Sonya does not see `Спросить Соню`, `Умные устройства`, direct coffee machine control, or direct kettle control.
+The Station submenu is admin-only as well.
 
 ### Admin Voice Modes
 
@@ -117,6 +119,8 @@ Sonya does not see `Спросить Соню`, `Умные устройства
 - iPhone Shortcuts can call `POST /shortcut/espresso` on the bot HTTP server.
 - The shortcut endpoint requires `Authorization: Bearer <SHORTCUTS_SECRET_TOKEN>`.
 - If `SHORTCUTS_SECRET_TOKEN` is empty, the endpoint returns `503` and does not perform any action.
+- The same Bearer token protects `POST /shortcut/station`, accepting only
+  `{"action":"play"}` or `{"action":"pause"}` for iPhone Shortcuts.
 - The endpoint accepts JSON body only:
 
 ```json
@@ -399,6 +403,7 @@ SHORTCUTS_SECRET_TOKEN=change_me
 
 # Artem Control Center internal coffee API; independent random secret
 CONTROL_CENTER_API_TOKEN=
+STATION_PLAYER_ENTITY=media_player.stantsiia_mini_zal
 ```
 
 `TELEGRAM_ALLOWED_USER_IDS` accepts comma-separated IDs, for example:
@@ -579,6 +584,10 @@ Caddy should expose only the public shortcut endpoint from the bot and route eve
 ```caddyfile
 ha.myhomeassistantisverybest.art {
 	handle /shortcut/espresso {
+		reverse_proxy telegram-bot:8088
+	}
+
+	handle /shortcut/station {
 		reverse_proxy telegram-bot:8088
 	}
 

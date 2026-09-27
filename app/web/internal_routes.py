@@ -4,12 +4,15 @@ import hmac
 import logging
 import asyncio
 import re
+import json
+from uuid import UUID
 from datetime import datetime, timezone
 from pathlib import Path
 
 from aiohttp import web
 
 from app.config import Settings
+from app.services.station_actions import STATION_COMMANDS, StationActionService
 from app.keyboards.coffee import coffee_turn_off_only
 from app.keyboards.main import main_menu
 from app.messages import coffee as coffee_messages
@@ -130,23 +133,81 @@ def _shortcuts_json_error(error: str, message: str, *, status: int) -> web.Respo
 
 def _check_shortcuts_auth(request: web.Request) -> web.Response | None:
     settings: Settings = request.app["settings"]
-    LOGGER.info("Shortcut espresso authorization check started")
+    LOGGER.info("Shortcut authorization check started")
     if not settings.shortcuts_secret_token:
-        LOGGER.warning("Shortcut espresso endpoint is disabled: SHORTCUTS_SECRET_TOKEN is not configured")
+        LOGGER.warning("Shortcut endpoint is disabled: SHORTCUTS_SECRET_TOKEN is not configured")
         return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=503)
 
     authorization = request.headers.get("Authorization", "")
     if not authorization.startswith("Bearer "):
-        LOGGER.warning("Shortcut espresso authorization failed: missing or malformed Authorization header")
+        LOGGER.warning("Shortcut authorization failed: missing or malformed Authorization header")
         return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=401)
 
     provided_token = authorization.removeprefix("Bearer ").strip()
     if not hmac.compare_digest(provided_token, settings.shortcuts_secret_token):
-        LOGGER.warning("Shortcut espresso authorization failed: invalid bearer token")
+        LOGGER.warning("Shortcut authorization failed: invalid bearer token")
         return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=403)
 
-    LOGGER.info("Shortcut espresso authorization succeeded")
+    LOGGER.info("Shortcut authorization succeeded")
     return None
+
+
+async def _station_body(request: web.Request, *, shortcut: bool) -> tuple[str, str | None] | None:
+    raw = await request.content.read(513)
+    if len(raw) > 512:
+        return None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    expected = {"action"} if shortcut else {"action", "requestId"}
+    allowed = {"play", "pause"} if shortcut else STATION_COMMANDS.keys()
+    if (not isinstance(body, dict) or set(body) != expected
+            or not isinstance(body.get("action"), str) or body["action"] not in allowed):
+        return None
+    request_id = body.get("requestId")
+    if not shortcut:
+        try:
+            if not isinstance(request_id, str) or str(UUID(request_id)) != request_id:
+                return None
+        except ValueError:
+            return None
+    return body["action"], request_id
+
+
+async def control_center_station_action(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    parsed = await _station_body(request, shortcut=False)
+    if parsed is None:
+        return _control_center_error("invalid_station_action", 400)
+    action, request_id = parsed
+    try:
+        outcome = await StationActionService(request.app["ha"], request.app["settings"]).dispatch(action)
+    except HomeAssistantError:
+        return _control_center_error("station_dispatch_failed", 502)
+    return web.json_response(
+        {"schemaVersion": 1, "action": action, "requestId": request_id, "status": outcome},
+        status=202 if outcome == "uncertain" else 200,
+    )
+
+
+async def shortcut_station(request: web.Request) -> web.Response:
+    auth_error = _check_shortcuts_auth(request)
+    if auth_error is not None:
+        return auth_error
+    parsed = await _station_body(request, shortcut=True)
+    if parsed is None:
+        return _shortcuts_json_error("invalid_action", "Неизвестная команда", status=400)
+    action, _ = parsed
+    try:
+        outcome = await StationActionService(request.app["ha"], request.app["settings"]).dispatch(action)
+    except HomeAssistantError:
+        return _shortcuts_json_error("station_dispatch_failed", "Не удалось отправить команду", status=502)
+    return web.json_response(
+        {"ok": outcome == "dispatched", "action": action, "status": outcome,
+         "message": "Команда отправлена" if outcome == "dispatched" else "Результат отправки неизвестен"},
+        status=202 if outcome == "uncertain" else 200,
+    )
 
 
 def _check_control_center_auth(request: web.Request) -> None:
@@ -1054,6 +1115,8 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health/ready", health_ready)
     app.router.add_get("/health/details", health_details)
     app.router.add_post("/shortcut/espresso", shortcut_espresso)
+    app.router.add_post("/shortcut/station", shortcut_station)
+    app.router.add_post("/internal/control-center/station/action", control_center_station_action)
     app.router.add_get(
         "/internal/notification-settings/coffee",
         control_center_notification_settings_get,

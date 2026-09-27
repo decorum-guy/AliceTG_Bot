@@ -46,9 +46,23 @@ def smart_devices_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [inline_button(text="☕ Кофемашина", callback_data="coffee:status")],
             [inline_button(text="🍵 Чайник", callback_data="kettle:status")],
+            [inline_button(text="🔊 Станция Mini 2", callback_data="station:menu")],
             [inline_button(text="⬅️ Назад", callback_data="menu:main", style=BUTTON_PRIMARY)],
         ]
     )
+
+
+def station_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [inline_button(text="▶️ Play", callback_data="station:play"),
+         inline_button(text="⏸ Pause", callback_data="station:pause")],
+        [inline_button(text="🔉 Volume down", callback_data="station:volume_down"),
+         inline_button(text="🔊 Volume up", callback_data="station:volume_up")],
+        [inline_button(text="⏮ Previous", callback_data="station:previous"),
+         inline_button(text="⏭ Next", callback_data="station:next")],
+        [inline_button(text="❤️ Like", callback_data="station:like")],
+        [inline_button(text="⬅️ Назад", callback_data="devices:menu", style=BUTTON_PRIMARY)],
+    ])
 
 
 def sonya_order_menu() -> InlineKeyboardMarkup:

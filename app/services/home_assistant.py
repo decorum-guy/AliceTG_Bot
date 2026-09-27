@@ -16,6 +16,10 @@ class HomeAssistantError(RuntimeError):
         self.body = body
 
 
+class HomeAssistantDispatchUncertain(HomeAssistantError):
+    """The mutation may have reached Home Assistant; callers must not retry it."""
+
+
 class HomeAssistantClient:
     def __init__(self, base_url: str, token: str) -> None:
         self._base_url = base_url.rstrip("/")
@@ -52,6 +56,21 @@ class HomeAssistantClient:
             payload=payload,
             timeout_seconds=timeout_seconds,
         )
+
+    async def call_service_once(self, domain: str, service: str, payload: dict[str, Any]) -> None:
+        """Dispatch a non-idempotent mutation once, without session recreation or retry."""
+        if self._session.closed:
+            raise HomeAssistantError("Home Assistant connection is closed")
+        try:
+            async with self._session.request(
+                "POST", f"{self._base_url}/api/services/{domain}/{service}", json=payload
+            ) as response:
+                if response.status >= 400:
+                    raise HomeAssistantError("Home Assistant mutation failed", status=response.status)
+        except HomeAssistantError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise HomeAssistantDispatchUncertain("Home Assistant dispatch outcome is uncertain") from exc
 
     async def get_services(self) -> dict[str, set[str]]:
         response = await self._request(

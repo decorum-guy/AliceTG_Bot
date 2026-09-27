@@ -11,7 +11,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 
 from app.config import Settings
-from app.handlers import admin_modes, coffee, common, planning, reminders, start, tea, water
+from app.handlers import admin_modes, coffee, common, planning, reminders, start, station, tea, water
 from app.planning.legacy_import import build_reminder_store
 from app.planning.backup import PlanningBackupError, PlanningBackupService
 from app.planning.delivery import AliceSpokenDeliveryTransport, HomeAssistantMobileTransport, TelegramDeliveryTransport
@@ -83,6 +83,7 @@ async def create_app() -> web.Application:
     )
     dispatcher = Dispatcher()
     dispatcher.include_router(start.router)
+    dispatcher.include_router(station.router)
     dispatcher.include_router(admin_modes.router)
     dispatcher.include_router(coffee.router)
     dispatcher.include_router(tea.router)
