@@ -252,9 +252,9 @@ planning.restore_verification_failed
 The scheduler-stale incident is inactive while heartbeat is merely unknown or
 the feature is intentionally disabled. Stuck outbox is raised only after an
 eligible queued/leased item is at least 30 seconds old. Terminal failure is an
-aggregate count of active reminders with terminal delivery failure. Backup
-health distinguishes disabled, unavailable, failed, unknown, overdue, and
-fresh. Restore health reflects the last verifier result.
+aggregate count of non-tombstoned `pending`/`due` reminders with terminal
+delivery failure. Backup health distinguishes disabled, unavailable, failed,
+unknown, overdue, and fresh. Restore health reflects the last verifier result.
 
 Incident logs are structured and transition-suppressed. A transition contains
 only the incident code, active state, aggregate count, bounded age, and an

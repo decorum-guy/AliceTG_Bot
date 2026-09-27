@@ -143,7 +143,12 @@ class PlanningHealthService:
             )
             facts["terminalFailedReminderCount"] = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM reminders WHERE deleted_at IS NULL AND delivery_state = 'failed'"
+                    """
+                    SELECT COUNT(*) FROM reminders
+                    WHERE deleted_at IS NULL
+                      AND status IN ('pending', 'due')
+                      AND delivery_state = 'failed'
+                    """
                 ).fetchone()[0]
             )
             facts["activeDueReminderCount"] = int(

@@ -94,6 +94,27 @@ class PlanningHealthA8Tests(unittest.TestCase):
             outbox_payload={"chat_id": -100000000002},
         )
 
+    def failed_due_reminder(self):
+        reminder = self.reminder(due_at="2026-08-12T07:00:00.000000Z")
+        with self.database.transaction():
+            self.database.connection.execute(
+                "UPDATE reminders SET status = 'due', delivery_state = 'failed', final_failure_at = ? WHERE id = ?",
+                (NOW, reminder.id),
+            )
+            self.database.connection.execute(
+                "UPDATE outbox SET status = 'failed' WHERE reminder_id = ?",
+                (reminder.id,),
+            )
+        return reminder
+
+    def assert_no_terminal_failure(self) -> None:
+        snapshot = self.health().snapshot()
+        self.assertEqual(snapshot["terminalFailedReminderCount"], 0)
+        self.assertNotIn(
+            "planning.delivery_terminal_failure",
+            {item["code"] for item in snapshot["incidents"]},
+        )
+
     def test_schema_db_and_disabled_scheduler_facts_are_content_free(self) -> None:
         snapshot = self.health(scheduler_enabled=False).snapshot(correlation_id="health-correlation")
         self.assertEqual(snapshot["planningSchemaVersion"], 8)
@@ -199,6 +220,58 @@ class PlanningHealthA8Tests(unittest.TestCase):
             1,
         )
         del stuck
+
+    def test_completed_terminal_failure_is_historical(self) -> None:
+        reminder = self.failed_due_reminder()
+        completed = self.repository.complete_reminder(
+            reminder.id, expected_version=reminder.version, context=CONTEXT
+        )
+        self.assertEqual((completed.status, completed.delivery_state), ("completed", "failed"))
+        self.assertIsNone(completed.deleted_at)
+        self.assert_no_terminal_failure()
+
+    def test_cancelled_terminal_failure_is_historical(self) -> None:
+        reminder = self.failed_due_reminder()
+        with self.database.transaction():
+            self.database.connection.execute(
+                "UPDATE reminders SET status = 'cancelled', cancelled_at = ? WHERE id = ?",
+                (NOW, reminder.id),
+            )
+        # Keep deleted_at NULL so the status filter is independently exercised.
+        cancelled = self.repository.get_reminder(reminder.id)
+        self.assertEqual((cancelled.status, cancelled.delivery_state), ("cancelled", "failed"))
+        self.assertIsNone(cancelled.deleted_at)
+        self.assert_no_terminal_failure()
+
+    def test_tombstoned_terminal_failure_is_historical(self) -> None:
+        reminder = self.failed_due_reminder()
+        with self.database.transaction():
+            self.database.connection.execute(
+                "UPDATE reminders SET deleted_at = ? WHERE id = ?", (NOW, reminder.id)
+            )
+        self.assert_no_terminal_failure()
+
+    def test_terminal_failure_count_includes_only_active_reminders(self) -> None:
+        self.failed_due_reminder()
+        completed = self.failed_due_reminder()
+        cancelled = self.failed_due_reminder()
+        tombstoned = self.failed_due_reminder()
+        self.repository.complete_reminder(completed.id, expected_version=completed.version, context=CONTEXT)
+        with self.database.transaction():
+            self.database.connection.execute(
+                "UPDATE reminders SET status = 'cancelled', cancelled_at = ? WHERE id = ?",
+                (NOW, cancelled.id),
+            )
+            self.database.connection.execute(
+                "UPDATE reminders SET deleted_at = ? WHERE id = ?", (NOW, tombstoned.id)
+            )
+
+        snapshot = self.health().snapshot()
+        self.assertEqual(snapshot["terminalFailedReminderCount"], 1)
+        incident = next(
+            item for item in snapshot["incidents"] if item["code"] == "planning.delivery_terminal_failure"
+        )
+        self.assertEqual(incident["aggregateCount"], 1)
 
     def test_backup_fresh_overdue_failed_and_restore_failed_states(self) -> None:
         service = self.health(backup_enabled=True, backup_service_ready=True)
