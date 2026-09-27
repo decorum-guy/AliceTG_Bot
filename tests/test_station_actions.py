@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -12,6 +13,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from app.handlers.station import show_station_menu, station_action
+from app.services.app_state import AppStateStore
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantDispatchUncertain
 from app.services.station_actions import STATION_COMMANDS, StationActionService
 from app.web.internal_routes import setup_internal_routes
@@ -61,12 +63,51 @@ class StationTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app["settings"] = self.settings
         app["ha"] = self.ha
+        self.temp = tempfile.TemporaryDirectory()
+        self.state = AppStateStore(f"{self.temp.name}/state.json")
+        app["app_state"] = self.state
         setup_internal_routes(app)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
 
     async def asyncTearDown(self) -> None:
         await self.client.close()
+        self.temp.cleanup()
+
+    async def test_preset_api_auth_strict_body_and_id_only_execution(self) -> None:
+        path = "/internal/control-center/station/presets"
+        self.assertEqual((await self.client.get(path)).status, 401)
+        headers = {"Authorization": "Bearer control-test-token"}
+        inventory_response = await self.client.get(path, headers=headers)
+        self.assertEqual(inventory_response.status, 200)
+        inventory = await inventory_response.json()
+        self.assertEqual(len(inventory["presets"]), 3)
+        self.assertEqual(set(inventory["presets"][0]), {"id", "title"})
+        self.assertEqual((await self.client.post(path, json={"expectedRevision": inventory["revision"],
+            "title": "Новая", "command": "Включи новую", "extra": 1}, headers=headers)).status, 400)
+        self.assertEqual((await self.client.post(path, data='{"expectedRevision":"x"}',
+            headers={**headers, "Content-Type": "text/plain"})).status, 400)
+        added_response = await self.client.post(path, json={"expectedRevision": inventory["revision"],
+            "title": "Новая", "command": "Включи новую"}, headers=headers)
+        self.assertEqual(added_response.status, 200)
+        added = await added_response.json()
+        self.assertEqual((await self.client.post(path, json={"expectedRevision": inventory["revision"],
+            "title": "Ещё", "command": "Включи ещё"}, headers=headers)).status, 409)
+        preset_id = added["presets"][-1]["id"]
+        execute_path = f"{path}/{preset_id}/execute"
+        self.assertEqual((await self.client.post(execute_path, json={"requestId": str(uuid4()),
+            "command": "arbitrary"}, headers=headers)).status, 400)
+        self.assertEqual((await self.client.post(f"{path}/missing/execute",
+            json={"requestId": str(uuid4())}, headers=headers)).status, 404)
+        self.assertEqual(self.ha.calls, [])
+        executed = await self.client.post(execute_path, json={"requestId": str(uuid4())}, headers=headers)
+        self.assertEqual(executed.status, 200)
+        self.assertEqual(self.ha.calls[0][2]["media_content_id"], "Включи новую")
+        self.assertEqual((await self.client.delete(f"{path}/{preset_id}",
+            json={"expectedRevision": added["revision"]}, headers=headers)).status, 200)
+        self.assertEqual((await self.client.post(execute_path,
+            json={"requestId": str(uuid4())}, headers=headers)).status, 404)
+        self.assertEqual(len(self.ha.calls), 1)
 
     async def test_all_reviewed_commands_and_unknown(self) -> None:
         self.assertEqual(len(STATION_COMMANDS), 7)

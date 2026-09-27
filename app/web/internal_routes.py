@@ -193,6 +193,93 @@ async def control_center_station_action(request: web.Request) -> web.Response:
     )
 
 
+def _preset_inventory(snapshot: dict) -> dict:
+    return {"schemaVersion": 1, "revision": snapshot["revision"],
+            "updatedAt": snapshot["updatedAt"],
+            "presets": [{"id": item["id"], "title": item["title"]}
+                        for item in snapshot["presets"]]}
+
+
+async def _preset_body(request: web.Request, keys: set[str]) -> dict | None:
+    if request.content_type != "application/json":
+        return None
+    raw = await request.content.read(1025)
+    if len(raw) > 1024:
+        return None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(body, dict) or set(body) != keys:
+        return None
+    return body
+
+
+async def control_center_station_presets_get(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    try:
+        snapshot = await request.app["app_state"].station_presets()
+    except AppStatePersistenceError:
+        return _control_center_error("station_presets_unavailable", 503)
+    return web.json_response(_preset_inventory(snapshot), headers={"Cache-Control": "no-store"})
+
+
+async def control_center_station_presets_add(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    body = await _preset_body(request, {"expectedRevision", "title", "command"})
+    if body is None:
+        return _control_center_error("invalid_station_preset", 400)
+    try:
+        snapshot = await request.app["app_state"].add_station_preset(
+            expected_revision=body["expectedRevision"], title=body["title"], command=body["command"])
+    except ValueError:
+        return _control_center_error("invalid_station_preset", 400)
+    except AppStateRevisionConflict:
+        return _control_center_error("revision_conflict", 409)
+    except AppStatePersistenceError:
+        return _control_center_error("station_presets_unavailable", 503)
+    return web.json_response(_preset_inventory(snapshot), headers={"Cache-Control": "no-store"})
+
+
+async def control_center_station_presets_delete(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    body = await _preset_body(request, {"expectedRevision"})
+    if body is None:
+        return _control_center_error("invalid_station_preset", 400)
+    try:
+        snapshot = await request.app["app_state"].delete_station_preset(
+            expected_revision=body["expectedRevision"], preset_id=request.match_info["preset_id"])
+    except AppStateRevisionConflict:
+        return _control_center_error("revision_conflict", 409)
+    except KeyError:
+        return _control_center_error("unknown_station_preset", 404)
+    except AppStatePersistenceError:
+        return _control_center_error("station_presets_unavailable", 503)
+    return web.json_response(_preset_inventory(snapshot), headers={"Cache-Control": "no-store"})
+
+
+async def control_center_station_preset_execute(request: web.Request) -> web.Response:
+    _check_control_center_auth(request)
+    body = await _preset_body(request, {"requestId"})
+    try:
+        if body is None or not isinstance(body["requestId"], str) or str(UUID(body["requestId"])) != body["requestId"]:
+            return _control_center_error("invalid_station_preset_execution", 400)
+    except ValueError:
+        return _control_center_error("invalid_station_preset_execution", 400)
+    try:
+        outcome = await StationActionService(request.app["ha"], request.app["settings"]).dispatch_preset(
+            request.match_info["preset_id"], request.app["app_state"])
+    except ValueError:
+        return _control_center_error("unknown_station_preset", 404)
+    except AppStatePersistenceError:
+        return _control_center_error("station_presets_unavailable", 503)
+    except HomeAssistantError:
+        return _control_center_error("station_dispatch_failed", 502)
+    return web.json_response({"schemaVersion": 1, "presetId": request.match_info["preset_id"],
+                              "requestId": body["requestId"], "status": outcome},
+                             status=202 if outcome == "uncertain" else 200)
+
+
 async def shortcut_station(request: web.Request) -> web.Response:
     auth_error = _check_shortcuts_auth(request)
     if auth_error is not None:
@@ -1119,6 +1206,10 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_post("/shortcut/espresso", shortcut_espresso)
     app.router.add_post("/shortcut/station", shortcut_station)
     app.router.add_post("/internal/control-center/station/action", control_center_station_action)
+    app.router.add_get("/internal/control-center/station/presets", control_center_station_presets_get)
+    app.router.add_post("/internal/control-center/station/presets", control_center_station_presets_add)
+    app.router.add_delete("/internal/control-center/station/presets/{preset_id}", control_center_station_presets_delete)
+    app.router.add_post("/internal/control-center/station/presets/{preset_id}/execute", control_center_station_preset_execute)
     app.router.add_get(
         "/internal/notification-settings/coffee",
         control_center_notification_settings_get,
