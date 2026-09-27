@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import aiohttp
@@ -25,6 +26,28 @@ class FakeHa:
         self.calls.append((domain, service, payload))
         if self.uncertain:
             raise HomeAssistantDispatchUncertain("uncertain")
+
+
+class RuntimeErrorSession:
+    closed = False
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls = 0
+
+    class RequestContext:
+        def __init__(self, message: str) -> None:
+            self.message = message
+
+        async def __aenter__(self):
+            raise RuntimeError(self.message)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def request(self, *args, **kwargs):
+        self.calls += 1
+        return self.RequestContext(self.message)
 
 
 class StationTests(unittest.IsolatedAsyncioTestCase):
@@ -92,6 +115,22 @@ class StationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await response.json())["status"], "dispatched")
         self.assertEqual(len(self.ha.calls), 2)
 
+    async def test_station_routes_reject_json_body_with_text_plain_content_type(self) -> None:
+        shortcut = await self.client.post(
+            "/shortcut/station", data='{"action":"play"}',
+            headers={"Authorization": "Bearer shortcut-test-token", "Content-Type": "text/plain"},
+        )
+        self.assertEqual(shortcut.status, 400)
+        self.assertEqual((await shortcut.json())["error"], "invalid_action")
+        internal = await self.client.post(
+            "/internal/control-center/station/action",
+            data=json.dumps({"action": "next", "requestId": str(uuid4())}),
+            headers={"Authorization": "Bearer control-test-token", "Content-Type": "text/plain"},
+        )
+        self.assertEqual(internal.status, 400)
+        self.assertEqual((await internal.json())["error"], "invalid_station_action")
+        self.assertEqual(self.ha.calls, [])
+
     async def test_uncertain_routes_do_not_claim_success(self) -> None:
         self.ha.uncertain = True
         response = await self.client.post("/shortcut/station", json={"action": "pause"},
@@ -132,4 +171,56 @@ class StationTests(unittest.IsolatedAsyncioTestCase):
         ha._session = broken
         result = await StationActionService(ha, self.settings).dispatch("next")
         self.assertEqual(result, "uncertain")
+        self.assertEqual(broken.calls, 1)
+
+    async def test_closed_session_race_is_bounded_across_station_surfaces(self) -> None:
+        ha = HomeAssistantClient("http://example.invalid", "test")
+        await ha.close()
+        broken = RuntimeErrorSession("Session is closed")
+        ha._session = broken
+        ha._create_session = MagicMock(side_effect=AssertionError("must not recreate session"))
+        app = web.Application()
+        app["settings"] = self.settings
+        app["ha"] = ha
+        setup_internal_routes(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            shortcut = await client.post(
+                "/shortcut/station", json={"action": "play"},
+                headers={"Authorization": "Bearer shortcut-test-token"},
+            )
+            self.assertEqual(shortcut.status, 202)
+            shortcut_body = await shortcut.json()
+            self.assertEqual(shortcut_body["status"], "uncertain")
+            self.assertFalse(shortcut_body["ok"])
+            self.assertEqual(broken.calls, 1)
+
+            internal = await client.post(
+                "/internal/control-center/station/action",
+                json={"action": "next", "requestId": str(uuid4())},
+                headers={"Authorization": "Bearer control-test-token"},
+            )
+            self.assertEqual(internal.status, 202)
+            self.assertEqual((await internal.json())["status"], "uncertain")
+            self.assertEqual(broken.calls, 2)
+
+            callback = SimpleNamespace(
+                data="station:like", from_user=SimpleNamespace(id=1), answer=AsyncMock(),
+            )
+            settings = SimpleNamespace(**vars(self.settings), is_admin_user=lambda user: user == 1)
+            await station_action(callback, settings, ha)
+            callback.answer.assert_awaited_once_with("Результат отправки неизвестен", show_alert=True)
+            self.assertEqual(broken.calls, 3)
+            ha._create_session.assert_not_called()
+        finally:
+            await client.close()
+
+    async def test_unrelated_runtime_error_remains_visible_without_retry(self) -> None:
+        ha = HomeAssistantClient("http://example.invalid", "test")
+        await ha.close()
+        broken = RuntimeErrorSession("unrelated programmer error")
+        ha._session = broken
+        with self.assertRaisesRegex(RuntimeError, "unrelated programmer error"):
+            await ha.call_service_once("media_player", "play_media", {})
         self.assertEqual(broken.calls, 1)

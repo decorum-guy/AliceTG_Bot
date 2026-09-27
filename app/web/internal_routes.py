@@ -153,6 +153,8 @@ def _check_shortcuts_auth(request: web.Request) -> web.Response | None:
 
 
 async def _station_body(request: web.Request, *, shortcut: bool) -> tuple[str, str | None] | None:
+    if request.content_type != "application/json":
+        return None
     raw = await request.content.read(513)
     if len(raw) > 512:
         return None

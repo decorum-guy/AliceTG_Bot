@@ -71,6 +71,10 @@ class HomeAssistantClient:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise HomeAssistantDispatchUncertain("Home Assistant dispatch outcome is uncertain") from exc
+        except RuntimeError as exc:
+            if not self._is_closed_session_runtime_error(exc):
+                raise
+            raise HomeAssistantDispatchUncertain("Home Assistant dispatch outcome is uncertain") from exc
 
     async def get_services(self) -> dict[str, set[str]]:
         response = await self._request(
@@ -171,7 +175,7 @@ class HomeAssistantClient:
             except HomeAssistantError:
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
-                if isinstance(exc, RuntimeError) and not self._is_retryable_runtime_error(exc):
+                if isinstance(exc, RuntimeError) and not self._is_closed_session_runtime_error(exc):
                     raise HomeAssistantError(error_message) from exc
                 if attempt == 0:
                     LOGGER.warning(
@@ -206,6 +210,6 @@ class HomeAssistantClient:
             LOGGER.exception("Cannot close stale Home Assistant aiohttp session")
         self._session = self._create_session()
 
-    def _is_retryable_runtime_error(self, exc: RuntimeError) -> bool:
+    def _is_closed_session_runtime_error(self, exc: RuntimeError) -> bool:
         message = str(exc).lower()
         return "session is closed" in message or "session closed" in message
