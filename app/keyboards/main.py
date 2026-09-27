@@ -61,6 +61,7 @@ def station_menu() -> InlineKeyboardMarkup:
         [inline_button(text="⏮ Previous", callback_data="station:previous"),
          inline_button(text="⏭ Next", callback_data="station:next")],
         [inline_button(text="❤️ Like", callback_data="station:like")],
+        [inline_button(text="🎵 Музыка", callback_data="station:music", style=BUTTON_PRIMARY)],
         [inline_button(text="⬅️ Назад", callback_data="devices:menu", style=BUTTON_PRIMARY)],
     ])
 

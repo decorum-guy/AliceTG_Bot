@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Literal
 
 from app.config import Settings
+from app.services.app_state import AppStateStore
 from app.services.home_assistant import (
     HomeAssistantClient,
     HomeAssistantDispatchUncertain,
@@ -30,6 +31,16 @@ class StationActionService:
     async def dispatch(self, action: StationAction) -> Literal["dispatched", "uncertain"]:
         if action not in STATION_COMMANDS:
             raise ValueError("unknown_station_action")
+        return await self._dispatch_command(STATION_COMMANDS[action])
+
+    async def dispatch_preset(self, preset_id: str, app_state: AppStateStore) -> Literal["dispatched", "uncertain"]:
+        await app_state.station_presets()
+        preset = app_state.station_preset(preset_id)
+        if preset is None:
+            raise ValueError("unknown_station_preset")
+        return await self._dispatch_command(preset["command"])
+
+    async def _dispatch_command(self, command: str) -> Literal["dispatched", "uncertain"]:
         if not self._entity.startswith("media_player."):
             raise HomeAssistantError("Station target is not configured")
         try:
@@ -38,7 +49,7 @@ class StationActionService:
                 "play_media",
                 {
                     "entity_id": self._entity,
-                    "media_content_id": STATION_COMMANDS[action],
+                    "media_content_id": command,
                     "media_content_type": "command",
                 },
             )

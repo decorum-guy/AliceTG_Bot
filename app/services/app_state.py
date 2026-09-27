@@ -21,6 +21,11 @@ COFFEE_NOTIFICATION_STATE_KEYS = {
     "longRunning.channels.telegram": "coffee_long_running_notify_telegram",
     "longRunning.channels.iphone": "coffee_long_running_notify_iphone",
 }
+DEFAULT_STATION_PRESETS = (
+    ("Избранное", "Включи плейлист Мне нравится"),
+    ("Спокойная", "Включи спокойную музыку"),
+    ("Энергичная", "Включи энергичную музыку"),
+)
 
 
 class AppStateRevisionConflict(RuntimeError):
@@ -36,8 +41,109 @@ class AppStateStore:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._state: dict[str, Any] = {}
+        self._load_failed = False
         self._load()
         self._initialize_notification_metadata_in_memory()
+
+    async def station_presets(self) -> dict[str, Any]:
+        """Return a copy of the canonical collection, initializing it once durably."""
+        async with self._lock:
+            await self._ensure_station_presets_locked()
+            return self._station_snapshot()
+
+    def station_preset(self, preset_id: str) -> dict[str, str] | None:
+        for preset in self._state.get("station_presets", []):
+            if preset["id"] == preset_id:
+                return dict(preset)
+        return None
+
+    async def add_station_preset(self, *, expected_revision: str, title: str,
+                                 command: str) -> dict[str, Any]:
+        title = _station_text(title, 32)
+        command = _station_text(command, 160)
+        async with self._lock:
+            await self._ensure_station_presets_locked()
+            self._check_station_revision(expected_revision)
+            presets = list(self._state["station_presets"])
+            if len(presets) >= 20:
+                raise ValueError("station_preset_limit")
+            if any(item["title"].casefold() == title.casefold() for item in presets):
+                raise ValueError("duplicate_station_preset_title")
+            ids = {item["id"] for item in presets}
+            preset_id = secrets.token_hex(6)
+            while preset_id in ids:
+                preset_id = secrets.token_hex(6)
+            candidate = dict(self._state)
+            candidate["station_presets"] = [*presets, {"id": preset_id, "title": title, "command": command}]
+            self._commit_station_candidate(candidate)
+            await asyncio.to_thread(self._persist_candidate, candidate)
+            self._state = candidate
+            return self._station_snapshot()
+
+    async def delete_station_preset(self, *, expected_revision: str,
+                                    preset_id: str) -> dict[str, Any]:
+        async with self._lock:
+            await self._ensure_station_presets_locked()
+            self._check_station_revision(expected_revision)
+            presets = [item for item in self._state["station_presets"] if item["id"] != preset_id]
+            if len(presets) == len(self._state["station_presets"]):
+                raise KeyError("unknown_station_preset")
+            candidate = dict(self._state)
+            candidate["station_presets"] = presets
+            self._commit_station_candidate(candidate)
+            await asyncio.to_thread(self._persist_candidate, candidate)
+            self._state = candidate
+            return self._station_snapshot()
+
+    async def _ensure_station_presets_locked(self) -> None:
+        if self._load_failed:
+            raise AppStatePersistenceError("Station presets state is unavailable")
+        if "station_presets" in self._state:
+            presets = self._state["station_presets"]
+            if (not isinstance(presets, list) or len(presets) > 20
+                    or not isinstance(self._state.get("station_presets_revision"), str)
+                    or not isinstance(self._state.get("station_presets_updated_at"), str)):
+                raise AppStatePersistenceError("Station presets state is unavailable")
+            ids: set[str] = set()
+            titles: set[str] = set()
+            for item in presets:
+                if (not isinstance(item, dict) or set(item) != {"id", "title", "command"}
+                        or not isinstance(item["id"], str) or len(item["id"]) != 12
+                        or any(char not in "0123456789abcdef" for char in item["id"])):
+                    raise AppStatePersistenceError("Station presets state is unavailable")
+                try:
+                    if _station_text(item["title"], 32) != item["title"] or _station_text(item["command"], 160) != item["command"]:
+                        raise ValueError
+                except ValueError:
+                    raise AppStatePersistenceError("Station presets state is unavailable") from None
+                title_key = item["title"].casefold()
+                if item["id"] in ids or title_key in titles:
+                    raise AppStatePersistenceError("Station presets state is unavailable")
+                ids.add(item["id"])
+                titles.add(title_key)
+            return
+        candidate = dict(self._state)
+        candidate["station_presets"] = [
+            {"id": secrets.token_hex(6), "title": title, "command": command}
+            for title, command in DEFAULT_STATION_PRESETS
+        ]
+        self._commit_station_candidate(candidate)
+        await asyncio.to_thread(self._persist_candidate, candidate)
+        self._state = candidate
+
+    @staticmethod
+    def _commit_station_candidate(candidate: dict[str, Any]) -> None:
+        candidate["station_presets_revision"] = _new_revision()
+        candidate["station_presets_updated_at"] = _now()
+
+    def _check_station_revision(self, expected: str) -> None:
+        if not isinstance(expected, str) or not hmac_compare(expected, self._state["station_presets_revision"]):
+            raise AppStateRevisionConflict("Station presets revision is stale")
+
+    def _station_snapshot(self) -> dict[str, Any]:
+        return {"revision": self._state["station_presets_revision"],
+                "updatedAt": self._state["station_presets_updated_at"],
+                "presets": [dict(item) for item in self._state["station_presets"]]}
 
     @property
     def coffee_warmed_up_alert_enabled(self) -> bool:
@@ -354,9 +460,12 @@ class AppStateStore:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             LOGGER.exception("Cannot read app state from %s", self._path)
+            self._load_failed = True
             return
         if isinstance(data, dict):
             self._state.update(data)
+        else:
+            self._load_failed = True
 
     def _legacy_coffee_alerts_enabled(self) -> bool:
         return bool(self._state.get("coffee_alerts_enabled", True))
@@ -418,6 +527,15 @@ def hmac_compare(left: str, right: str) -> bool:
     import hmac
 
     return hmac.compare_digest(left, right)
+
+
+def _station_text(value: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invalid_station_preset")
+    value = value.strip()
+    if not 1 <= len(value) <= limit or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("invalid_station_preset")
+    return value
 
 
 def _new_revision() -> str:

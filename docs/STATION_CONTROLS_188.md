@@ -20,3 +20,31 @@ Each action sends one fixed `media_player.play_media` command with
 Assistant only; cloud playback state is not verified. Transport failures with
 unknown delivery return `uncertain` and must not be retried automatically.
 Physical Station behavior remains for owner acceptance after Orchestrator review.
+
+## Shared editable music presets
+
+AliceTG_Bot owns the single canonical Station preset inventory in the existing
+`APP_STATE_PATH` / `AppStateStore` JSON object. Its persisted fields are
+`station_presets` (ordered `{id,title,command}` objects),
+`station_presets_revision` (opaque revision), and
+`station_presets_updated_at` (UTC timestamp). An absent `station_presets` key
+means never initialized: the first read atomically seeds `Избранное` →
+`Включи плейлист Мне нравится`, `Спокойная` → `Включи спокойную музыку`, and
+`Энергичная` → `Включи энергичную музыку`. A persisted empty array remains
+empty after restart. Add and delete require the current revision and use the
+same atomic candidate write as other AppState settings.
+
+The private, bearer-token-protected Control Center API exposes a command-free
+`GET /internal/control-center/station/presets`, typed add/delete routes under
+the same path, and `POST /internal/control-center/station/presets/{id}/execute`.
+Inventory contains only ID and title. Configuration add accepts title and
+command; execution accepts only UUID request ID in its JSON body and the
+preset ID in its path. AliceTG_Bot resolves the command and sends exactly one
+request through the existing Station transport. Unknown IDs fail before HA.
+There is no generic Alice command execution surface.
+
+Telegram's admin-only `🎵 Музыка` submenu reads the current inventory each
+time. `⚙ Подборки` shows title-only entries and delete confirmation. Add asks
+for title, then command, then explicit `✅ Сохранить` confirmation; `Отмена`
+clears the transient FSM draft. Sonya cannot see, configure, or execute these
+presets, including through forged callback data. Callback data holds IDs only.
