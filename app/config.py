@@ -266,6 +266,7 @@ class Settings:
             station_player_entity=os.getenv("STATION_PLAYER_ENTITY", "").strip()
             or os.getenv("LIVING_ROOM_PLAYER_ENTITY", "").strip()
             or "media_player.stantsiia_mini_zal",
+            kettle_entity=os.getenv("KETTLE_ENTITY", cls.kettle_entity).strip(),
             app_version=os.getenv("APP_VERSION", "unknown").strip() or "unknown",
             app_commit=os.getenv("APP_COMMIT", "unknown").strip() or "unknown",
             reminders_state_path=os.getenv("REMINDERS_STATE_PATH", "/app/data/reminders.json").strip()
