@@ -210,6 +210,79 @@ For a second shortcut named `turn off espresso machine`, use the same setup with
 {"action": "turn_off"}
 ```
 
+### Siri Station And Kettle Shortcuts
+
+Siri runs an Apple Shortcut by its name. Create these three Shortcuts:
+
+| Shortcut name | URL path | JSON request body |
+| --- | --- | --- |
+| `Музыка` | `/shortcut/station` | `{"action":"play"}` |
+| `Пауза` | `/shortcut/station` | `{"action":"pause"}` |
+| `Включи чайник` | `/shortcut/kettle` | `{"action":"boil"}` |
+
+In each Shortcut, add **Get Contents of URL**, using your bot's public HTTPS
+address plus the path above (for example, `https://your-bot-domain.example/shortcut/kettle`).
+Choose **POST**, add the headers `Authorization: Bearer <SHORTCUTS_SECRET_TOKEN>`
+and `Content-Type: application/json`, and select a JSON request body with the
+single `action` key. Store the real token only in your private Shortcut and
+deployment configuration. The Control Center API token cannot authenticate a Shortcut.
+An empty `SHORTCUTS_SECRET_TOKEN` disables the routes with HTTP 503; a missing
+Bearer returns 401, and a wrong Bearer returns 403.
+
+Station still accepts only `play` and `pause`; `next`, `like`, presets and
+arbitrary commands are not public Shortcut actions. Its response reports dispatch,
+not a verified player state. The Coffee Shortcut contract above is unchanged.
+
+Kettle accepts exactly `{"action":"boil"}` with no extra fields. The server
+uses only `settings.kettle_entity`, configurable through `KETTLE_ENTITY` in the
+deployment environment. Leaving that variable unset preserves the existing
+default; an empty or invalid value fails closed. Only a `water_heater.*` entity
+is allowed. The iPhone cannot select an entity, service, operation mode or temperature.
+
+Boil means target **100°C**, `state="on"` and `operation_mode="on"`, consistent
+with the plain-boil HA read-back observed during Control Center #315. No tea
+program mapping is used here. An initial fresh REST read that already proves
+this contract returns HTTP 200 without sending either mutation:
+
+```json
+{"ok":true,"action":"boil","status":"already_boiling","message":"Чайник уже включён"}
+```
+
+Otherwise the server sets fixed 100°C once, checks that target through fresh
+REST reads, and only then sends fixed operation `on` once. Target confirmation
+and active-state confirmation share a **5-second** window, polling every
+**250ms**. Reads and mutations are also bounded, and uncertain mutations are
+never automatically retried. Active confirmation requires target 100°C and
+`on/on`, with a timezone-aware `last_updated` newer than the initial read and
+at or after command start. Keep the bot and HA system clocks synchronized.
+HA HTTP success, an old active state, or a wrong target cannot produce success.
+
+Confirmed boiling returns HTTP 200:
+
+```json
+{"ok":true,"action":"boil","status":"boiling","message":"Чайник включён"}
+```
+
+HA failures return `ok:false` and `message:"Не удалось включить чайник"`.
+Bounded error codes are `home_assistant_unavailable`, `kettle_invalid_target`,
+`kettle_invalid_state` (503), `kettle_command_failed`, `kettle_dispatch_uncertain`
+(502), and `ha_verification_timeout` (504). Invalid JSON, unknown actions or extra
+keys return `invalid_action` (400); authorization errors return `unauthorized`.
+For example:
+
+```json
+{"ok":false,"error":"ha_verification_timeout","message":"Не удалось включить чайник"}
+```
+
+Read `ok` before announcing success, and use **Get Dictionary Value** (`message`)
+followed by **Speak Text** or **Show Notification** for the server's result.
+Then Siri can execute “Музыка”, “Пауза” or “Включи чайник”.
+
+The public ingress must forward the exact `/shortcut/kettle` path to the bot,
+as it does for the existing Station and Espresso paths. If your deployment
+allow-lists those two paths, add the kettle path when you choose to deploy.
+Keep `/internal/*` private. This feature does not change tunnel or proxy topology.
+
 ### Reminders
 
 - Main admin menu has `Напоминания`.

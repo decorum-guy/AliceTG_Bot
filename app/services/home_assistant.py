@@ -48,6 +48,28 @@ class HomeAssistantClient:
             not_found_none=True,
         )
 
+    async def get_state_once(self, entity_id: str) -> dict[str, Any] | None:
+        """Fresh bounded read without retries or logging private upstream details."""
+        if self._session.closed:
+            raise HomeAssistantError("Home Assistant connection is closed")
+        try:
+            async with self._session.request(
+                "GET", f"{self._base_url}/api/states/{entity_id}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                if response.status == 404:
+                    return None
+                if response.status >= 400:
+                    raise HomeAssistantError("Home Assistant read failed", status=response.status)
+                state = await response.json()
+                if not isinstance(state, dict):
+                    raise HomeAssistantError("Home Assistant returned an invalid state")
+                return state
+        except HomeAssistantError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, ValueError):
+            raise HomeAssistantError("Home Assistant read failed") from None
+
     async def call_service(self, domain: str, service: str, payload: dict[str, Any], *, timeout_seconds: float | None = None) -> None:
         await self._request(
             "POST",

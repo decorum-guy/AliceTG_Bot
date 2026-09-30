@@ -39,6 +39,7 @@ from app.services.control_center_coffee import (
 )
 from app.services.coffee_machine import set_coffee_machine, turn_on_coffee_machine
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
+from app.services.kettle_shortcut import KettleShortcutError, KettleShortcutService
 from app.planning.api import setup_planning_routes
 from app.planning.delivery_settings import normalize_phone_channels
 from app.planning.errors import PlanningValidationError, PlanningVersionConflictError
@@ -296,6 +297,54 @@ async def shortcut_station(request: web.Request) -> web.Response:
         {"ok": outcome == "dispatched", "action": action, "status": outcome,
          "message": "Команда отправлена" if outcome == "dispatched" else "Результат отправки неизвестен"},
         status=202 if outcome == "uncertain" else 200,
+    )
+
+
+def _unique_json_keys(pairs: list[tuple[str, object]]) -> dict:
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
+
+
+async def _kettle_shortcut_body(request: web.Request) -> bool:
+    if request.content_type != "application/json":
+        return False
+    try:
+        raw = await asyncio.wait_for(request.content.readexactly(513), 5.0)
+    except asyncio.IncompleteReadError as exc:
+        raw = exc.partial
+    except (asyncio.TimeoutError, ConnectionError):
+        return False
+    if len(raw) > 512:
+        return False
+    try:
+        body = json.loads(raw, object_pairs_hook=_unique_json_keys)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body == {"action": "boil"}
+
+
+async def shortcut_kettle(request: web.Request) -> web.Response:
+    try:
+        auth_error = _check_shortcuts_auth(request)
+    except TypeError:  # Non-ASCII Bearer values cannot be compared as strings by hmac.
+        return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=403)
+    if auth_error is not None:
+        return auth_error
+    if not await _kettle_shortcut_body(request):
+        return _shortcuts_json_error("invalid_action", "Неизвестная команда", status=400)
+    try:
+        outcome = await KettleShortcutService(request.app["ha"], request.app["settings"]).boil()
+    except KettleShortcutError as exc:
+        LOGGER.warning("Kettle Shortcut failed: %s", exc.code)
+        return _shortcuts_json_error(exc.code, "Не удалось включить чайник", status=exc.status)
+    return web.json_response(
+        {"ok": True, "action": "boil", "status": outcome,
+         "message": "Чайник уже включён" if outcome == "already_boiling" else "Чайник включён"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -1205,6 +1254,7 @@ def setup_internal_routes(app: web.Application) -> None:
     app.router.add_get("/health/details", health_details)
     app.router.add_post("/shortcut/espresso", shortcut_espresso)
     app.router.add_post("/shortcut/station", shortcut_station)
+    app.router.add_post("/shortcut/kettle", shortcut_kettle)
     app.router.add_post("/internal/control-center/station/action", control_center_station_action)
     app.router.add_get("/internal/control-center/station/presets", control_center_station_presets_get)
     app.router.add_post("/internal/control-center/station/presets", control_center_station_presets_add)
