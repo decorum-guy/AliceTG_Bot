@@ -45,8 +45,12 @@ def _is_boiling(state: dict) -> bool:
             and _target_is_100(state))
 
 
+def _is_stopped(state: dict) -> bool:
+    return state["state"] == "off" and state["attributes"].get("operation_mode") == "off"
+
+
 class KettleShortcutService:
-    """One configured kettle, fixed 100°C/on, and authoritative REST confirmation."""
+    """One configured kettle, fixed boil/stop, and authoritative REST confirmation."""
 
     def __init__(
         self,
@@ -94,6 +98,29 @@ class KettleShortcutService:
 
         await self._verify(confirmed, deadline)
         return "boiling"
+
+    async def stop(self) -> str:
+        if (not isinstance(self._entity, str)
+                or re.fullmatch(r"water_heater\.[a-z0-9_]+", self._entity) is None):
+            raise KettleShortcutError("kettle_invalid_target", 503)
+
+        before = await self._read(5.0)
+        if _is_stopped(before):
+            return "already_stopped"
+        previous_update = _updated_at(before)
+        if previous_update is None:
+            raise KettleShortcutError("kettle_invalid_state", 503)
+
+        await self._dispatch("set_operation_mode", {"operation_mode": "off"}, 5.0)
+        deadline = self._clock() + self._verification_timeout
+
+        def confirmed(state: dict) -> bool:
+            updated = _updated_at(state)
+            return (_is_stopped(state) and updated is not None
+                    and updated > previous_update)
+
+        await self._verify(confirmed, deadline)
+        return "stopped"
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - self._clock()
