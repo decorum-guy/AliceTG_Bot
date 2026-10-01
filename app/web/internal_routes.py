@@ -8,6 +8,7 @@ import json
 from uuid import UUID
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from aiohttp import web
 
@@ -309,22 +310,27 @@ def _unique_json_keys(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-async def _kettle_shortcut_body(request: web.Request) -> bool:
+async def _kettle_shortcut_body(request: web.Request) -> Literal["boil", "stop"] | None:
     if request.content_type != "application/json":
-        return False
+        return None
     try:
         raw = await asyncio.wait_for(request.content.readexactly(513), 5.0)
     except asyncio.IncompleteReadError as exc:
         raw = exc.partial
     except (asyncio.TimeoutError, ConnectionError):
-        return False
+        return None
     if len(raw) > 512:
-        return False
+        return None
     try:
         body = json.loads(raw, object_pairs_hook=_unique_json_keys)
     except (ValueError, UnicodeDecodeError):
-        return False
-    return isinstance(body, dict) and body == {"action": "boil"}
+        return None
+    if isinstance(body, dict) and set(body) == {"action"}:
+        if body["action"] == "boil":
+            return "boil"
+        if body["action"] == "stop":
+            return "stop"
+    return None
 
 
 async def shortcut_kettle(request: web.Request) -> web.Response:
@@ -334,16 +340,23 @@ async def shortcut_kettle(request: web.Request) -> web.Response:
         return _shortcuts_json_error("unauthorized", "Команда отклонена: неверный токен", status=403)
     if auth_error is not None:
         return auth_error
-    if not await _kettle_shortcut_body(request):
+    action = await _kettle_shortcut_body(request)
+    if action is None:
         return _shortcuts_json_error("invalid_action", "Неизвестная команда", status=400)
     try:
-        outcome = await KettleShortcutService(request.app["ha"], request.app["settings"]).boil()
+        service = KettleShortcutService(request.app["ha"], request.app["settings"])
+        outcome = await service.stop() if action == "stop" else await service.boil()
     except KettleShortcutError as exc:
         LOGGER.warning("Kettle Shortcut failed: %s", exc.code)
-        return _shortcuts_json_error(exc.code, "Не удалось включить чайник", status=exc.status)
+        return _shortcuts_json_error(exc.code,
+            "Не удалось остановить чайник" if action == "stop" else "Не удалось включить чайник",
+            status=exc.status)
+    if action == "stop":
+        message = "Чайник уже выключен" if outcome == "already_stopped" else "Чайник остановлен"
+    else:
+        message = "Чайник уже включён" if outcome == "already_boiling" else "Чайник включён"
     return web.json_response(
-        {"ok": True, "action": "boil", "status": outcome,
-         "message": "Чайник уже включён" if outcome == "already_boiling" else "Чайник включён"},
+        {"ok": True, "action": action, "status": outcome, "message": message},
         headers={"Cache-Control": "no-store"},
     )
 

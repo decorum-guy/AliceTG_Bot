@@ -212,13 +212,14 @@ For a second shortcut named `turn off espresso machine`, use the same setup with
 
 ### Siri Station And Kettle Shortcuts
 
-Siri runs an Apple Shortcut by its name. Create these three Shortcuts:
+Siri runs an Apple Shortcut by its name. Create these four Shortcuts:
 
 | Shortcut name | URL path | JSON request body |
 | --- | --- | --- |
 | `Музыка` | `/shortcut/station` | `{"action":"play"}` |
 | `Пауза` | `/shortcut/station` | `{"action":"pause"}` |
 | `Включи чайник` | `/shortcut/kettle` | `{"action":"boil"}` |
+| `Останови чайник` | `/shortcut/kettle` | `{"action":"stop"}` |
 
 In each Shortcut, add **Get Contents of URL**, using your bot's public HTTPS
 address plus the path above (for example, `https://your-bot-domain.example/shortcut/kettle`).
@@ -233,7 +234,8 @@ Station still accepts only `play` and `pause`; `next`, `like`, presets and
 arbitrary commands are not public Shortcut actions. Its response reports dispatch,
 not a verified player state. The Coffee Shortcut contract above is unchanged.
 
-Kettle accepts exactly `{"action":"boil"}` with no extra fields. The server
+Kettle accepts exactly `{"action":"boil"}` or `{"action":"stop"}` with no
+extra fields or duplicate JSON keys. The server
 uses only `settings.kettle_entity`, configurable through `KETTLE_ENTITY` in the
 deployment environment. Leaving that variable unset preserves the existing
 default; an empty or invalid value fails closed. Only a `water_heater.*` entity
@@ -263,7 +265,39 @@ Confirmed boiling returns HTTP 200:
 {"ok":true,"action":"boil","status":"boiling","message":"Чайник включён"}
 ```
 
-HA failures return `ok:false` and `message:"Не удалось включить чайник"`.
+For **Останови чайник**, use the same route and token:
+
+```http
+POST https://<existing-domain>/shortcut/kettle
+Authorization: Bearer <SHORTCUTS_SECRET_TOKEN>
+Content-Type: application/json
+
+{"action":"stop"}
+```
+
+Stop validates the configured `water_heater.*` target and reads it fresh via
+HA REST. An initial `state="off"` and `operation_mode="off"` returns HTTP 200
+without mutation:
+
+```json
+{"ok":true,"action":"stop","status":"already_stopped","message":"Чайник уже выключен"}
+```
+
+Otherwise a valid timezone-aware pre-command HA `last_updated` is required.
+The server calls `water_heater.set_operation_mode` with fixed `operation_mode:
+off` once, then polls fresh REST every **250ms** within a **5-second** window.
+Confirmation requires `off/off` and a valid timezone-aware `last_updated`
+strictly newer than the pre-command HA watermark. Target temperature may remain,
+reset or be absent; it is not required. Stop uses only HA timestamp advancement,
+with no comparison to the bot's wall clock, and never retries an uncertain
+mutation. Confirmed stop returns HTTP 200:
+
+```json
+{"ok":true,"action":"stop","status":"stopped","message":"Чайник остановлен"}
+```
+
+HA failures return `ok:false` and `message:"Не удалось включить чайник"` for
+boil or `message:"Не удалось остановить чайник"` for stop.
 Bounded error codes are `home_assistant_unavailable`, `kettle_invalid_target`,
 `kettle_invalid_state` (503), `kettle_command_failed`, `kettle_dispatch_uncertain`
 (502), and `ha_verification_timeout` (504). Invalid JSON, unknown actions or extra
@@ -276,11 +310,10 @@ For example:
 
 Read `ok` before announcing success, and use **Get Dictionary Value** (`message`)
 followed by **Speak Text** or **Show Notification** for the server's result.
-Then Siri can execute “Музыка”, “Пауза” or “Включи чайник”.
+Then Siri can execute “Музыка”, “Пауза”, “Включи чайник” or “Останови чайник”.
 
-The public ingress must forward the exact `/shortcut/kettle` path to the bot,
-as it does for the existing Station and Espresso paths. If your deployment
-allow-lists those two paths, add the kettle path when you choose to deploy.
+The exact `/shortcut/kettle` route is already exposed through the existing
+public ingress. The stop Shortcut needs no new public route or Caddy change.
 Keep `/internal/*` private. This feature does not change tunnel or proxy topology.
 
 ### Reminders
