@@ -6,15 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import aiohttp
-
 from app.config import Settings
 from app.services.app_state import AppStateStore
 from app.services.coffee_timing_policy import CoffeeTimingPolicyService
+from app.services.pushward_http import PushWardHttpClient
 
 LOGGER = logging.getLogger(__name__)
-PUSHWARD_API_BASE_URL = "https://api.pushward.app"
-PUSHWARD_WIDGET_TIMEOUT_SECONDS = 5
 
 
 class PushWardCoffeeWidget:
@@ -30,7 +27,7 @@ class PushWardCoffeeWidget:
         self._slug = settings.pushward_coffee_widget_slug
         self._name = settings.pushward_coffee_widget_name
         self._error_log_path = Path(settings.pushward_error_log_path)
-        self._session: aiohttp.ClientSession | None = None
+        self._api = PushWardHttpClient(settings)
         self._task: asyncio.Task[None] | None = None
         self._one_shot_tasks: set[asyncio.Task[None]] = set()
         self._missing_key_logged = False
@@ -85,9 +82,7 @@ class PushWardCoffeeWidget:
         if self._one_shot_tasks:
             await asyncio.gather(*self._one_shot_tasks, return_exceptions=True)
         self._one_shot_tasks.clear()
-        if self._session and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        await self._api.close()
 
     def _create_one_shot_task(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -147,31 +142,11 @@ class PushWardCoffeeWidget:
         action: str,
         allow_not_found: bool = False,
     ) -> dict[str, Any] | str | None:
-        session = self._get_session()
         try:
-            async with session.request(method, f"{PUSHWARD_API_BASE_URL}{path}", json=payload) as response:
-                if allow_not_found and response.status == 404:
-                    return "not_found"
-                if response.status >= 400:
-                    body = await response.text()
-                    raise RuntimeError(f"PushWard API HTTP {response.status}: {body[:300]}")
-                if response.content_type == "application/json":
-                    return await response.json()
-                return None
+            return await self._api.request(method, path, payload, allow_not_found=allow_not_found)
         except Exception as exc:
             await self._log_error(action, exc)
             raise
-
-    def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                headers={
-                    "Authorization": f"Bearer {self._settings.pushward_integration_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=PUSHWARD_WIDGET_TIMEOUT_SECONDS),
-            )
-        return self._session
 
     def _is_available(self) -> bool:
         if not self._settings.pushward_coffee_widget_enabled:

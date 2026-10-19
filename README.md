@@ -94,9 +94,10 @@ The Station submenu is admin-only as well.
 - If the coffee machine turns off, active coffee alert timers are cancelled and no alert is sent.
 - Coffee machine status shows continuous running time while the switch is on; it shows a dash when the switch is off.
 - Optional PushWard Live Activity can mirror the coffee cycle on iPhone. Enable it with
-  `PUSHWARD_COFFEE_ACTIVITY_ENABLED=true` after installing and testing PushWard in Home Assistant.
+  `PUSHWARD_COFFEE_ACTIVITY_ENABLED=true` and a PushWard integration key. When `TELEGRAM_PROXY`
+  is set, the bot sends activity and widget requests through that proxy.
 - PushWard uses slug `ha-coffee-machine` by default, updates every 30 seconds while warming up,
-  stays visible after warm-up, and is ended with `pushward.end_activity` when the coffee machine turns off.
+  stays visible after warm-up, and is ended when the coffee machine turns off.
 - PushWard progress is always `0.0`-`1.0`. During warm-up the color changes by steps:
   blue `#0A84FF`, cyan `#00AEEF`, teal `#00C7A3`, lime `#A6D94A`, then green `#34C759`
   only when warm-up reaches 100%.
@@ -417,7 +418,7 @@ The application converts this value to:
 http://login:pass@host:port
 ```
 
-The proxy is used only for Telegram API requests through aiogram `AiohttpSession`. Home Assistant API requests do not use this proxy. The proxy value is not logged because it contains credentials.
+The proxy is used for Telegram API requests and PushWard activity/widget requests. Home Assistant API requests do not use it. The proxy value is not logged because it contains credentials.
 
 If `TELEGRAM_PROXY` is empty, the bot works without proxy.
 
@@ -480,7 +481,7 @@ TELEGRAM_ENABLE_TEST_1_MIN_REMINDER=false
 APP_STATE_PATH=/app/data/state.json
 REMINDERS_STATE_PATH=/app/data/reminders.json
 
-# HTTP proxy for Telegram API requests only.
+# Proxy for Telegram API and PushWard requests.
 TELEGRAM_PROXY=login:pass@host:port
 
 # Home Assistant
@@ -558,18 +559,17 @@ If both `HA_MOBILE_NOTIFY_SERVICES` and `HA_MOBILE_NOTIFY_SERVICE` are empty, HA
 and Telegram notifications keep working.
 
 `PUSHWARD_COFFEE_ACTIVITY_ENABLED` controls the optional PushWard Live Activity for the coffee machine.
-Default is `false`, so installations without PushWard keep working unchanged. To enable it, install the
-PushWard HACS integration in Home Assistant, test `pushward.create_activity`, `pushward.update_activity_generic`
-or `pushward.update_activity`, and `pushward.end_activity` in Developer Tools -> Actions, then set
-`PUSHWARD_COFFEE_ACTIVITY_ENABLED=true`. The activity uses `PUSHWARD_COFFEE_ACTIVITY_SLUG`
-(`ha-coffee-machine` by default). PushWard service errors are written to
-`PUSHWARD_ERROR_LOG_PATH` and are intentionally not shown to Telegram or iPhone users.
-For updates, the bot prefers `pushward.update_activity_generic` when Home Assistant advertises it;
-otherwise it falls back to deprecated `pushward.update_activity` with `template: generic`. The top-level
-PushWard activity `state` sent through Home Assistant is always lowercase: `ongoing`.
+Default is `false`, so installations without PushWard keep working unchanged. With
+`PUSHWARD_INTEGRATION_KEY` and `TELEGRAM_PROXY` set, the bot sends activity requests directly to
+PushWard through the existing proxy. Without those settings it uses the Home Assistant PushWard
+integration; this fallback prefers `pushward.update_activity_generic` and then the deprecated
+`pushward.update_activity` service. The activity uses `PUSHWARD_COFFEE_ACTIVITY_SLUG`
+(`ha-coffee-machine` by default). PushWard errors are written to `PUSHWARD_ERROR_LOG_PATH`
+and are intentionally not shown to Telegram or iPhone users. Transient connection errors
+back off and retry during the same coffee cycle.
 Coffee PushWard activities are created with `PUSHWARD_COFFEE_ENDED_TTL_SECONDS` (`3` by default).
 On coffee machine `off`, the bot first updates Live Activity to `Кофемашина выключена`, holds it for
-`PUSHWARD_COFFEE_OFF_HOLD_SECONDS` (`5` by default), then calls `pushward.end_activity`. A delayed
+`PUSHWARD_COFFEE_OFF_HOLD_SECONDS` (`5` by default), then ends the activity. A delayed
 `delete_activity` is only best-effort cleanup, not the main completion path.
 
 PushWard off cleanup timing can be tested without switching the real coffee machine:
@@ -580,7 +580,8 @@ python scripts/test_pushward_coffee_off_cleanup.py --hold-seconds 4 --ended-ttl 
 python scripts/test_pushward_coffee_off_cleanup.py --hold-seconds 5 --ended-ttl 2
 ```
 
-The script reads `HA_URL` and `HA_LONG_LIVED_TOKEN` from env, creates a test activity, shows
+This script exercises the Home Assistant fallback. It reads `HA_URL` and `HA_LONG_LIVED_TOKEN`
+from env, creates a test activity, shows
 `Кофемашина разогрета`, switches it to `Кофемашина выключена`, waits `hold_seconds`, then calls
 `end_activity`. Add `--cleanup` to send a best-effort `delete_activity` after the end.
 
@@ -598,6 +599,7 @@ PUSHWARD_COFFEE_WIDGET_UPDATE_INTERVAL_SECONDS=60
 ```
 
 The bot updates `PATCH https://api.pushward.app/widgets/{slug}` with template `stat_list`.
+It uses `TELEGRAM_PROXY` when configured.
 If PATCH returns `404`, the bot bootstraps the widget once with `POST /widgets` using the same
 content. The integration key is read only from env and is never logged.
 

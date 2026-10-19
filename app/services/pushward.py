@@ -9,6 +9,7 @@ from app.config import Settings
 from app.services.app_state import AppStateStore
 from app.services.coffee_timing_policy import CoffeeTimingPolicyService
 from app.services.home_assistant import HomeAssistantClient, HomeAssistantError
+from app.services.pushward_http import PushWardHttpClient, PushWardHttpError
 
 LOGGER = logging.getLogger(__name__)
 WARMUP_UPDATE_INTERVAL_SECONDS = 30
@@ -48,6 +49,7 @@ class PushWardCoffeeActivity:
     ) -> None:
         self._settings = settings
         self._ha = ha
+        self._api = PushWardHttpClient(settings) if settings.telegram_proxy_url and settings.pushward_integration_key else None
         self._app_state = app_state
         self._timing_policy = timing_policy
         self._slug = settings.pushward_coffee_activity_slug
@@ -82,7 +84,7 @@ class PushWardCoffeeActivity:
             LOGGER.info("PushWard coffee activity start skipped because current cycle is degraded: slug=%s", self._slug)
             return
         self._task = asyncio.create_task(self._run_updates())
-        LOGGER.info("PushWard loop started: slug=%s", self._slug)
+        LOGGER.info("PushWard loop started: slug=%s proxy=%s", self._slug, self._api is not None)
 
     async def stop(self) -> None:
         if not self.enabled:
@@ -124,6 +126,8 @@ class PushWardCoffeeActivity:
         self.cancel_updates()
         self._cancel_off_cleanup()
         self._cancel_delete_cleanup()
+        if self._api is not None:
+            await self._api.close()
 
     def _cancel_off_cleanup(self) -> None:
         if self._off_cleanup_task and not self._off_cleanup_task.done():
@@ -158,6 +162,8 @@ class PushWardCoffeeActivity:
                         continue
                     self._activity_active = True
                 sleep_seconds = await self._update_from_state()
+                if self._consecutive_failures >= PUSHWARD_MAX_CONSECUTIVE_FAILURES:
+                    sleep_seconds = max(sleep_seconds, PUSHWARD_DEGRADED_BACKOFF_SECONDS)
                 await asyncio.sleep(sleep_seconds)
         except asyncio.CancelledError:
             LOGGER.info("PushWard loop cancelled: slug=%s", self._slug)
@@ -305,14 +311,15 @@ class PushWardCoffeeActivity:
         )
 
     async def _end_activity(self) -> None:
-        await self._call(
+        ended = await self._call(
             "end_activity",
             {
                 "slug": self._slug,
                 "completion_message": "Кофемашина выключена",
             },
         )
-        LOGGER.info("PushWard coffee activity ended: slug=%s", self._slug)
+        if ended:
+            LOGGER.info("PushWard coffee activity ended: slug=%s", self._slug)
 
     async def _update_off(self) -> None:
         await self._call(
@@ -334,6 +341,8 @@ class PushWardCoffeeActivity:
         await self._call("delete_activity", {"slug": self._slug}, state="cleanup")
 
     async def _call(self, service: str, payload: dict[str, object], *, state: str | None = None) -> bool:
+        if self._api is not None:
+            return await self._call_via_api(service, payload, state=state)
         if service == "update_activity":
             payload = _normalize_update_activity_payload(payload)
             return await self._call_update_activity(payload, state=state)
@@ -346,6 +355,38 @@ class PushWardCoffeeActivity:
             )
         except Exception as exc:
             await self._log_error(service, exc, state=state, payload=payload)
+            self._record_failure(service, exc, state=state)
+            return False
+        self._consecutive_failures = 0
+        return True
+
+    async def _call_via_api(self, service: str, payload: dict[str, object], *, state: str | None = None) -> bool:
+        if self._api is None:
+            raise RuntimeError("PushWard proxy client is unavailable")
+        if service == "create_activity":
+            method, path, body = "POST", "/activities", payload
+        elif service == "update_activity":
+            content = {key: value for key, value in payload.items() if key not in {"slug", "state", "state_text"}}
+            content.update({"template": "generic", "state": payload["state_text"]})
+            method, path, body = "PATCH", f"/activities/{self._slug}", {
+                "state": str(payload["state"]).lower(), "content": content,
+            }
+        elif service == "end_activity":
+            method, path, body = "PATCH", f"/activities/{self._slug}", {
+                "state": "ended", "content": {"completion_message": payload["completion_message"]},
+            }
+        elif service == "delete_activity":
+            method, path, body = "DELETE", f"/activities/{self._slug}", None
+        else:
+            raise ValueError(f"Unsupported PushWard activity action: {service}")
+        try:
+            await self._api.request(method, path, body, allow_not_found=service == "delete_activity")
+        except PushWardHttpError as exc:
+            await self._log_error(service, exc, state=state, payload=payload)
+            if service == "update_activity" and exc.status == 404:
+                self._activity_active = False
+                self._consecutive_failures = 0
+                return False
             self._record_failure(service, exc, state=state)
             return False
         self._consecutive_failures = 0
@@ -434,9 +475,8 @@ class PushWardCoffeeActivity:
             )
             return
         if self._consecutive_failures >= PUSHWARD_MAX_CONSECUTIVE_FAILURES:
-            self._degraded = True
             LOGGER.warning(
-                "PushWard coffee activity disabled for current cycle after consecutive failures: action=%s slug=%s state=%s failures=%s",
+                "PushWard coffee activity backing off after consecutive failures: action=%s slug=%s state=%s failures=%s",
                 action,
                 self._slug,
                 state,
@@ -451,8 +491,8 @@ class PushWardCoffeeActivity:
         state: str | None = None,
         payload: dict[str, object] | None = None,
     ) -> None:
-        status = exc.status if isinstance(exc, HomeAssistantError) else None
-        body = exc.body if isinstance(exc, HomeAssistantError) else None
+        status = exc.status if isinstance(exc, (HomeAssistantError, PushWardHttpError)) else None
+        body = exc.body if isinstance(exc, (HomeAssistantError, PushWardHttpError)) else None
         safe_payload = _sanitize_payload(payload)
         LOGGER.warning(
             "PushWard coffee activity failed: service=pushward.%s slug=%s state=%s payload=%s response_status=%s response_body=%s error=%r",
@@ -591,5 +631,7 @@ def _duration_text(total_seconds: int, *, include_seconds: bool) -> str:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
+    if isinstance(exc, PushWardHttpError) and exc.status == 429:
+        return True
     message = repr(exc).lower()
     return "rate limit" in message or "rate limited" in message or "retrying in" in message
