@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feat/control-center-private-loopback]
+    branches: [main, feat/control-center-private-loopback]
   workflow_dispatch:
 
 permissions:
